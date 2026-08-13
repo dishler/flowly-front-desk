@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -86,17 +87,15 @@ class Settings(BaseSettings):
                 "GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON must be configured"
             )
 
-        if (
-            not self.front_desk_config_path.strip()
-            or self.front_desk_config_path == "app/data/front_desk_config.json"
-        ):
-            errors.append("FRONT_DESK_CONFIG_PATH must point to an explicit client config")
+        if not self.front_desk_config_path.strip():
+            errors.append("FRONT_DESK_CONFIG_PATH must be configured")
+        elif not Path(self.front_desk_config_path).is_file():
+            errors.append("FRONT_DESK_CONFIG_PATH must point to an existing file")
 
-        if (
-            not self.knowledge_base_path.strip()
-            or self.knowledge_base_path == "app/data/knowledge_base.json"
-        ):
-            errors.append("KNOWLEDGE_BASE_PATH must point to an explicit client knowledge base")
+        if not self.knowledge_base_path.strip():
+            errors.append("KNOWLEDGE_BASE_PATH must be configured")
+        elif not Path(self.knowledge_base_path).is_file():
+            errors.append("KNOWLEDGE_BASE_PATH must point to an existing file")
 
         if errors:
             raise RuntimeError(

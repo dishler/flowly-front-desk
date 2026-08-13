@@ -109,6 +109,12 @@ class MessageProcessor:
             "зідзвон",
             "зідзвонитися",
             "зідзвонитись",
+            "записатися",
+            "записатись",
+            "запис на",
+            "запис до",
+            "візит",
+            "прийом",
             "кол",
         ]
 
@@ -313,6 +319,79 @@ class MessageProcessor:
             "is this a bot",
         ]
         return any(marker in normalized for marker in markers)
+
+    def _configured_handoff_rules(self) -> set[str]:
+        config_service = getattr(self.reply_service, "front_desk_config_service", None)
+        if config_service is None:
+            return set()
+        handoff = config_service.get_handoff()
+        rules = handoff.get("rules", [])
+        if not isinstance(rules, list):
+            return set()
+        return {str(rule) for rule in rules}
+
+    def _detect_configured_handoff(self, text: str) -> tuple[str, str] | None:
+        rules = self._configured_handoff_rules()
+        if not rules:
+            return None
+
+        normalized = self._normalize_for_conversation_matching(text)
+
+        if "medical_emergency" in rules:
+            emergency_markers = [
+                "сильна кровотеча",
+                "кровотеч",
+                "не зупиняється кров",
+                "травма",
+                "набряк",
+                "важко дихати",
+                "не можу дихати",
+            ]
+            urgent_context = "терміново" in normalized and any(
+                marker in normalized for marker in ["кров", "травм", "набряк", "дихати"]
+            )
+            if urgent_context or any(marker in normalized for marker in emergency_markers):
+                return (
+                    "medical_emergency",
+                    "Це може бути невідкладна ситуація. Будь ласка, зверніться до екстреної медичної допомоги або найближчого чергового медичного закладу. У чаті не можу безпечно оцінити стан.",
+                )
+
+        if "diagnosis_request" in rules:
+            diagnosis_markers = [
+                "скажіть що це",
+                "що це може бути",
+                "поставте діагноз",
+                "який діагноз",
+                "діагноз",
+            ]
+            has_symptom = any(marker in normalized for marker in ["болить зуб", "біль у зубі", "болить ясн"])
+            asks_diagnosis = any(marker in normalized for marker in diagnosis_markers)
+            if asks_diagnosis or (has_symptom and "що це" in normalized):
+                return (
+                    "diagnosis_request",
+                    "Не можу поставити діагноз у чаті. Для цього потрібен огляд стоматолога; можу допомогти записати вас на консультацію або візит.",
+                )
+
+        if "complex_treatment_estimate" in rules:
+            complex_markers = [
+                "імплант",
+                "імплантац",
+                "протез",
+                "коронки",
+                "весь план лікування",
+                "кошторис",
+                "складне лікування",
+            ]
+            estimate_markers = ["скільки", "вартість", "ціна", "коштує", "порах"]
+            if any(marker in normalized for marker in complex_markers) and any(
+                marker in normalized for marker in estimate_markers
+            ):
+                return (
+                    "complex_treatment_estimate",
+                    "Точний кошторис для складного лікування лікар готує після огляду та діагностики. У чаті можу лише записати на консультацію або передати запит адміністратору.",
+                )
+
+        return None
 
     def _get_bot_identity_reply(self) -> str:
         return (
@@ -1979,6 +2058,17 @@ class MessageProcessor:
                 message=message,
                 reply_text=self.reply_service.get_safe_fallback_reply(language),
                 intent_value="general_question",
+                routing_category="safe_handoff",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
+        configured_handoff = self._detect_configured_handoff(message.user_message)
+        if configured_handoff:
+            reason, reply_text = configured_handoff
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=reply_text,
+                intent_value=reason,
                 routing_category="safe_handoff",
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )

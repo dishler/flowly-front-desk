@@ -17,8 +17,8 @@ def valid_production_settings(**overrides) -> Settings:
         "google_calendar_enabled": True,
         "google_calendar_id": "calendar@example.com",
         "google_service_account_json": "{}",
-        "front_desk_config_path": "client/front_desk_config.json",
-        "knowledge_base_path": "client/knowledge_base.json",
+        "front_desk_config_path": "app/data/front_desk_config.json",
+        "knowledge_base_path": "app/data/knowledge_base.json",
     }
 
     values.update(overrides)
@@ -64,15 +64,24 @@ def test_production_requires_calendar_configuration():
         settings.validate_production_settings()
 
 
-def test_production_requires_explicit_front_desk_config_path():
-    settings = valid_production_settings(front_desk_config_path="app/data/front_desk_config.json")
+def test_production_requires_existing_front_desk_config_path():
+    settings = valid_production_settings(front_desk_config_path="client/front_desk_config.json")
 
     with pytest.raises(RuntimeError, match="FRONT_DESK_CONFIG_PATH"):
         settings.validate_production_settings()
 
 
-def test_production_requires_explicit_knowledge_base_path():
-    settings = valid_production_settings(knowledge_base_path="app/data/knowledge_base.json")
+def test_production_requires_existing_knowledge_base_path():
+    settings = valid_production_settings(knowledge_base_path="client/knowledge_base.json")
 
     with pytest.raises(RuntimeError, match="KNOWLEDGE_BASE_PATH"):
         settings.validate_production_settings()
+
+
+def test_render_declares_demo_config_and_knowledge_paths():
+    render_yaml = open("render.yaml", encoding="utf-8").read()
+
+    assert "FRONT_DESK_CONFIG_PATH" in render_yaml
+    assert "app/data/front_desk_config.json" in render_yaml
+    assert "KNOWLEDGE_BASE_PATH" in render_yaml
+    assert "app/data/knowledge_base.json" in render_yaml

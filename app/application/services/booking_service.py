@@ -53,6 +53,15 @@ class BookingService:
         duration = self._booking_config().get("duration_minutes")
         return duration if isinstance(duration, int) and duration > 0 else 30
 
+    def _booking_description_prefix(self) -> str:
+        if self.front_desk_config_service is None:
+            return "Booked via Flowly Meta Bot"
+        business = self.front_desk_config_service.get_business()
+        business_name = str(business.get("name") or "").strip()
+        if business_name:
+            return f"Booked via {business_name} front desk"
+        return "Booked via front desk assistant"
+
     def _required_contact_fields(self) -> list[str]:
         fields = self._booking_config().get("required_contact_fields")
         if isinstance(fields, list) and fields:
@@ -159,7 +168,7 @@ class BookingService:
             "language": language,
             "duration_minutes": duration_minutes or self._booking_duration_minutes(),
             "summary": summary or f"{self._appointment_label().capitalize()} booking",
-            "description": description or "Booked via Flowly Meta Bot",
+            "description": description or self._booking_description_prefix(),
             "contact_email": contact_email,
             "contact_phone": contact_phone,
             "customer_name": customer_name,
@@ -1227,7 +1236,7 @@ class BookingService:
             phone=contact_details["phone"],
         ):
             try:
-                description_parts = ["Booked via Flowly Meta Bot"]
+                description_parts = [self._booking_description_prefix()]
                 if contact_details["customer_name"]:
                     description_parts.append(f"Customer name: {contact_details['customer_name']}")
                 description_parts.append(f"Sender ID: {sender_id}")

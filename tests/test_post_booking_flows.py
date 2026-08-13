@@ -235,7 +235,7 @@ def processor_factory():
         reply_service = ReplyService(
             ai_service=ai_service,
             memory_service=memory_service,
-            knowledge_service=KnowledgeService("app/data/knowledge_base.json"),
+            knowledge_service=KnowledgeService("tests/fixtures/flowly_knowledge_base.json"),
         )
         outbound_service = DummyOutboundService()
         processor = MessageProcessor(

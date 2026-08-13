@@ -75,11 +75,12 @@ def test_front_desk_config_rejects_knowledge_base_facts(tmp_path):
         FrontDeskConfigService(str(path))
 
 
-def test_default_front_desk_config_is_generic_and_non_flowly():
+def test_default_front_desk_config_is_dental_demo_and_non_flowly():
     service = FrontDeskConfigService()
     serialized = json.dumps(service.data, ensure_ascii=False).lower()
 
-    assert service.get_business()["name"] == "Front Desk"
+    assert service.get_business()["name"] == "Smile Dental Clinic"
+    assert service.get_booking()["appointment_label"] == "візит"
     assert "flowly" not in serialized
     assert "200" not in serialized
     assert "automation" not in serialized

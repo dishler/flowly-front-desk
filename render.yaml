@@ -1,16 +1,18 @@
 services:
   - type: web
-    name: flowly-meta-bot
+    name: flowly-front-desk
     runtime: python
     plan: free
     autoDeploy: true
+
     buildCommand: pip install -r requirements.txt
     startCommand: python -m app.main
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
 
-      - key: APP_ENV
+      - key: ENVIRONMENT
         value: production
 
       - key: LOG_LEVEL
@@ -19,17 +21,39 @@ services:
       - key: META_VERIFY_TOKEN
         sync: false
 
+      - key: META_APP_SECRET
+        sync: false
+
       - key: META_PAGE_ACCESS_TOKEN
         sync: false
 
       - key: META_SEND_ENABLED
         value: "true"
 
+      - key: OPENAI_ENABLED
+        value: "true"
+
       - key: OPENAI_API_KEY
         sync: false
 
       - key: REDIS_ENABLED
-        value: "false"
+        value: "true"
+
+      - key: REDIS_URL
+        sync: false
+
+      - key: FRONT_DESK_CONFIG_PATH
+        value: app/data/front_desk_config.json
+
+      - key: KNOWLEDGE_BASE_PATH
+        value: app/data/knowledge_base.json
 
       - key: GOOGLE_CALENDAR_ENABLED
-        value: "false"
+        value: "true"
+
+      - key: GOOGLE_CALENDAR_ID
+        sync: false
+
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+        

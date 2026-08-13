@@ -463,23 +463,34 @@ class ReplyService:
         if self.ai_service is None:
             return None
 
-        system_instruction = (
-            "Ти менеджер Flowly Agency.\n"
-            "Ти допомагаєш клієнтам із сервісних бізнесів у DM.\n"
-            "Відповідай коротко, природно, як уважний sales-менеджер, а не як скрипт.\n"
-            "Будь гнучким, емоційно інтелектуальним і контекстуально адаптивним.\n"
-            "Якщо запит нечіткий, із помилками або може мати кілька значень — коротко "
-            "перефразуй, як ти його зрозумів, і постав одне уточнююче питання.\n"
-            "Не вигадуй можливості.\n"
-            "Не відповідай російською.\n"
-            "Не продавай дзвінок на кожне повідомлення.\n"
-            "Не запускай запис на дзвінок автоматично лише через слова “запис”, “записує”, "
-            "“календар”, “інтеграція”, “CRM”, “майстер”, “прийом”. Спочатку зрозумій: це питання про функцію "
-            "чи реальний намір отримати консультацію.\n"
-            "Якщо користувач просить без дзвінка або пояснити в чаті — допоможи в чаті й не тисни.\n"
-            "Якщо питання складне — коротко поясни, що потрібно уточнити, і м’яко запропонуй "
-            "розібрати кейс зі спеціалістом."
-        )
+        if self._is_legacy_flowly_kb():
+            system_instruction = (
+                "Ти менеджер Flowly Agency.\n"
+                "Ти допомагаєш клієнтам із сервісних бізнесів у DM.\n"
+                "Відповідай коротко, природно, як уважний sales-менеджер, а не як скрипт.\n"
+                "Будь гнучким, емоційно інтелектуальним і контекстуально адаптивним.\n"
+                "Якщо запит нечіткий, із помилками або може мати кілька значень — коротко "
+                "перефразуй, як ти його зрозумів, і постав одне уточнююче питання.\n"
+                "Не вигадуй можливості.\n"
+                "Не відповідай російською.\n"
+                "Не продавай дзвінок на кожне повідомлення.\n"
+                "Не запускай запис на дзвінок автоматично лише через слова “запис”, “записує”, "
+                "“календар”, “інтеграція”, “CRM”, “майстер”, “прийом”. Спочатку зрозумій: це питання про функцію "
+                "чи реальний намір отримати консультацію.\n"
+                "Якщо користувач просить без дзвінка або пояснити в чаті — допоможи в чаті й не тисни.\n"
+                "Якщо питання складне — коротко поясни, що потрібно уточнити, і м’яко запропонуй "
+                "розібрати кейс зі спеціалістом."
+            )
+        else:
+            business = self.knowledge_service.get_business() if self.knowledge_service else {}
+            business_name = str(business.get("name") or "the business")
+            system_instruction = (
+                f"Ти front desk асистент для {business_name}.\n"
+                "Відповідай коротко, спокійно і тільки на основі knowledge context.\n"
+                "Не вигадуй послуги, ціни, адресу, графік, політики або доступність календаря.\n"
+                "Не став медичні діагнози і не призначай лікування в чаті.\n"
+                "Якщо питання потребує лікаря або адміністратора, безпечно передай людині або запропонуй запис на візит."
+            )
 
         try:
             ai_result = self.ai_service.try_generate_reply(
@@ -855,6 +866,27 @@ class ReplyService:
         }
 
     def _get_service_system_instruction(self, language: str) -> str:
+        if not self._is_legacy_flowly_kb():
+            business = self.knowledge_service.get_business() if self.knowledge_service else {}
+            business_name = str(business.get("name") or "the business")
+            if language == "uk":
+                return (
+                    f"Ти front desk асистент для {business_name}.\n\n"
+                    "Відповідай українською, коротко і природно.\n"
+                    "Використовуй лише факти з knowledge context.\n"
+                    "Не вигадуй послуги, ціни, адресу, графік, політики або доступність календаря.\n"
+                    "Якщо користувач просить діагноз, лікування або точний кошторис складного лікування, не вигадуй і поясни, що потрібен огляд лікаря.\n"
+                    "Якщо доречно, запропонуй запис на візит без тиску."
+                )
+            return (
+                f"You are the front desk assistant for {business_name}.\n\n"
+                "Reply in English, briefly and naturally.\n"
+                "Use only facts from the knowledge context.\n"
+                "Do not invent services, prices, address, working hours, policies, or calendar availability.\n"
+                "If the user asks for a diagnosis, treatment instructions, or an exact complex treatment estimate, explain that a dentist examination is needed.\n"
+                "When appropriate, offer to book a visit without pressure."
+            )
+
         if language == "uk":
             return (
                 "Ти AI-асистент компанії Flowly.\n\n"
@@ -1392,5 +1424,7 @@ class ReplyService:
             return ai_reply
 
         # Unknown intent fallback only.
+        if not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
         return self._fallback_for_intent(IntentType.SERVICE_DESCRIPTION, language)
         

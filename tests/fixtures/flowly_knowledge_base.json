@@ -1,0 +1,83 @@
+{
+  "company": {
+    "name": "Flowly",
+    "short_description": "Flowly налаштовує AI-ботів і систему автоматизації звернень у месенджерах, щоб бізнес міг відповідати клієнтам 24/7, не втрачати лідів і вести людей до запису.",
+    "tone": "Коротко, природно, без канцеляриту, без перебільшень, з м'яким CTA на консультацію.",
+    "languages": ["uk", "en"],
+    "channels_supported": ["Instagram", "Facebook", "WhatsApp", "Telegram"]
+  },
+  "services": [
+    {
+      "id": "ai_messaging_automation",
+      "name": "AI automation for client messages and booking",
+      "short_description": "Налаштування AI-ботів і системи автоматизації звернень у месенджерах для збору заявок, швидких відповідей і ведення клієнта до запису.",
+      "for_whom": [
+        "Салони краси та б'юті-студії",
+        "Клініки та стоматології",
+        "Спортивні зали",
+        "Автосервіси"
+      ],
+      "includes": [
+        "Аудит поточної воронки заявок",
+        "Налаштування автоматичних відповідей у месенджерах",
+        "AI-бот для первинної обробки звернень",
+        "Онлайн-запис на послуги",
+        "Нагадування про візит"
+      ],
+      "typical_result": [
+        "Швидші відповіді клієнтам 24/7",
+        "Менше втрачених звернень",
+        "Більше підтверджених записів"
+      ],
+      "setup_time_note": "Типовий запуск займає 7-10 днів."
+    }
+  ],
+  "pricing": {
+    "starting_from_usd": 200,
+    "pricing_note": "Вартість стартує від 200 USD, але точна ціна залежить від формату бізнесу, кількості послуг, каналів і складності налаштування.",
+    "what_affects_price": [
+      "Тип бізнесу",
+      "Кількість послуг або напрямів",
+      "Кількість каналів звернень",
+      "Складність сценаріїв автоматизації"
+    ]
+  },
+  "consultation": {
+    "duration_minutes": 30,
+    "goal": "Зрозуміти, де бізнес зараз втрачає заявки і як може виглядати впровадження.",
+    "cta_soft": "Можемо коротко глянути ваш кейс і підказати, як це може працювати саме у вас."
+  },
+  "faq": [
+    {
+      "question": "Що входить у сервіс?",
+      "answer_uk": "У сервіс входять аудит воронки заявок, налаштування автоматичних відповідей у месенджерах, AI-бот для обробки звернень, онлайн-запис, нагадування і подальша оптимізація після запуску.",
+      "answer_en": "The service includes an inquiry funnel audit, automated replies, an AI bot, online booking, reminders, and post-launch optimization."
+    },
+    {
+      "question": "Як це працює?",
+      "answer_uk": "Спочатку ми аналізуємо, де бізнес втрачає заявки. Потім налаштовуємо систему комунікації, AI-бота, запис і нагадування. Після запуску дивимось, як усе працює в реальних сценаріях, і підлаштовуємо систему під ваш бізнес.",
+      "answer_en": "First, we analyze where inquiries are lost. Then we set up communication, the AI bot, booking, and reminders. After launch, we optimize using real conversations."
+    },
+    {
+      "question": "Для кого це?",
+      "answer_uk": "Найчастіше Flowly підходить сервісним бізнесам: салонам краси, клінікам, стоматологіям, спортзалам, автосервісам та іншим компаніям, які регулярно отримують звернення в месенджерах.",
+      "answer_en": "Flowly is best suited for service businesses such as beauty salons, clinics, dental practices, gyms, car services, and other businesses that regularly receive customer inquiries."
+    },
+    {
+      "question": "Скільки це коштує?",
+      "answer_uk": "Вартість стартує від 200 USD, але точна ціна залежить від формату бізнесу, кількості послуг, каналів і складності налаштування.",
+      "answer_en": "Pricing starts from 200 USD, but the exact cost depends on business type, services, channels, and setup complexity."
+    },
+    {
+      "question": "Скільки триває запуск?",
+      "answer_uk": "Типовий запуск займає 7-10 днів, залежно від складності кейсу.",
+      "answer_en": "A typical setup takes 7-10 days depending on case complexity."
+    }
+  ],
+  "constraints": {
+    "do_not_guess": true,
+    "do_not_mix_languages": true,
+    "prefer_short_replies": true,
+    "prefer_one_paragraph": true
+  }
+}
