@@ -1,0 +1,34 @@
+{
+  "business": {
+    "name": "Front Desk"
+  },
+  "assistant": {
+    "supported_languages": ["uk", "en"],
+    "tone": "calm, concise, helpful front desk receptionist",
+    "default_language": "uk"
+  },
+  "booking": {
+    "enabled": true,
+    "appointment_label": "візит",
+    "duration_minutes": 30,
+    "required_contact_fields": ["name", "phone"]
+  },
+  "qualification": {
+    "enabled": false,
+    "questions": []
+  },
+  "safety": {
+    "do_not_claim": [
+      "facts not present in the knowledge base",
+      "guaranteed outcomes"
+    ],
+    "unknown_fallback": "Хочу правильно зорієнтувати. Уточніть, будь ласка, що саме вас цікавить?"
+  },
+  "handoff": {
+    "rules": [
+      "complex_request",
+      "unsupported_question"
+    ],
+    "reply": "Передам команді, щоб уточнили деталі."
+  }
+}

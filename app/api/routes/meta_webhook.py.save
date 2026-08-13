@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
+
+from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from app.application.dto.normalized_message import NormalizedMessage
+from app.core.config import settings
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _safe_str(value: Any) -> str:
+    return str(value).strip() if value else ""
+
+
+def _extract_text_from_message(message: dict[str, Any]) -> str:
+    text = message.get("text")
+    if isinstance(text, str):
+        return text.strip()
+
+    if isinstance(text, dict):
+        return _safe_str(text.get("body"))
+
+    return ""
+
+
+def _extract_audio_url(message: dict[str, Any]) -> str:
+    attachments = message.get("attachments") or []
+    for att in attachments:
+        if att.get("type") == "audio":
+            payload = att.get("payload") or {}
+            url = payload.get("url")
+            if url:
+                return str(url)
+    return ""
+
+
+def _is_echo_or_self_message(event: dict[str, Any]) -> bool:
+    message = event.get("message") or {}
+
+    if message.get("is_echo") is True:
+        return True
+
+    sender_id = _safe_str(event.get("sender", {}).get("id"))
+    recipient_id = _safe_str(event.get("recipient", {}).get("id"))
+
+    return sender_id and recipient_id and sender_id == recipient_id
+
+
+def _parse_meta_payload(payload: dict[str, Any]) -> Optional[NormalizedMessage]:
+    for entry in payload.get("entry", []):
+        for event in entry.get("messaging", []):
+            if _is_echo_or_self_message(event):
+                continue
+
+            message = event.get("message") or {}
+
+            text = _extract_text_from_message(message)
+            audio_url = _extract_audio_url(message)
+
+            sender_id = event.get("sender", {}).get("id")
+            recipient_id = event.get("recipient", {}).get("id")
+            timestamp = event.get("timestamp")
+            mid = message.get("mid")
+
+            if not sender_id or not recipient_id or not mid:
+                continue
+
+            if not text and not audio_url:
+                continue
+
+            return NormalizedMessage(
+                platform="meta",
+                sender_id=str(sender_id),
+                recipient_id=str(recipient_id),
+                message_mid=str(mid),
+                user_message=str(text or ""),
+                audio_url=str(audio_url or ""),
+                timestamp=timestamp,
+            )
+
+    return None
+
+
+@router.get("/meta", response_class=PlainTextResponse)
+async def verify_meta_webhook(request: Request) -> PlainTextResponse:
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge", "")
+
+    if mode == "subscribe" and token == settings.meta_verify_token:
+        return PlainTextResponse(content=challenge, status_code=200)
+
+    return PlainTextResponse(content="Verification failed", status_code=403)
+
+
+@router.post("/meta")
+async def receive_meta_webhook(request: Request) -> Response:
+    payload = await request.json()
+
+    message = _parse_meta_payload(payload)
+
+    if message is None:
+        return JSONResponse(status_code=200, content={"status": "ignored"})
+
+    message_processor = request.app.state.message_processor
+
+    try:
+        result = await message_processor.process(message)
+    except Exception:
+        logger.exception("Message processor failed")
+        return JSONResponse(status_code=500, content={"status": "error"})
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "processed",
+            "reply": result.get("reply_text"),
+        },
+    )
+    

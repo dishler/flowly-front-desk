@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: flowly-meta-bot
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.main
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
+      - key: APP_ENV
+        value: production
+
+      - key: LOG_LEVEL
+        value: info
+
+      - key: META_VERIFY_TOKEN
+        sync: false
+
+      - key: META_PAGE_ACCESS_TOKEN
+        sync: false
+
+      - key: META_SEND_ENABLED
+        value: "true"
+
+      - key: OPENAI_API_KEY
+        sync: false
+
+      - key: REDIS_ENABLED
+        value: "false"
+
+      - key: GOOGLE_CALENDAR_ENABLED
+        value: "false"

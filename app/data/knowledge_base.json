@@ -1,0 +1,178 @@
+{
+  "company": {
+    "name": "Flowly",
+    "short_description": "Flowly налаштовує AI-ботів і систему автоматизації звернень у месенджерах, щоб бізнес міг відповідати клієнтам 24/7, не втрачати лідів і вести людей до запису.",
+    "tone": "Коротко, природно, без канцеляриту, без перебільшень, з м’яким CTA на консультацію.",
+    "languages": ["uk", "en"],
+    "channels_supported": ["Instagram", "Facebook", "WhatsApp", "Telegram"]
+  },
+  "services": [
+    {
+      "id": "ai_messaging_automation",
+      "name": "AI automation for client messages and booking",
+      "short_description": "Налаштування AI-ботів і системи автоматизації звернень у месенджерах для збору заявок, швидких відповідей і ведення клієнта до запису.",
+      "for_whom": [
+        "Салони краси та б’юті-студії",
+        "Клініки та стоматології",
+        "Спортивні зали",
+        "Автосервіси",
+        "Інші сервісні бізнеси, які регулярно отримують звернення в месенджери"
+      ],
+      "solves": [
+        "Повільні відповіді клієнтам",
+        "Пропущені або загублені звернення",
+        "Заявки в різних месенджерах без єдиної системи",
+        "Ручний запис і постійні уточнення",
+        "Відсутність нагадувань про візит",
+        "Низька частка підтверджених записів",
+        "Відсутність системи повторних візитів",
+        "Перевантаження адміністратора однотипними запитами"
+      ],
+      "includes": [
+        "Аудит поточної воронки заявок",
+        "Аналіз джерел звернень і точок втрати клієнтів",
+        "Налаштування автоматичних відповідей у месенджерах",
+        "AI-бот для первинної обробки звернень",
+        "Збір і організація заявок",
+        "Онлайн-запис на послуги",
+        "Нагадування про візит",
+        "Єдине місце для всіх заявок",
+        "Запуск, супровід і подальша оптимізація під реальні сценарії бізнесу"
+      ],
+      "does_not_include": [
+        "Роботу з телефонними дзвінками як окремий канал автоматизації",
+        "Гарантований результат у конкретних цифрах без аналізу кейсу",
+        "Фіксовану ціну для всіх без уточнення задачі"
+      ],
+      "typical_result": [
+        "Швидші відповіді клієнтам 24/7",
+        "Менше втрачених звернень",
+        "Більше підтверджених записів",
+        "Більше повторних візитів",
+        "Менше ручної роботи для команди",
+        "Більш стабільний процес запису"
+      ],
+      "how_it_works_summary": [
+        "Спочатку аналізуємо, звідки приходять заявки і де бізнес втрачає клієнтів",
+        "Потім налаштовуємо систему комунікації, автоматичні відповіді, запис і нагадування",
+        "Після запуску дивимось, як система працює на практиці, і оптимізуємо її під реальні сценарії"
+      ],
+      "setup_time_note": "Типовий запуск займає 7-10 днів."
+    }
+  ],
+  "pricing": {
+    "starting_from_usd": 200,
+    "pricing_note": "Базова ціна стартує від 200 USD, але точна вартість залежить від формату бізнесу, кількості послуг, каналів звернень і складності налаштування.",
+    "what_affects_price": [
+      "Тип бізнесу",
+      "Кількість послуг або напрямів",
+      "Кількість каналів звернень",
+      "Складність сценаріїв автоматизації",
+      "Потреба в записі, нагадуваннях і подальшій оптимізації"
+    ],
+    "how_to_answer_price_questions": "Якщо питають про ціну, відповідай, що вартість стартує від 200 USD, але точна сума залежить від конкретного кейсу. Не подавай 200 USD як фіксовану ціну для всіх."
+  },
+  "consultation": {
+    "duration_minutes": 30,
+    "goal": "Зрозуміти, де бізнес зараз втрачає заявки, чи підходить Flowly під конкретний кейс і як може виглядати впровадження.",
+    "cta_soft": "Можемо коротко глянути ваш кейс і підказати, як це може працювати саме у вас."
+  },
+  "business_directions": {
+    "summary": "Flowly працює з сервісними бізнесами, де є вхідні звернення, консультації, записи або заявки.",
+    "industries": [
+      "стоматологічні клініки",
+      "медичні клініки",
+      "СТО / автосервіси",
+      "салони краси",
+      "барбершопи",
+      "косметології",
+      "освітні курси / школи",
+      "юридичні / консультаційні послуги",
+      "фітнес / спорт студії",
+      "локальні сервіси",
+      "агентства",
+      "B2B services"
+    ],
+    "answer_uk": "Найкраще бот підходить для сервісних бізнесів, де є багато вхідних повідомлень, записів або заявок.\n\nНаприклад:\n— стоматології та клініки\n— СТО / автосервіси\n— салони краси, барбершопи, косметології\n— освітні курси та школи\n— фітнес / спорт студії\n— консультаційні та локальні сервіси\n\nЯкщо коротко: там, де клієнти часто пишуть у месенджери і потрібно швидко відповідати, кваліфікувати заявку або доводити до запису."
+  },
+  "use_cases": {
+    "auto_service": "Для СТО бот може приймати заявки, уточнювати проблему з авто, збирати контакт, бажаний час і передавати заявку адміністратору.",
+    "dentistry": "Для стоматології бот може відповідати на питання про послуги, графік, орієнтовні ціни і допомагати записати пацієнта на консультацію.",
+    "beauty_salon": "Для салону бот може відповідати на типові питання, допомагати обрати послугу і вести клієнта до запису.",
+    "education": "Для освітнього проєкту бот може відповідати на питання про курс, кваліфікувати заявку і передавати теплого ліда менеджеру."
+  },
+  "faq": [
+    {
+      "question": "Що входить у сервіс?",
+      "answer_uk": "У сервіс входять аудит воронки заявок, налаштування автоматичних відповідей у месенджерах, AI-бот для обробки звернень, онлайн-запис, нагадування, єдине місце для всіх заявок і подальша оптимізація після запуску.",
+      "answer_en": "The service includes an audit of your inquiry funnel, automated replies in messengers, an AI bot for handling incoming requests, online booking, reminders, one place for all inquiries, and post-launch optimization."
+    },
+    {
+      "question": "Як це працює?",
+      "answer_uk": "Спочатку ми аналізуємо, де бізнес втрачає заявки. Потім налаштовуємо систему комунікації, AI-бота, запис і нагадування. Після запуску дивимось, як усе працює в реальних сценаріях, і підлаштовуємо систему під ваш бізнес.",
+      "answer_en": "First, we analyze where your business is losing inquiries. Then we set up the communication flow, AI bot, booking, and reminders. After launch, we review real-life performance and optimize the system for your business."
+    },
+    {
+      "question": "Для кого це?",
+      "answer_uk": "Найчастіше Flowly підходить сервісним бізнесам: салонам краси, клінікам, стоматологіям, спортзалам, автосервісам та іншим компаніям, які регулярно отримують звернення в месенджерах.",
+      "answer_en": "Flowly is best suited for service businesses such as beauty salons, clinics, dental practices, gyms, car services, and other businesses that regularly receive customer inquiries in messengers."
+    },
+    {
+      "question": "З якими напрямками працюєте?",
+      "answer_uk": "Найкраще бот підходить для сервісних бізнесів, де є багато вхідних повідомлень, записів або заявок.\n\nНаприклад:\n— стоматології та клініки\n— СТО / автосервіси\n— салони краси, барбершопи, косметології\n— освітні курси та школи\n— фітнес / спорт студії\n— консультаційні та локальні сервіси\n\nЯкщо коротко: там, де клієнти часто пишуть у месенджери і потрібно швидко відповідати, кваліфікувати заявку або доводити до запису.",
+      "answer_en": "Flowly works best for service businesses with many inbound messages, bookings, or leads: clinics, dental practices, car services, beauty salons, education projects, fitness studios, consulting and local services."
+    },
+    {
+      "question": "З якими каналами ви працюєте?",
+      "answer_uk": "Зараз ми фокусуємось на автоматизації звернень у Instagram, Facebook, WhatsApp і Telegram.",
+      "answer_en": "Right now, we focus on automating inbound communication through Instagram, Facebook, WhatsApp, and Telegram."
+    },
+    {
+      "question": "Ви працюєте з дзвінками?",
+      "answer_uk": "Зараз основний фокус Flowly — автоматизація звернень у месенджерах. Телефонні дзвінки не є окремим каналом автоматизації в поточному сервісі.",
+      "answer_en": "Flowly currently focuses on automating customer communication in messengers. Phone calls are not a separate automation channel in the current service."
+    },
+    {
+      "question": "Скільки це коштує?",
+      "answer_uk": "Вартість стартує від 200 USD, але точна ціна залежить від формату бізнесу, кількості послуг, каналів і складності налаштування.",
+      "answer_en": "Pricing starts from 200 USD, but the exact cost depends on your business type, services, channels, and setup complexity."
+    },
+    {
+      "question": "Скільки триває запуск?",
+      "answer_uk": "Типовий запуск займає 7-10 днів, залежно від складності кейсу.",
+      "answer_en": "A typical setup takes 7–10 days depending on the complexity of the case."
+    },
+    {
+      "question": "Що це дає бізнесу?",
+      "answer_uk": "Flowly допомагає швидше відповідати клієнтам, не втрачати звернення, збільшувати кількість підтверджених записів, повертати більше клієнтів на повторні візити й зменшувати ручне навантаження на команду.",
+      "answer_en": "Flowly helps businesses respond faster, lose fewer inquiries, increase confirmed bookings, bring more customers back for repeat visits, and reduce manual workload for the team."
+    }
+  ],
+  "objections": [
+    {
+      "key": "too_expensive",
+      "answer_uk": "Розумію. Саме тому ми починаємо з короткого розбору кейсу: часто головна цінність тут не просто в автоматизації, а в тому, що бізнес перестає втрачати частину звернень і записів.",
+      "answer_en": "I understand. That is why we usually start with a short case review: the value is not just automation itself, but helping the business stop losing inquiries and bookings."
+    },
+    {
+      "key": "not_sure_it_fits",
+      "answer_uk": "Це нормально. Найпростіше — коротко подивитися, як у вас зараз приходять звернення і де є перевантаження або втрати. Тоді стане зрозуміло, чи дасть це реальний ефект саме у вашому випадку.",
+      "answer_en": "That is completely fair. The easiest next step is to briefly review how your inquiries currently come in and where the overload or losses happen. Then it becomes clear whether this will create real value in your case."
+    },
+    {
+      "key": "we_reply_manually_now",
+      "answer_uk": "Багато бізнесів стартують саме так. Проблема з’являється, коли звернень стає більше: відповіді сповільнюються, частина повідомлень губиться, а запис займає занадто багато ручної роботи. Тут Flowly і дає найбільший ефект.",
+      "answer_en": "Many businesses start that way. The problem appears when inquiry volume grows: replies slow down, some messages get lost, and booking takes too much manual effort. That is exactly where Flowly becomes most useful."
+    }
+  ],
+  "constraints": {
+    "do_not_guess": true,
+    "do_not_mix_languages": true,
+    "do_not_claim_phone_call_automation": true,
+    "do_not_invent_channels": true,
+    "allowed_channels": ["Instagram", "Facebook", "WhatsApp", "Telegram"],
+    "prefer_short_replies": true,
+    "prefer_one_paragraph": true,
+    "soft_cta_required_when_relevant": true
+  }
+}
