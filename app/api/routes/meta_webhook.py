@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi.encoders import jsonable_encoder
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.application.dto.normalized_message import NormalizedMessage
 from app.core.config import get_settings
@@ -272,7 +272,7 @@ async def verify_meta_webhook(
     verify_token = settings.meta_verify_token.strip()
 
     if hub_mode == "subscribe" and hub_verify_token == verify_token and hub_challenge:
-        return hub_challenge
+        return Response(content=hub_challenge, media_type="text/plain")
 
     raise HTTPException(status_code=403, detail="Webhook verification failed")
 
