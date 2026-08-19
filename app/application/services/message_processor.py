@@ -1859,8 +1859,9 @@ class MessageProcessor:
             else:
                 self._release_message_processing(message_mid)
                 logger.warning(
-                    "outbound reply failed before dedup finalization message_mid=%s",
+                    "outbound reply failed before dedup finalization message_mid=%s outbound_result=%s",
                     message_mid,
+                    result.get("outbound_result"),
                 )
                 raise RuntimeError("Outbound reply failed before dedup finalization")
 
