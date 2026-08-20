@@ -45,7 +45,10 @@ class MetaClient:
                 "text": text,
             }
 
-        url = f"https://graph.facebook.com/{self.settings.meta_graph_api_version}/me/messages"
+        if platform == "instagram":
+            url = "https://graph.instagram.com/v25.0/me/messages"
+        else:
+            url = f"https://graph.facebook.com/{self.settings.meta_graph_api_version}/me/messages"
 
         payload = {
             "recipient": {"id": recipient_id},
@@ -53,13 +56,13 @@ class MetaClient:
             "messaging_type": "RESPONSE",
         }
 
-        params = {
-            "access_token": self.settings.meta_page_access_token,
+        headers = {
+            "Authorization": f"Bearer {self.settings.meta_page_access_token}",
         }
 
         try:
             with httpx.Client(timeout=20.0) as client:
-                response = client.post(url, params=params, json=payload)
+                response = client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
 
