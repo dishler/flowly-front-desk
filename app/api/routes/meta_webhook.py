@@ -226,7 +226,12 @@ def _extract_message_mid(payload: dict[str, Any]) -> str:
 
 
 def _extract_platform(payload: dict[str, Any]) -> str:
-    if _safe_get(payload, "entry", 0, "messaging", 0) is not None:
+    object_type = str(payload.get("object") or "").strip().lower()
+
+    if object_type == "instagram":
+        return "instagram"
+
+    if object_type == "page":
         return "facebook"
 
     if _safe_get(payload, "entry", 0, "changes", 0, "value", "messages", 0) is not None:
