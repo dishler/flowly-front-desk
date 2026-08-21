@@ -95,6 +95,15 @@ class FailingProcessor:
         raise RuntimeError("processor failed")
 
 
+class RecordingProcessor:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def process(self, message: NormalizedMessage) -> dict:
+        self.calls.append(message)
+        return {"sent": True}
+
+
 def _message(message_mid: str = "mid-1", text: str = "привіт", audio_url: str | None = None):
     return NormalizedMessage(
         platform="instagram",
@@ -290,3 +299,83 @@ def test_webhook_processing_exception_returns_500_for_provider_retry(monkeypatch
 
     assert response.status_code == 500
     assert response.json()["detail"] == "message_processing_failed"
+
+
+def test_instagram_inbound_message_processes_with_sender_as_customer(monkeypatch):
+    monkeypatch.setattr(meta_webhook.settings, "environment", "dev")
+    monkeypatch.setattr(meta_webhook.settings, "meta_app_secret", "")
+
+    processor = RecordingProcessor()
+    app = FastAPI()
+    app.state.message_processor = processor
+    app.include_router(meta_webhook.router, prefix="/webhooks")
+    client = TestClient(app)
+
+    response = client.post(
+        "/webhooks/meta",
+        json={
+            "object": "instagram",
+            "entry": [
+                {
+                    "messaging": [
+                        {
+                            "sender": {"id": "customer-ig-user"},
+                            "recipient": {"id": "business-ig-account"},
+                            "message": {
+                                "mid": "mid-ig-1",
+                                "text": "Привіт",
+                            },
+                        }
+                    ]
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["normalized_message"]["platform"] == "instagram"
+    assert body["normalized_message"]["sender_id"] == "customer-ig-user"
+    assert len(processor.calls) == 1
+    assert processor.calls[0].sender_id == "customer-ig-user"
+
+
+def test_instagram_echo_message_is_ignored_before_processing(monkeypatch):
+    monkeypatch.setattr(meta_webhook.settings, "environment", "dev")
+    monkeypatch.setattr(meta_webhook.settings, "meta_app_secret", "")
+
+    processor = RecordingProcessor()
+    app = FastAPI()
+    app.state.message_processor = processor
+    app.include_router(meta_webhook.router, prefix="/webhooks")
+    client = TestClient(app)
+
+    response = client.post(
+        "/webhooks/meta",
+        json={
+            "object": "instagram",
+            "entry": [
+                {
+                    "messaging": [
+                        {
+                            "sender": {"id": "business-ig-account"},
+                            "recipient": {"id": "customer-ig-user"},
+                            "message": {
+                                "mid": "mid-ig-echo-1",
+                                "text": "Вітаю! Чим можемо допомогти?",
+                                "is_echo": True,
+                            },
+                        }
+                    ]
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ignored",
+        "reason": "echo_or_self_message",
+    }
+    assert processor.calls == []

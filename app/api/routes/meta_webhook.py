@@ -225,6 +225,26 @@ def _extract_message_mid(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _is_echo_or_self_message(event: dict[str, Any]) -> bool:
+    message = event.get("message") or {}
+
+    if message.get("is_echo") is True:
+        return True
+
+    sender_id = str((event.get("sender") or {}).get("id") or "").strip()
+    recipient_id = str((event.get("recipient") or {}).get("id") or "").strip()
+
+    return bool(sender_id and recipient_id and sender_id == recipient_id)
+
+
+def _should_ignore_echo_or_self_message(payload: dict[str, Any]) -> bool:
+    if str(payload.get("object") or "").strip().lower() != "instagram":
+        return False
+
+    event = _safe_get(payload, "entry", 0, "messaging", 0)
+    return isinstance(event, dict) and _is_echo_or_self_message(event)
+
+
 def _extract_platform(payload: dict[str, Any]) -> str:
     object_type = str(payload.get("object") or "").strip().lower()
 
@@ -319,6 +339,12 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
     message_processor = getattr(request.app.state, "message_processor", None)
     if message_processor is None:
         raise HTTPException(status_code=500, detail="message_processor is not configured")
+
+    if _should_ignore_echo_or_self_message(payload):
+        return {
+            "status": "ignored",
+            "reason": "echo_or_self_message",
+        }
 
     try:
         message = _build_normalized_message(payload)
