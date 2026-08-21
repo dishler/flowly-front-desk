@@ -1,5 +1,5 @@
 import json
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import redis
 
@@ -34,6 +34,39 @@ class RedisMemoryService:
         except json.JSONDecodeError:
             return []
 
+    def get_context(self, sender_id: str) -> Dict[str, Any]:
+        if self.redis_client is None:
+            return {}
+
+        raw = self.redis_client.get(self._build_context_key(sender_id))
+        if not raw:
+            return {}
+
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return dict(data)
+            return {}
+        except json.JSONDecodeError:
+            return {}
+
+    def update_context(self, sender_id: str, **values: Any) -> None:
+        if self.redis_client is None:
+            return
+
+        context = self.get_context(sender_id)
+        for key, value in values.items():
+            if value is None:
+                context.pop(key, None)
+            else:
+                context[key] = value
+
+        self.redis_client.set(
+            self._build_context_key(sender_id),
+            json.dumps(context, ensure_ascii=False),
+            ex=self.settings.redis_memory_ttl_seconds,
+        )
+
     def _append(self, sender_id: str, value: str, max_items: int = 10) -> None:
         if self.redis_client is None:
             return
@@ -52,4 +85,8 @@ class RedisMemoryService:
     @staticmethod
     def _build_key(sender_id: str) -> str:
         return f"meta_bot:memory:{sender_id}"
+
+    @staticmethod
+    def _build_context_key(sender_id: str) -> str:
+        return f"meta_bot:memory_context:{sender_id}"
         
