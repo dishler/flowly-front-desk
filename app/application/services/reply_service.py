@@ -151,6 +151,9 @@ class ReplyService:
         return self._get_unknown_fallback_reply(language)
 
     def get_contextual_fallback_reply(self, user_text: str, history: List[str], language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
+
         _ = user_text
         assistant_history = [
             item.removeprefix("assistant:").strip().lower()
@@ -186,6 +189,12 @@ class ReplyService:
 
     def detect_user_language(self, text: str) -> str:
         return self._detect_language(text)
+
+    def get_grounded_front_desk_reply(self, user_text: str, language: Optional[str] = None) -> Optional[str]:
+        if self.front_desk_config_service is None or self._is_legacy_flowly_kb():
+            return None
+        resolved_language = language or self._detect_language(user_text)
+        return self._get_business_fact_reply(self._normalize(user_text), resolved_language)
 
     def evaluate_escalation(self, user_text: str, history: List[str]) -> Tuple[bool, str]:
         """
@@ -387,7 +396,7 @@ class ReplyService:
 
         compact = re.sub(r"[?!.,…]+", " ", normalized)
         compact = " ".join(compact.split())
-        compact = re.sub(r"^(а|а\\s+по|по|і|и)\\s+", "", compact).strip()
+        compact = re.sub(r"^(а\s+по|а|по|і|и)\s+", "", compact).strip()
         if not compact or len(compact.split()) > 4:
             return None
 

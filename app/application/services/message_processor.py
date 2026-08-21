@@ -1918,6 +1918,19 @@ class MessageProcessor:
             if self._looks_like_capability_question(message.user_message):
                 return self._build_capability_question_result(message)
 
+            grounded_reply = self.reply_service.get_grounded_front_desk_reply(
+                message.user_message,
+                self.reply_service.detect_user_language(message.user_message),
+            )
+            if grounded_reply:
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=grounded_reply,
+                    intent_value="booking_grounded_question",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
             if (
                 booking_state == BookingState.WAITING_FOR_TIME
                 and self._looks_like_product_question_during_booking(message.user_message)

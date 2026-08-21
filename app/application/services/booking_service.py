@@ -394,7 +394,9 @@ class BookingService:
             "Залиште, будь ласка, ваше ім’я та номер телефону або email."
         )
 
-    def _build_another_time_reply(self, language: str) -> str:
+    def _build_another_time_reply(self, language: str, day_label: str | None = None) -> str:
+        if day_label:
+            return f"Добре, підберемо інший час. На котру іншу годину у {day_label} вам було б зручно?"
         return (
             f"Добре, підберемо інший час для {self._appointment_label()}. "
             "Підкажіть, будь ласка, який день і час вам зручний?"
@@ -1116,6 +1118,36 @@ class BookingService:
         }
         return labels.get(value, value)
 
+    def _format_date_label_for_reply(self, value: date | None, language: str) -> str | None:
+        if value is None:
+            return None
+        today = datetime.now(self.timezone).date()
+        if value == today:
+            return "сьогодні" if language == "uk" else "today"
+        if value == today + timedelta(days=1):
+            return "завтра" if language == "uk" else "tomorrow"
+        if value == today + timedelta(days=2):
+            return "післязавтра" if language == "uk" else "day after tomorrow"
+        labels_uk = {
+            0: "понеділок",
+            1: "вівторок",
+            2: "середу",
+            3: "четвер",
+            4: "п’ятницю",
+            5: "суботу",
+            6: "неділю",
+        }
+        labels_en = {
+            0: "Monday",
+            1: "Tuesday",
+            2: "Wednesday",
+            3: "Thursday",
+            4: "Friday",
+            5: "Saturday",
+            6: "Sunday",
+        }
+        return (labels_uk if language == "uk" else labels_en).get(value.weekday())
+
     def _extract_requested_date(self, text: str) -> dict[str, Any] | None:
         now = datetime.now(self.timezone)
         normalized = text.strip().lower()
@@ -1781,19 +1813,38 @@ class BookingService:
                 }
 
             if pending.get("availability_context") and self._looks_like_another_time_request(message_text):
+                requested_date = None
+                requested_day_label = pending.get("requested_day_label")
+                try:
+                    accepted_start_dt = self._deserialize_pending_start_dt(pending.get("start_dt"))
+                    requested_date = accepted_start_dt.date()
+                    requested_day_label = requested_day_label or self._format_date_label_for_reply(
+                        requested_date,
+                        language,
+                    )
+                except Exception:
+                    logger.warning(
+                        "suggested slot date preservation failed sender_id=%s raw_start_dt=%r",
+                        sender_id,
+                        pending.get("start_dt"),
+                    )
+
                 self._save_booking_state(
                     sender_id,
                     state=BookingState.WAITING_FOR_TIME,
                     language=language,
                     source_channel=source_channel or pending.get("source_channel"),
                     context_summary=pending.get("context_summary"),
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
                 )
                 return {
                     "status": "waiting_for_time",
-                    "reply_text": self._build_another_time_reply(language),
+                    "reply_text": self._build_another_time_reply(language, requested_day_label),
                     "event_created": False,
                     "requires_confirmation": False,
                     "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": requested_date.isoformat() if requested_date else None,
                 }
 
             contact_details = self._extract_contact_details(message_text)
