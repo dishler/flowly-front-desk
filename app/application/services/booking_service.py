@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
@@ -160,6 +160,8 @@ class BookingService:
         customer_name: str | None = None,
         source_channel: str | None = None,
         context_summary: str | None = None,
+        requested_date: date | str | None = None,
+        requested_day_label: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "is_active": True,
@@ -177,6 +179,12 @@ class BookingService:
         }
         if start_dt is not None:
             payload["start_dt"] = self._serialize_pending_start_dt(start_dt)
+        if requested_date is not None:
+            payload["requested_date"] = (
+                requested_date.isoformat() if isinstance(requested_date, date) else requested_date
+            )
+        if requested_day_label:
+            payload["requested_day_label"] = requested_day_label
         logger.info(
             "Saving booking state sender_id=%s state=%s has_start_dt=%s has_email=%s has_phone=%s",
             sender_id,
@@ -254,6 +262,14 @@ class BookingService:
             f"Супер, тоді можемо підібрати {self._appointment_label()}. "
             "Напишіть, будь ласка, який день і приблизний час вам зручний?"
         )
+
+    def _build_missing_time_reply(self, language: str, day_label: str | None = None) -> str:
+        label = day_label or "цей день"
+        if label in {"today", "tomorrow"}:
+            label = "сьогодні" if label == "today" else "завтра"
+        if label == "day after tomorrow":
+            label = "післязавтра"
+        return f"Добре, на {label}. Підкажіть, будь ласка, на котру годину вам зручно?"
 
     def _build_unavailable_reply(self, language: str) -> str:
         slots = self.calendar_service.get_available_slots(language)
@@ -1038,6 +1054,250 @@ class BookingService:
 
         raise ValueError(f"Unsupported pending start_dt type: {type(value)!r}")
 
+    def _weekday_map(self) -> dict[str, int]:
+        return {
+            "monday": 0,
+            "понеділок": 0,
+            "понеділка": 0,
+            "вівторок": 1,
+            "вівторка": 1,
+            "tuesday": 1,
+            "середа": 2,
+            "середу": 2,
+            "wednesday": 2,
+            "четвер": 3,
+            "четверг": 3,
+            "thursday": 3,
+            "п'ятниц": 4,
+            "п’ятниц": 4,
+            "friday": 4,
+        }
+
+    def _format_day_label_for_reply(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        labels = {
+            "today": "сьогодні",
+            "tomorrow": "завтра",
+            "day after tomorrow": "післязавтра",
+            "monday": "понеділок",
+            "tuesday": "вівторок",
+            "wednesday": "середу",
+            "thursday": "четвер",
+            "friday": "п’ятницю",
+            "понеділка": "понеділок",
+            "вівторка": "вівторок",
+            "середа": "середу",
+            "четверг": "четвер",
+            "п'ятниц": "п’ятницю",
+            "п’ятниц": "п’ятницю",
+        }
+        return labels.get(value, value)
+
+    def _extract_requested_date(self, text: str) -> dict[str, Any] | None:
+        now = datetime.now(self.timezone)
+        normalized = text.strip().lower()
+
+        if "післязавтра" in normalized or "day after tomorrow" in normalized:
+            target = now.date() + timedelta(days=2)
+            return {"date": target, "day_label": "післязавтра"}
+        if "завтра" in normalized or "tomorrow" in normalized:
+            target = now.date() + timedelta(days=1)
+            return {"date": target, "day_label": "завтра"}
+        if "сьогодні" in normalized or "today" in normalized:
+            return {"date": now.date(), "day_label": "сьогодні"}
+
+        for marker, weekday in self._weekday_map().items():
+            if marker in normalized:
+                days_ahead = (weekday - now.weekday()) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                target = now.date() + timedelta(days=days_ahead)
+                return {
+                    "date": target,
+                    "day_label": self._format_day_label_for_reply(marker),
+                }
+
+        return None
+
+    def _parse_time_only(self, text: str) -> time | None:
+        normalized = text.strip().lower()
+
+        time_match = re.search(r"\b(\d{1,2}):(\d{2})\b", normalized)
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return time(hour=hour, minute=minute)
+
+        hour_match = re.search(r"\b(?:о|на|at)\s*(\d{1,2})(?::00)?\b", normalized)
+        if not hour_match:
+            hour_match = re.fullmatch(r"\s*(\d{1,2})(?::00)?\s*", normalized)
+        if hour_match:
+            hour = int(hour_match.group(1))
+            if 0 <= hour <= 23:
+                return time(hour=hour, minute=0)
+
+        return None
+
+    def _looks_like_booking_correction(self, text: str) -> bool:
+        normalized = " ".join(text.strip().lower().split())
+        correction_markers = [
+            "краще",
+            "мав на увазі",
+            "мала на увазі",
+            "маю на увазі",
+            "я мав на увазі",
+            "я мала на увазі",
+            "не о",
+            "не на",
+            "а о",
+            "а на",
+            "rather",
+            "instead",
+            "i mean",
+            "meant",
+        ]
+        return any(marker in normalized for marker in correction_markers)
+
+    def _parse_time_candidates(self, text: str) -> list[time]:
+        normalized = text.strip().lower()
+        candidates: list[time] = []
+
+        for match in re.finditer(r"\b(\d{1,2}):(\d{2})\b", normalized):
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                candidates.append(time(hour=hour, minute=minute))
+
+        for match in re.finditer(r"\b(?:о|на|at)\s*(\d{1,2})(?::00)?\b", normalized):
+            hour = int(match.group(1))
+            if 0 <= hour <= 23:
+                candidate = time(hour=hour, minute=0)
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+        return candidates
+
+    def _extract_corrected_time(self, text: str) -> time | None:
+        if not self._looks_like_booking_correction(text):
+            return None
+
+        normalized = text.strip().lower()
+        marker_positions = [
+            normalized.rfind(marker)
+            for marker in [" а ", "краще", "мав на увазі", "мала на увазі", "маю на увазі", "rather", "instead", "mean", "meant"]
+        ]
+        last_marker = max(marker_positions)
+        if last_marker >= 0:
+            parsed = self._parse_time_only(normalized[last_marker:])
+            if parsed is not None:
+                return parsed
+
+        candidates = self._parse_time_candidates(text)
+        return candidates[-1] if candidates else None
+
+    def _deserialize_pending_requested_date(self, value: Any) -> date | None:
+        if isinstance(value, datetime):
+            return self._deserialize_pending_start_dt(value).date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str) and value.strip():
+            return date.fromisoformat(value)
+        return None
+
+    def _combine_requested_date_and_time(self, requested_date: date, requested_time: time) -> datetime:
+        return datetime.combine(requested_date, requested_time, tzinfo=self.timezone)
+
+    def _get_pending_start_dt(self, pending: dict[str, Any]) -> datetime | None:
+        raw_start_dt = pending.get("start_dt")
+        if not raw_start_dt:
+            return None
+        return self._deserialize_pending_start_dt(raw_start_dt)
+
+    def _merge_booking_correction(
+        self,
+        *,
+        sender_id: str,
+        message_text: str,
+        pending: dict[str, Any],
+        language: str,
+        state: BookingState,
+        source_channel: str | None,
+    ) -> Dict[str, Any] | None:
+        if not self._looks_like_booking_correction(message_text):
+            return None
+
+        partial_date = self._extract_requested_date(message_text)
+        corrected_time = self._extract_corrected_time(message_text)
+        if partial_date is None and corrected_time is None:
+            return None
+
+        pending_start_dt = None
+        if state == BookingState.WAITING_FOR_CONTACT:
+            try:
+                pending_start_dt = self._get_pending_start_dt(pending)
+            except Exception:
+                logger.warning(
+                    "invalid pending start_dt ignored during correction sender_id=%s raw_start_dt=%r",
+                    sender_id,
+                    pending.get("start_dt"),
+                )
+
+        pending_requested_date = None
+        if pending.get("requested_date"):
+            try:
+                pending_requested_date = self._deserialize_pending_requested_date(
+                    pending.get("requested_date")
+                )
+            except Exception:
+                logger.warning(
+                    "invalid pending requested_date ignored during correction sender_id=%s raw_requested_date=%r",
+                    sender_id,
+                    pending.get("requested_date"),
+                )
+
+        target_date = partial_date["date"] if partial_date else None
+        if target_date is None:
+            if pending_start_dt is not None:
+                target_date = pending_start_dt.date()
+            else:
+                target_date = pending_requested_date
+
+        target_time = corrected_time
+        if target_time is None and pending_start_dt is not None:
+            target_time = pending_start_dt.timetz().replace(tzinfo=None)
+
+        if target_date is not None:
+            pending["requested_date"] = target_date.isoformat()
+        if partial_date is not None:
+            pending["requested_day_label"] = partial_date.get("day_label")
+
+        if target_date is not None and target_time is not None:
+            requested_dt = self._combine_requested_date_and_time(target_date, target_time)
+            return self.start_booking_flow(
+                sender_id=sender_id,
+                message_text=message_text,
+                source_channel=source_channel or pending.get("source_channel"),
+                requested_dt_override=requested_dt,
+            )
+
+        self._save_pending_confirmation(sender_id, pending)
+        if target_date is not None:
+            return {
+                "status": "waiting_for_time",
+                "reply_text": self._build_missing_time_reply(
+                    language,
+                    pending.get("requested_day_label"),
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": pending.get("requested_date"),
+            }
+
+        return None
+
     def _parse_requested_datetime(self, text: str) -> datetime | None:
         now = datetime.now(self.timezone)
         normalized = text.strip().lower()
@@ -1073,25 +1333,8 @@ class BookingService:
                 return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         hour_match = re.search(r"\b(\d{1,2})\b", normalized)
-        weekday_map = {
-            "monday": 0,
-            "понеділок": 0,
-            "понеділка": 0,
-            "вівторок": 1,
-            "вівторка": 1,
-            "tuesday": 1,
-            "середа": 2,
-            "середу": 2,
-            "wednesday": 2,
-            "четвер": 3,
-            "четверг": 3,
-            "thursday": 3,
-            "п'ятниц": 4,
-            "п’ятниц": 4,
-            "friday": 4,
-        }
         matched_weekday = None
-        for marker, weekday in weekday_map.items():
+        for marker, weekday in self._weekday_map().items():
             if marker in normalized:
                 matched_weekday = weekday
                 break
@@ -1138,9 +1381,11 @@ class BookingService:
         sender_id: str,
         message_text: str,
         source_channel: str | None = None,
+        requested_dt_override: datetime | None = None,
     ) -> Dict[str, Any]:
         language = self._detect_language(message_text)
-        requested_dt = self._parse_requested_datetime(message_text)
+        requested_dt = requested_dt_override or self._parse_requested_datetime(message_text)
+        partial_date = self._extract_requested_date(message_text)
 
         if not self._booking_enabled():
             return {
@@ -1160,19 +1405,28 @@ class BookingService:
         )
 
         if requested_dt is None:
+            requested_date = partial_date.get("date") if partial_date else None
+            requested_day_label = partial_date.get("day_label") if partial_date else None
             self._save_booking_state(
                 sender_id,
                 state=BookingState.WAITING_FOR_TIME,
                 language=language,
                 source_channel=source_channel,
                 context_summary=message_text[:280],
+                requested_date=requested_date,
+                requested_day_label=requested_day_label,
             )
             return {
                 "status": "waiting_for_time",
-                "reply_text": self._build_unclear_time_reply(language),
+                "reply_text": (
+                    self._build_missing_time_reply(language, requested_day_label)
+                    if requested_date
+                    else self._build_unclear_time_reply(language)
+                ),
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "start_dt": None,
+                "requested_date": requested_date.isoformat() if requested_date else None,
             }
 
         self._clear_pending_confirmation(sender_id)
@@ -1368,6 +1622,17 @@ class BookingService:
         state = self.get_booking_state(sender_id)
         logger.info("Booking state: %s", state.value)
 
+        correction_result = self._merge_booking_correction(
+            sender_id=sender_id,
+            message_text=message_text,
+            pending=pending,
+            language=language,
+            state=state,
+            source_channel=source_channel,
+        )
+        if correction_result is not None:
+            return correction_result
+
         if self._is_rejection(message_text):
             self._clear_pending_confirmation(sender_id)
             return {
@@ -1387,6 +1652,65 @@ class BookingService:
                 )
                 if availability_result is not None:
                     return availability_result
+
+            partial_date = self._extract_requested_date(message_text)
+            requested_time = self._parse_time_only(message_text)
+            pending_requested_date = None
+            if pending.get("requested_date"):
+                try:
+                    pending_requested_date = self._deserialize_pending_requested_date(
+                        pending.get("requested_date")
+                    )
+                except Exception:
+                    logger.warning(
+                        "invalid pending requested_date ignored sender_id=%s raw_requested_date=%r",
+                        sender_id,
+                        pending.get("requested_date"),
+                    )
+
+            if partial_date:
+                pending_requested_date = partial_date["date"]
+                pending["requested_date"] = pending_requested_date.isoformat()
+                pending["requested_day_label"] = partial_date.get("day_label")
+                self._save_pending_confirmation(sender_id, pending)
+
+            if requested_time is not None and pending_requested_date is not None:
+                requested_dt = self._combine_requested_date_and_time(
+                    pending_requested_date,
+                    requested_time,
+                )
+                return self.start_booking_flow(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    requested_dt_override=requested_dt,
+                )
+
+            if partial_date:
+                return {
+                    "status": "waiting_for_time",
+                    "reply_text": self._build_missing_time_reply(
+                        language,
+                        pending.get("requested_day_label"),
+                    ),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": pending.get("requested_date"),
+                }
+
+            if pending_requested_date is not None:
+                return {
+                    "status": "waiting_for_time",
+                    "reply_text": self._build_missing_time_reply(
+                        language,
+                        pending.get("requested_day_label"),
+                    ),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": pending.get("requested_date"),
+                }
 
             if self._looks_like_unrelated_question_during_booking(message_text):
                 return {

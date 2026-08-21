@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from app.application.dto.normalized_message import NormalizedMessage
@@ -177,8 +179,49 @@ async def test_dental_greeting_uses_clinic_identity_without_flowly_sales(dental_
 
     result = await processor.process(_message("Привіт"))
 
+    assert result["intent"] == "general_question"
     assert "Smile Dental Clinic" in result["reply_text"]
-    assert "стоматолог" in result["reply_text"].lower()
+    assert "чим можемо допомогти" in result["reply_text"].lower()
+    assert "сімейна стоматологічна клініка" not in result["reply_text"].lower()
+    assert "профілактикою" not in result["reply_text"].lower()
+    assert len(result["reply_text"]) < 80
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_english_greeting_is_short_and_uses_clinic_identity(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("Hello"))
+
+    assert result["intent"] == "general_question"
+    assert "Smile Dental Clinic" in result["reply_text"]
+    assert "How can we help" in result["reply_text"]
+    assert "family dental clinic" not in result["reply_text"].lower()
+    assert "профілактикою" not in result["reply_text"].lower()
+    assert len(result["reply_text"]) < 80
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_greeting_with_confirmed_booking_does_not_start_booking_action(dental_processor):
+    processor, _calendar = dental_processor
+    processor.booking_service._mark_booking_completed(
+        "patient-1",
+        start_dt=datetime(2026, 4, 27, 12, 0),
+        email=None,
+        phone="+380501112233",
+        calendar_event_id="dental-event-existing",
+    )
+
+    result = await processor.process(_message("Привіт"))
+
+    assert result["intent"] == "general_question"
+    assert result["booking_result"] is None
+    assert "Smile Dental Clinic" in result["reply_text"]
+    assert "перенесли" not in result["reply_text"].lower()
+    assert "скасував" not in result["reply_text"].lower()
+    assert processor.booking_service.has_confirmed_booking("patient-1")
     _assert_no_flowly_leakage(result["reply_text"])
 
 
@@ -199,6 +242,17 @@ async def test_dental_kb_answers_are_grounded(dental_processor, user_text, expec
 
     for phrase in expected:
         assert phrase in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_business_question_can_still_use_knowledge_base(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("Які послуги у вас є?"))
+
+    assert "професійна гігієна" in result["reply_text"].lower()
+    assert "лікування карієсу" in result["reply_text"].lower()
     _assert_no_flowly_leakage(result["reply_text"])
 
 

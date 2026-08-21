@@ -597,6 +597,179 @@ async def test_waiting_for_time_still_accepts_normal_booking_time(processor_fact
     assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
 
 
+async def test_booking_with_weekday_without_time_asks_only_for_time(processor_factory):
+    processor, booking_service = processor_factory()
+
+    result = await processor.process(_message(text="хочу записатись у вівторок"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "вівторок" in result["reply_text"].lower()
+    assert "на котру годину" in result["reply_text"].lower()
+    assert "який день" not in result["reply_text"].lower()
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["requested_date"]
+    assert pending["requested_day_label"] == "вівторок"
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_booking_with_service_text_and_weekday_without_time_asks_only_for_time(processor_factory):
+    processor, booking_service = processor_factory()
+
+    result = await processor.process(_message(text="хочу записатись на чистку у вівторок"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "вівторок" in result["reply_text"].lower()
+    assert "на котру годину" in result["reply_text"].lower()
+    assert "який день" not in result["reply_text"].lower()
+    assert booking_service._get_pending_confirmation("user-1")["requested_day_label"] == "вівторок"
+
+
+async def test_waiting_for_time_impatient_weekday_update_asks_only_for_time(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="давайте дзвінок"))
+    result = await processor.process(_message(text="я ж сказав, на вівторок"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "вівторок" in result["reply_text"].lower()
+    assert "на котру годину" in result["reply_text"].lower()
+    assert "який день" not in result["reply_text"].lower()
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["requested_day_label"] == "вівторок"
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_waiting_for_time_neutral_followup_preserves_requested_date(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у вівторок"))
+    original_pending = booking_service._get_pending_confirmation("user-1")
+    original_requested_date = original_pending["requested_date"]
+    result = await processor.process(_message(text="ну я вже написав"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "на котру годину" in result["reply_text"].lower()
+    assert "який день" not in result["reply_text"].lower()
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["requested_date"] == original_requested_date
+    assert pending["requested_day_label"] == "вівторок"
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_waiting_for_time_combines_saved_weekday_with_time(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у вівторок"))
+    result = await processor.process(_message(text="о 15"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "о 15:00 вільний" in result["reply_text"]
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["step"] == "WAITING_FOR_CONTACT"
+    assert pending["start_dt"]
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_booking_with_weekday_and_time_keeps_existing_booking_path(processor_factory):
+    processor, booking_service = processor_factory()
+
+    result = await processor.process(_message(text="хочу записатись у вівторок о 15"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "о 15:00 вільний" in result["reply_text"]
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_booking_date_correction_overrides_tuesday_with_wednesday(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у вівторок"))
+    result = await processor.process(_message(text="ні, краще в середу"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["booking_state"] == "WAITING_FOR_TIME"
+    assert "серед" in result["reply_text"].lower()
+    assert "який день" not in result["reply_text"].lower()
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["requested_day_label"] == "середу"
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_booking_date_correction_handles_meant_friday(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у вівторок"))
+    result = await processor.process(_message(text="я мав на увазі п'ятницю"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "п’ятниц" in result["reply_text"].lower()
+    assert booking_service._get_pending_confirmation("user-1")["requested_day_label"] == "п’ятницю"
+
+
+async def test_booking_date_correction_preserves_existing_time(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у вівторок о 14"))
+    result = await processor.process(_message(text="ні, краще в середу"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    pending = booking_service._get_pending_confirmation("user-1")
+    start_dt = datetime.fromisoformat(pending["start_dt"])
+    assert start_dt.weekday() == 2
+    assert start_dt.hour == 14
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_booking_time_correction_overrides_existing_time(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у вівторок о 14"))
+    result = await processor.process(_message(text="не о 14, а о 16"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    pending = booking_service._get_pending_confirmation("user-1")
+    start_dt = datetime.fromisoformat(pending["start_dt"])
+    assert start_dt.weekday() == 1
+    assert start_dt.hour == 16
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_booking_time_correction_preserves_existing_date(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у середу о 14"))
+    result = await processor.process(_message(text="не о 14, а о 16"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    start_dt = datetime.fromisoformat(
+        booking_service._get_pending_confirmation("user-1")["start_dt"]
+    )
+    assert start_dt.weekday() == 2
+    assert start_dt.hour == 16
+
+
+async def test_booking_rejection_without_replacement_still_cancels(processor_factory):
+    processor, booking_service = processor_factory()
+
+    await processor.process(_message(text="хочу записатись у вівторок"))
+    result = await processor.process(_message(text="ні"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "cancelled"
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
 async def test_waiting_for_time_1230_asks_for_name_and_contact(processor_factory):
     processor, booking_service = processor_factory()
 

@@ -783,13 +783,17 @@ class ReplyService:
 
     def _get_greeting_reply(self, language: str) -> str:
         if not self._is_legacy_flowly_kb() and self.knowledge_service is not None:
+            config_business = (
+                self.front_desk_config_service.get_business()
+                if self.front_desk_config_service is not None
+                else {}
+            )
             business = self.knowledge_service.get_business() or {}
-            name = business.get("name")
-            description = business.get("description")
-            if name and description:
-                return f"Вітаю! Це {name}. {description} Чим можу допомогти?"
+            name = config_business.get("name") or business.get("name")
             if name:
-                return f"Вітаю! Це {name}. Чим можу допомогти?"
+                if language == "en":
+                    return f"Hello! {name}. How can we help?"
+                return f"Вітаю! {name}. Чим можемо допомогти?"
 
         if language == "en":
             return (
