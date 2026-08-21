@@ -214,6 +214,20 @@ async def test_dental_english_greeting_is_short_and_uses_clinic_identity(dental_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["прив", "доброго"])
+async def test_dental_short_greeting_variants_use_clinic_identity(dental_processor, text):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "general_question"
+    assert "Smile Dental Clinic" in result["reply_text"]
+    assert "чим можемо допомогти" in result["reply_text"].lower()
+    assert len(result["reply_text"]) < 80
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_greeting_with_confirmed_booking_does_not_start_booking_action(dental_processor):
     processor, _calendar = dental_processor
     processor.booking_service._mark_booking_completed(
@@ -301,6 +315,20 @@ async def test_dental_explicit_cleaning_price_is_specific_not_general(dental_pro
 
 
 @pytest.mark.asyncio
+async def test_dental_short_how_much_service_questions_are_specific(dental_processor):
+    processor, _calendar = dental_processor
+
+    cleaning = await processor.process(_message("скільки чистка?"))
+    whitening = await processor.process(_message("а відбілювання?"))
+
+    assert "1800 грн" in cleaning["reply_text"]
+    assert "6500 грн" in whitening["reply_text"]
+    assert "2200 грн" not in cleaning["reply_text"]
+    assert "1800 грн" not in whitening["reply_text"]
+    _assert_no_flowly_leakage(cleaning["reply_text"], whitening["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_business_question_can_still_use_knowledge_base(dental_processor):
     processor, _calendar = dental_processor
 
@@ -322,6 +350,22 @@ async def test_dental_booking_unrelated_question_has_no_flowly_leakage(dental_pr
     assert result["booking_result"] is None
     assert "Липська, 12" in result["reply_text"]
     _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_common_service_day_booking_phrase_golden_multiturn(dental_processor):
+    processor, calendar = dental_processor
+
+    start = await processor.process(_message("хочу на чистку у вівторок"))
+    time = await processor.process(_message("на 16"))
+
+    assert start["booking_result"]["status"] == "waiting_for_time"
+    assert "вівторок" in start["reply_text"].lower()
+    assert "який день" not in start["reply_text"].lower()
+    assert time["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.checked[-1]["start_dt"].weekday() == 1
+    assert calendar.checked[-1]["start_dt"].hour == 16
+    _assert_no_flowly_leakage(start["reply_text"], time["reply_text"])
 
 
 @pytest.mark.asyncio
@@ -354,6 +398,24 @@ async def test_dental_busy_slot_another_time_preserves_day_golden_multiturn():
         another["reply_text"],
         recovered["reply_text"],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["а раніше нема?", "а пізніше?"])
+async def test_dental_busy_slot_earlier_later_stays_in_time_selection(text):
+    calendar = BusyAt13ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу записатись на чистку у вівторок"))
+    suggested = await processor.process(_message("на 13"))
+    result = await processor.process(_message(text))
+
+    assert suggested["booking_result"]["status"] == "slot_suggested"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "ім" not in result["reply_text"].lower()
+    assert "номер телефону" not in result["reply_text"].lower()
+    assert "вівторок" in result["reply_text"].lower()
+    _assert_no_flowly_leakage(result["reply_text"])
 
 
 @pytest.mark.asyncio
@@ -429,6 +491,22 @@ async def test_dental_active_booking_location_faq_preserves_booking_state(dental
 
 
 @pytest.mark.asyncio
+async def test_dental_repeated_unresolved_fallback_has_no_product_leakage(dental_processor):
+    processor, _calendar = dental_processor
+
+    first = await processor.process(_message("яка погода?"))
+    second = await processor.process(_message("Дмитро 0987121328"))
+    third = await processor.process(_message("інший"))
+
+    combined = "\n".join([first["reply_text"], second["reply_text"], third["reply_text"]]).lower()
+    assert "flowly" not in combined
+    assert "бот" not in combined
+    assert "для яких бізнес" not in combined
+    assert "як працює бот" not in combined
+    _assert_no_flowly_leakage(first["reply_text"], second["reply_text"], third["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_confirmed_booking_allows_normal_faq_and_pricing(dental_processor):
     processor, _calendar = dental_processor
 
@@ -446,6 +524,23 @@ async def test_dental_confirmed_booking_allows_normal_faq_and_pricing(dental_pro
     assert "Для дзвінка підкажіть" not in location["reply_text"]
     assert "Для дзвінка підкажіть" not in whitening["reply_text"]
     _assert_no_flowly_leakage(location["reply_text"], whitening["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_casual_medical_risk_handoff_and_normal_faq(dental_processor):
+    processor, _calendar = dental_processor
+
+    pain = await processor.process(_message("болить зуб шо робити"))
+    bleeding = await processor.process(_message("кров тече сильно", sender_id="patient-2"))
+    faq = await processor.process(_message("де ви знаходитесь?", sender_id="patient-3"))
+
+    assert pain["intent"] == "diagnosis_request"
+    assert "діагноз" in pain["reply_text"].lower()
+    assert bleeding["intent"] == "medical_emergency"
+    assert "невідкладна" in bleeding["reply_text"].lower()
+    assert faq["intent"] == "front_desk_contextual_answer"
+    assert "Липська, 12" in faq["reply_text"]
+    _assert_no_flowly_leakage(pain["reply_text"], bleeding["reply_text"], faq["reply_text"])
 
 
 @pytest.mark.asyncio

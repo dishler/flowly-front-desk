@@ -185,6 +185,13 @@ class MessageProcessor:
         if has_consultation and has_call_request:
             return True
 
+        config_service = getattr(self.reply_service, "front_desk_config_service", None)
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        if config_service is not None and knowledge_service is not None:
+            service = knowledge_service.find_service(keyword_normalized)
+            if service is not None and has_call_request and (has_date_word or has_time):
+                return True
+
         return False
 
     def _looks_like_datetime_only_message(self, text: str) -> bool:
@@ -340,17 +347,29 @@ class MessageProcessor:
         if "medical_emergency" in rules:
             emergency_markers = [
                 "сильна кровотеча",
+                "сильна кров",
                 "кровотеч",
+                "кров тече",
+                "кров іде",
+                "кров идет",
+                "кров сильно",
                 "не зупиняється кров",
                 "травма",
+                "вибив зуб",
+                "зламав зуб",
                 "набряк",
+                "опухло",
+                "пухне",
                 "важко дихати",
                 "не можу дихати",
             ]
             urgent_context = "терміново" in normalized and any(
                 marker in normalized for marker in ["кров", "травм", "набряк", "дихати"]
             )
-            if urgent_context or any(marker in normalized for marker in emergency_markers):
+            bleeding_context = "кров" in normalized and any(
+                marker in normalized for marker in ["тече", "сильно", "багато", "не зупин"]
+            )
+            if urgent_context or bleeding_context or any(marker in normalized for marker in emergency_markers):
                 return (
                     "medical_emergency",
                     "Це може бути невідкладна ситуація. Будь ласка, зверніться до екстреної медичної допомоги або найближчого чергового медичного закладу. У чаті не можу безпечно оцінити стан.",
@@ -363,10 +382,16 @@ class MessageProcessor:
                 "поставте діагноз",
                 "який діагноз",
                 "діагноз",
+                "що робити",
+                "шо робити",
+                "что делать",
             ]
-            has_symptom = any(marker in normalized for marker in ["болить зуб", "біль у зубі", "болить ясн"])
+            has_symptom = any(
+                marker in normalized
+                for marker in ["болить зуб", "біль у зубі", "болить ясн", "сильний біль", "дуже болить"]
+            )
             asks_diagnosis = any(marker in normalized for marker in diagnosis_markers)
-            if asks_diagnosis or (has_symptom and "що це" in normalized):
+            if (has_symptom and asks_diagnosis) or (has_symptom and "що це" in normalized):
                 return (
                     "diagnosis_request",
                     "Не можу поставити діагноз у чаті. Для цього потрібен огляд стоматолога; можу допомогти записати вас на консультацію або візит.",
@@ -1762,8 +1787,10 @@ class MessageProcessor:
     def _looks_like_greeting_text(self, user_text: str) -> bool:
         normalized = " ".join(user_text.strip().lower().split())
         greeting_markers = [
+            "прив",
             "привіт",
             "вітаю",
+            "доброго",
             "доброго дня",
             "добрий день",
             "добрий вечір",

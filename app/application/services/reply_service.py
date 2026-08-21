@@ -94,6 +94,8 @@ class ReplyService:
         return self._get_unknown_fallback_reply(language)
 
     def get_escalation_reply(self, language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
         return (
             "Тут краще коротко уточнити деталі, щоб не відповісти повз ваш запит. "
             "Можете написати, що саме цікавить: як працює бот, для яких бізнесів підходить, ціна чи запис?"
@@ -121,6 +123,9 @@ class ReplyService:
         return self._contains_any(normalized, complex_markers)
 
     def get_contextual_complex_reply(self, user_text: str, language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
+
         normalized = self._normalize(user_text)
         if self._is_client_questions_query(normalized):
             return self._get_client_questions_reply(language)
@@ -205,7 +210,11 @@ class ReplyService:
         normalized = self._normalize(text)
         context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
         service = self.knowledge_service.find_service(normalized) if self.knowledge_service else None
-        price_requested = self._looks_like_price_query(normalized) or intent == IntentType.PRICE
+        price_requested = (
+            self._looks_like_price_query(normalized)
+            or intent == IntentType.PRICE
+            or (service is not None and self._looks_like_how_much_marker(normalized))
+        )
         service_context_id = context.get("current_service_id")
 
         if service is not None and price_requested:
@@ -464,6 +473,10 @@ class ReplyService:
         markers = ["скільки коштує", "коштує", "ціна", "ціну", "ціни", "вартість", "прайс", "price", "cost"]
         return any(marker in normalized for marker in markers)
 
+    def _looks_like_how_much_marker(self, normalized: str) -> bool:
+        markers = ["скільки", "сколько", "how much"]
+        return any(marker in normalized for marker in markers)
+
     def _looks_like_services_question(self, normalized: str) -> bool:
         markers = ["які послуги", "послуги у вас", "послуги", "services"]
         return any(marker in normalized for marker in markers)
@@ -536,6 +549,8 @@ class ReplyService:
         )
 
     def _get_rejection_reply(self, language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return "Зрозуміло. Якщо буде потрібно, напишіть нам."
         return (
             "Зрозумів, дякую. Якщо пізніше буде актуально автоматизувати відповіді "
             "в месенджерах — можете просто написати сюди."
@@ -550,6 +565,8 @@ class ReplyService:
         return self._get_rejection_reply(language)
 
     def _get_frustrated_reply(self, language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
         return (
             "Розумію, відповідь була не зовсім по суті. Можу коротко пояснити конкретно: "
             "що робить бот, для яких бізнесів підходить або скільки коштує."
@@ -563,6 +580,8 @@ class ReplyService:
         )
 
     def _get_industries_reply(self, language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
         return (
             "Найкраще бот підходить для сервісних бізнесів, де є багато вхідних повідомлень, "
             "записів або заявок.\n\n"
@@ -586,6 +605,8 @@ class ReplyService:
         )
 
     def _get_interest_signal_reply(self, language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
         if language == "uk":
             return (
                 "Супер, тоді це схоже на нормальний кейс для запуску. "
@@ -599,6 +620,8 @@ class ReplyService:
         )
 
     def _get_use_cases_reply(self, language: str) -> str:
+        if self.front_desk_config_service is not None and not self._is_legacy_flowly_kb():
+            return self._get_unknown_fallback_reply(language)
         return (
             "Можемо показати типові use cases для різних бізнесів.\n\n"
             "Наприклад:\n"
@@ -729,7 +752,9 @@ class ReplyService:
 
     def _is_greeting(self, normalized: str) -> bool:
         greeting_markers = [
+            "прив",
             "привіт",
+            "доброго",
             "доброго дня",
             "добрий день",
             "добрий вечір",

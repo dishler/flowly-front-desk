@@ -675,9 +675,13 @@ class BookingService:
             "давай інший",
             "можна інший",
             "іншу годину",
+            "раніше",
+            "пізніше",
             "another time",
             "another slot",
             "different time",
+            "earlier",
+            "later",
         ]
         return any(marker in normalized for marker in markers)
 
@@ -1742,7 +1746,10 @@ class BookingService:
         if correction_result is not None:
             return correction_result
 
-        if self._is_rejection(message_text):
+        alternative_time_request = pending.get("availability_context") and self._looks_like_another_time_request(
+            message_text
+        )
+        if self._is_rejection(message_text) and not alternative_time_request:
             self._clear_pending_confirmation(sender_id)
             return {
                 "status": "cancelled",
