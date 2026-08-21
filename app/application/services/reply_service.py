@@ -196,6 +196,42 @@ class ReplyService:
         resolved_language = language or self._detect_language(user_text)
         return self._get_business_fact_reply(self._normalize(user_text), resolved_language)
 
+    def get_contextual_front_desk_reply(self, message: NormalizedMessage, intent: Optional[IntentType] = None) -> Optional[str]:
+        if self.front_desk_config_service is None or self._is_legacy_flowly_kb():
+            return None
+
+        text = message.user_message.strip()
+        language = self._detect_language(text)
+        normalized = self._normalize(text)
+        context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
+        service = self.knowledge_service.find_service(normalized) if self.knowledge_service else None
+        price_requested = self._looks_like_price_query(normalized) or intent == IntentType.PRICE
+        service_context_id = context.get("current_service_id")
+
+        if service is not None and price_requested:
+            return self._reply_with_service_price(message.sender_id, service)
+
+        if service is not None and context.get("question_context") == "pricing":
+            return self._reply_with_service_price(message.sender_id, service)
+
+        if price_requested and service_context_id:
+            context_service = self.knowledge_service.get_service_by_id(str(service_context_id))
+            if context_service is not None:
+                return self._reply_with_service_price(message.sender_id, context_service)
+
+        if service is not None and context.get("question_context") == "services":
+            return self._reply_with_service_summary(message.sender_id, service)
+
+        fact_reply = self._get_business_fact_reply(normalized, language)
+        if fact_reply:
+            self._remember_front_desk_context(
+                message.sender_id,
+                question_context="services" if self._looks_like_services_question(normalized) else "faq",
+            )
+            return fact_reply
+
+        return None
+
     def evaluate_escalation(self, user_text: str, history: List[str]) -> Tuple[bool, str]:
         """
         Escalate only for non-standard / complex cases. Standard FAQ intents are handled
@@ -400,6 +436,10 @@ class ReplyService:
         if not compact or len(compact.split()) > 4:
             return None
 
+        service = self.knowledge_service.find_service(compact)
+        if service and service.get("price_note"):
+            return self._reply_with_service_price(message.sender_id, service)
+
         faq_answer = self.knowledge_service.find_faq_answer(
             f"скільки коштує {compact}",
             language,
@@ -419,6 +459,58 @@ class ReplyService:
                     return str(price_note)
 
         return None
+
+    def _looks_like_price_query(self, normalized: str) -> bool:
+        markers = ["скільки коштує", "коштує", "ціна", "ціну", "ціни", "вартість", "прайс", "price", "cost"]
+        return any(marker in normalized for marker in markers)
+
+    def _looks_like_services_question(self, normalized: str) -> bool:
+        markers = ["які послуги", "послуги у вас", "послуги", "services"]
+        return any(marker in normalized for marker in markers)
+
+    def _remember_front_desk_context(
+        self,
+        sender_id: str,
+        *,
+        current_service_id: str | None = None,
+        question_context: str | None = None,
+    ) -> None:
+        if self.memory_service is None:
+            return
+        values: dict[str, Any] = {}
+        if current_service_id is not None:
+            values["current_service_id"] = current_service_id
+        if question_context is not None:
+            values["question_context"] = question_context
+        if values:
+            self.memory_service.update_context(sender_id, **values)
+
+    def _reply_with_service_price(self, sender_id: str, service: dict[str, Any]) -> Optional[str]:
+        price_note = service.get("price_note")
+        if not price_note:
+            return None
+        service_id = service.get("id")
+        self._remember_front_desk_context(
+            sender_id,
+            current_service_id=str(service_id) if service_id else None,
+            question_context="pricing",
+        )
+        return str(price_note)
+
+    def _reply_with_service_summary(self, sender_id: str, service: dict[str, Any]) -> Optional[str]:
+        description = service.get("description")
+        price_note = service.get("price_note")
+        name = service.get("name")
+        parts = [str(part) for part in [name, description, price_note] if part]
+        if not parts:
+            return None
+        service_id = service.get("id")
+        self._remember_front_desk_context(
+            sender_id,
+            current_service_id=str(service_id) if service_id else None,
+            question_context="services",
+        )
+        return " ".join(parts)
 
     def _get_channel_reply(self, text: str, language: str) -> Optional[str]:
         _ = text
@@ -1396,6 +1488,10 @@ class ReplyService:
         normalized = self._normalize(text)
 
         if not self._is_legacy_flowly_kb():
+            if resolved_intent != IntentType.BOOKING_REQUEST:
+                contextual_reply = self.get_contextual_front_desk_reply(message, resolved_intent)
+                if contextual_reply:
+                    return contextual_reply
             fact_reply = self._get_business_fact_reply(normalized, language)
             if fact_reply:
                 return fact_reply

@@ -554,6 +554,10 @@ class BookingService:
         normalized = " ".join(text.strip().lower().split())
         normalized = re.sub(r"[.!?…]+$", "", normalized).strip()
         normalized = re.sub(r"([аеєиіїоуюя])\1+", r"\1", normalized)
+        if self._is_confirmation_text(normalized) or self._looks_like_another_time_request(normalized):
+            return True
+        if self._extract_hour_only(normalized) is not None:
+            return True
         non_names = {
             "цікаво",
             "гаразд цікаво",
@@ -563,6 +567,8 @@ class BookingService:
             "можливо цікаво",
             "хм цікаво",
             "так цікаво",
+            "тоді на буде гуд",
+            "на буде гуд",
         }
         return normalized in non_names
 
@@ -674,6 +680,55 @@ class BookingService:
             "different time",
         ]
         return any(marker in normalized for marker in markers)
+
+    def _match_suggested_slot_acceptance(self, text: str, pending: dict[str, Any]) -> datetime | None:
+        try:
+            suggested_start = self._get_pending_start_dt(pending)
+        except Exception:
+            return None
+        if suggested_start is None:
+            return None
+
+        if self.EMAIL_RE.search(text) or self.PHONE_RE.search(text):
+            return None
+
+        if self._is_confirmation_text(text):
+            return suggested_start
+
+        normalized = " ".join(text.strip().lower().split())
+        accept_markers = [
+            "підійде",
+            "підходить",
+            "підходе",
+            "буде гуд",
+            "гуд",
+            "добре",
+            "ок",
+            "окей",
+            "давайте",
+            "давай",
+            "тоді",
+            "works",
+            "that works",
+            "yes",
+            "okay",
+        ]
+        if not any(marker in normalized for marker in accept_markers):
+            return None
+
+        candidates = self._parse_time_candidates(text)
+        for hour_match in re.finditer(r"\b(\d{1,2})(?::00)?\b", normalized):
+            hour = int(hour_match.group(1))
+            if 0 <= hour <= 23:
+                candidate = time(hour=hour, minute=0)
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+        for candidate in candidates:
+            if candidate.hour == suggested_start.hour and candidate.minute == suggested_start.minute:
+                return suggested_start
+
+        return None
 
     def _save_captured_contact(
         self,
@@ -1781,23 +1836,12 @@ class BookingService:
             )
 
         if state == BookingState.WAITING_FOR_CONTACT:
-            if pending.get("availability_context") and self._is_confirmation_text(message_text):
-                try:
-                    accepted_start_dt = self._deserialize_pending_start_dt(pending["start_dt"])
-                except Exception:
-                    logger.exception(
-                        "suggested slot accept failed sender_id=%s raw_start_dt=%r",
-                        sender_id,
-                        pending.get("start_dt"),
-                    )
-                    self._clear_pending_confirmation(sender_id)
-                    return {
-                        "status": "create_failed",
-                        "reply_text": self._build_create_failed_reply(language),
-                        "event_created": False,
-                        "booking_state": BookingState.NONE.value,
-                    }
-
+            accepted_start_dt = (
+                self._match_suggested_slot_acceptance(message_text, pending)
+                if pending.get("availability_context")
+                else None
+            )
+            if accepted_start_dt is not None:
                 pending["customer_name"] = None
                 self._save_pending_confirmation(sender_id, pending)
                 return {

@@ -1267,6 +1267,12 @@ class MessageProcessor:
         if last_reply != reply_text:
             return reply_text
 
+        if (
+            self.reply_service.front_desk_config_service is not None
+            and not self.reply_service._is_legacy_flowly_kb()
+        ):
+            return reply_text
+
         if reply_text == "Підкажіть, будь ласка, точний день і час.":
             return "Так, давайте. Напишіть, будь ласка, конкретний день і час, наприклад завтра о 12:30."
 
@@ -1918,10 +1924,7 @@ class MessageProcessor:
             if self._looks_like_capability_question(message.user_message):
                 return self._build_capability_question_result(message)
 
-            grounded_reply = self.reply_service.get_grounded_front_desk_reply(
-                message.user_message,
-                self.reply_service.detect_user_language(message.user_message),
-            )
+            grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)
             if grounded_reply:
                 return self._build_direct_reply_result(
                     message=message,
@@ -2086,6 +2089,22 @@ class MessageProcessor:
                 routing_category="safe_handoff",
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
+
+        if not (
+            self._looks_like_booking_message(message.user_message)
+            or self._looks_like_datetime_only_message(message.user_message)
+            or self._looks_like_reschedule_request(message.user_message)
+            or self._looks_like_cancel_request(message.user_message)
+        ):
+            contextual_front_desk_reply = self.reply_service.get_contextual_front_desk_reply(message)
+            if contextual_front_desk_reply:
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=contextual_front_desk_reply,
+                    intent_value="front_desk_contextual_answer",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
 
         if self._looks_like_bot_identity_question(message.user_message):
             return self._build_direct_reply_result(

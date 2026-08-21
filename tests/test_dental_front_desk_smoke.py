@@ -275,11 +275,29 @@ async def test_dental_pricing_short_followup_golden_multiturn_no_flowly_leakage(
 
     first = await processor.process(_message("Скільки коштує консультація?"))
     followup = await processor.process(_message("А чистка?"))
+    repeated_price = await processor.process(_message("ціна"))
 
     assert "700 грн" in first["reply_text"]
     assert "1800 грн" in followup["reply_text"]
     assert "професійна гігієна" in followup["reply_text"].lower()
-    _assert_no_flowly_leakage(first["reply_text"], followup["reply_text"])
+    assert "1800 грн" in repeated_price["reply_text"]
+    assert "2200 грн" not in repeated_price["reply_text"]
+    assert "Для дзвінка підкажіть" not in followup["reply_text"]
+    assert "Для дзвінка підкажіть" not in repeated_price["reply_text"]
+    _assert_no_flowly_leakage(first["reply_text"], followup["reply_text"], repeated_price["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_explicit_cleaning_price_is_specific_not_general(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("ціна чистки"))
+
+    assert "1800 грн" in result["reply_text"]
+    assert "2200 грн" not in result["reply_text"]
+    assert "6500 грн" not in result["reply_text"]
+    assert "Для дзвінка підкажіть" not in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
 
 
 @pytest.mark.asyncio
@@ -339,6 +357,56 @@ async def test_dental_busy_slot_another_time_preserves_day_golden_multiturn():
 
 
 @pytest.mark.asyncio
+async def test_dental_suggested_slot_acceptance_does_not_become_customer_name():
+    calendar = BusyAt13ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    suggested = await processor.process(_message("На 13"))
+    accepted = await processor.process(_message("тоді на 14 буде гуд"))
+    pending_after_accept = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    phone = await processor.process(_message("0987121328"))
+    pending_after_phone = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    confirmed = await processor.process(_message("Дмитро"))
+
+    assert suggested["booking_result"]["status"] == "slot_suggested"
+    assert accepted["booking_result"]["status"] == "waiting_for_contact"
+    assert "14:00" in accepted["reply_text"]
+    assert pending_after_accept["customer_name"] is None
+    assert phone["booking_result"]["status"] == "waiting_for_name"
+    assert "ім" in phone["reply_text"].lower()
+    assert "номер телефону" not in phone["reply_text"].lower()
+    assert pending_after_phone["contact_phone"] == "0987121328"
+    assert pending_after_phone["customer_name"] is None
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert confirmed["booking_result"]["customer_name"] == "Дмитро"
+    assert calendar.created[-1]["start_dt"].weekday() == 1
+    assert calendar.created[-1]["start_dt"].hour == 14
+    _assert_no_flowly_leakage(
+        accepted["reply_text"],
+        phone["reply_text"],
+        confirmed["reply_text"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_dental_combined_contact_completes_without_repeated_contact_question(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 16"))
+    confirmed = await processor.process(_message("Дмитро, 0987121328"))
+
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert confirmed["booking_result"]["customer_name"] == "Дмитро"
+    assert confirmed["booking_result"]["contact_phone"] == "0987121328"
+    assert "залиште" not in confirmed["reply_text"].lower()
+    assert calendar.created[-1]["start_dt"].weekday() == 1
+    assert calendar.created[-1]["start_dt"].hour == 16
+    _assert_no_flowly_leakage(confirmed["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_active_booking_location_faq_preserves_booking_state(dental_processor):
     processor, calendar = dental_processor
 
@@ -358,6 +426,26 @@ async def test_dental_active_booking_location_faq_preserves_booking_state(dental
     assert calendar.checked[-1]["start_dt"].weekday() == 1
     assert calendar.checked[-1]["start_dt"].hour == 16
     _assert_no_flowly_leakage(start["reply_text"], faq["reply_text"], time["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_confirmed_booking_allows_normal_faq_and_pricing(dental_processor):
+    processor, _calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 16"))
+    confirmed = await processor.process(_message("Дмитро, 0987121328"))
+    location = await processor.process(_message("А де ви знаходитесь?"))
+    whitening = await processor.process(_message("Скільки коштує відбілювання?"))
+
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert location["intent"] == "front_desk_contextual_answer"
+    assert "Липська, 12" in location["reply_text"]
+    assert whitening["intent"] == "front_desk_contextual_answer"
+    assert "6500 грн" in whitening["reply_text"]
+    assert "Для дзвінка підкажіть" not in location["reply_text"]
+    assert "Для дзвінка підкажіть" not in whitening["reply_text"]
+    _assert_no_flowly_leakage(location["reply_text"], whitening["reply_text"])
 
 
 @pytest.mark.asyncio

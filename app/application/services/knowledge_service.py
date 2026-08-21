@@ -38,6 +38,24 @@ class KnowledgeService:
                 return service
         return None
 
+    def find_service(self, text: str) -> Optional[dict[str, Any]]:
+        query_tokens = self._service_query_tokens(text)
+        if not query_tokens:
+            return None
+
+        best_service = None
+        best_score = 0
+        for service in self.get_services():
+            service_tokens = self._service_tokens(service)
+            if not service_tokens:
+                continue
+            score = sum(1 for token in query_tokens if self._token_matches_any(token, service_tokens))
+            if score > best_score:
+                best_score = score
+                best_service = service
+
+        return best_service if best_score > 0 else None
+
     def get_pricing(self) -> dict[str, Any]:
         return self.data.get("pricing", {})
 
@@ -88,6 +106,56 @@ class KnowledgeService:
             for token in self._normalize_question_for_match(text).split()
             if len(token) > 2 and token not in stopwords
         }
+
+    def _service_query_tokens(self, text: str) -> set[str]:
+        stopwords = {
+            "а",
+            "і",
+            "и",
+            "по",
+            "про",
+            "у",
+            "в",
+            "на",
+            "за",
+            "ціна",
+            "ціну",
+            "ціни",
+            "вартість",
+            "скільки",
+            "коштує",
+            "прайс",
+            "price",
+            "cost",
+            "about",
+            "for",
+            "the",
+        }
+        return {
+            token
+            for token in self._normalize_question_for_match(text).split()
+            if len(token) > 2 and token not in stopwords
+        }
+
+    def _service_tokens(self, service: dict[str, Any]) -> set[str]:
+        parts = [
+            str(service.get("id") or ""),
+            str(service.get("name") or ""),
+            str(service.get("description") or ""),
+        ]
+        aliases = service.get("aliases")
+        if isinstance(aliases, list):
+            parts.extend(str(alias) for alias in aliases if alias)
+        return self._service_query_tokens(" ".join(parts))
+
+    def _token_matches_any(self, token: str, candidates: set[str]) -> bool:
+        for candidate in candidates:
+            if token == candidate:
+                return True
+            if len(token) >= 4 and len(candidate) >= 4:
+                if token.startswith(candidate[:4]) or candidate.startswith(token[:4]):
+                    return True
+        return False
 
     def find_faq_answer(self, question_text: str, language: str = "uk") -> Optional[str]:
         normalized = self._normalize_question_for_match(question_text)
