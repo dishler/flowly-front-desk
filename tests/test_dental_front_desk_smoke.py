@@ -182,6 +182,7 @@ async def test_dental_greeting_uses_clinic_identity_without_flowly_sales(dental_
     assert result["intent"] == "general_question"
     assert "Smile Dental Clinic" in result["reply_text"]
     assert "чим можемо допомогти" in result["reply_text"].lower()
+    assert not result["reply_text"].startswith("Привіт! Вітаю!")
     assert "сімейна стоматологічна клініка" not in result["reply_text"].lower()
     assert "профілактикою" not in result["reply_text"].lower()
     assert len(result["reply_text"]) < 80
@@ -230,6 +231,7 @@ async def test_dental_greeting_with_confirmed_booking_does_not_start_booking_act
     ("user_text", "expected"),
     [
         ("Які послуги у вас є?", ["професійна гігієна", "лікування карієсу"]),
+        ("Які у вас послуги?", ["професійна гігієна", "лікування карієсу"]),
         ("Скільки коштує чистка?", ["від 1800 грн"]),
         ("Де ви знаходитесь?", ["Липська, 12", "Арсенальна"]),
         ("Коли ви працюєте?", ["09:00-19:00", "10:00-16:00"]),
@@ -246,6 +248,19 @@ async def test_dental_kb_answers_are_grounded(dental_processor, user_text, expec
 
 
 @pytest.mark.asyncio
+async def test_dental_pricing_short_followup_uses_recent_price_context(dental_processor):
+    processor, _calendar = dental_processor
+
+    first = await processor.process(_message("Скільки коштує консультація?"))
+    followup = await processor.process(_message("а чистка?"))
+
+    assert "700 грн" in first["reply_text"]
+    assert "1800 грн" in followup["reply_text"]
+    assert "уточніть" not in followup["reply_text"].lower()
+    _assert_no_flowly_leakage(first["reply_text"], followup["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_business_question_can_still_use_knowledge_base(dental_processor):
     processor, _calendar = dental_processor
 
@@ -253,6 +268,19 @@ async def test_dental_business_question_can_still_use_knowledge_base(dental_proc
 
     assert "професійна гігієна" in result["reply_text"].lower()
     assert "лікування карієсу" in result["reply_text"].lower()
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_booking_unrelated_question_has_no_flowly_leakage(dental_processor):
+    processor, _calendar = dental_processor
+
+    await processor.process(_message("Хочу записатися на чистку у вівторок о 14"))
+    result = await processor.process(_message("а де ви знаходитесь?"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "booking_unrelated_question"
+    assert "візит" in result["reply_text"]
     _assert_no_flowly_leakage(result["reply_text"])
 
 

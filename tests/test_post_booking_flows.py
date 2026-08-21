@@ -964,6 +964,41 @@ async def test_booking_slot_suggestion_and_confirmation(processor_factory):
     assert not booking_service.has_confirmed_booking("user-1")
 
 
+@pytest.mark.parametrize("text", ["так", "ок", "давайте"])
+async def test_suggested_slot_acceptance_variants_still_work(processor_factory, text):
+    calendar_service = BusyUntil1430CreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="Давайте дзвінок"))
+    suggested = await processor.process(_message(text="Завтра 12:30"))
+    accepted = await processor.process(_message(text=text))
+
+    assert suggested["booking_result"]["status"] == "slot_suggested"
+    assert accepted["booking_result"]["status"] == "waiting_for_contact"
+    assert "бронюємо" in accepted["reply_text"]
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["customer_name"] is None
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+@pytest.mark.parametrize("text", ["інший час", "давайте інший"])
+async def test_suggested_slot_another_time_is_not_contact_name(processor_factory, text):
+    calendar_service = BusyUntil1430CreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="Давайте дзвінок"))
+    suggested = await processor.process(_message(text="Завтра 12:30"))
+    another = await processor.process(_message(text=text))
+
+    assert suggested["booking_result"]["status"] == "slot_suggested"
+    assert another["booking_result"]["status"] == "waiting_for_time"
+    assert "інший час" in another["reply_text"]
+    assert "номер телефону" not in another["reply_text"]
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["customer_name"] is None
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
 async def test_confirmation_after_suggested_slot_is_not_customer_name(processor_factory):
     calendar_service = BusyUntil1430CreateCalendarService()
     processor, booking_service = processor_factory(calendar_service=calendar_service)

@@ -1751,7 +1751,7 @@ class MessageProcessor:
         normalized = reply_text.lstrip()
         if language == "en":
             return normalized.startswith("Hi!") or normalized.startswith("Hello!")
-        return normalized.startswith("Привіт!")
+        return normalized.startswith("Привіт!") or normalized.startswith("Вітаю!")
 
     def _looks_like_greeting_text(self, user_text: str) -> bool:
         normalized = " ".join(user_text.strip().lower().split())

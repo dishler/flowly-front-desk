@@ -358,6 +358,59 @@ class ReplyService:
             return faq_answer
         return self._fallback_for_intent(IntentType.PRICE, language)
 
+    def _has_recent_pricing_context(self, sender_id: str) -> bool:
+        if self.memory_service is None:
+            return False
+        recent = " ".join(item.lower() for item in self.memory_service.get_history(sender_id)[-6:])
+        markers = [
+            "скільки коштує",
+            "коштує",
+            "ціна",
+            "прайс",
+            "вартість",
+            "грн",
+            "price",
+            "cost",
+        ]
+        return any(marker in recent for marker in markers)
+
+    def _get_contextual_pricing_followup_reply(
+        self,
+        message: NormalizedMessage,
+        language: str,
+        normalized: str,
+    ) -> Optional[str]:
+        if self.knowledge_service is None or self._is_legacy_flowly_kb():
+            return None
+        if not self._has_recent_pricing_context(message.sender_id):
+            return None
+
+        compact = re.sub(r"[?!.,…]+", " ", normalized)
+        compact = " ".join(compact.split())
+        compact = re.sub(r"^(а|а\\s+по|по|і|и)\\s+", "", compact).strip()
+        if not compact or len(compact.split()) > 4:
+            return None
+
+        faq_answer = self.knowledge_service.find_faq_answer(
+            f"скільки коштує {compact}",
+            language,
+        )
+        if faq_answer:
+            return faq_answer
+
+        compact_tokens = set(compact.split())
+        for service in self.knowledge_service.get_services():
+            service_text = " ".join(
+                str(service.get(field) or "")
+                for field in ["name", "description", "price_note"]
+            ).lower()
+            if compact_tokens and all(token in service_text for token in compact_tokens):
+                price_note = service.get("price_note")
+                if price_note:
+                    return str(price_note)
+
+        return None
+
     def _get_channel_reply(self, text: str, language: str) -> Optional[str]:
         _ = text
         if self._is_legacy_flowly_kb():
@@ -1337,6 +1390,13 @@ class ReplyService:
             fact_reply = self._get_business_fact_reply(normalized, language)
             if fact_reply:
                 return fact_reply
+            pricing_followup_reply = self._get_contextual_pricing_followup_reply(
+                message,
+                language,
+                normalized,
+            )
+            if pricing_followup_reply:
+                return pricing_followup_reply
 
         if resolved_intent == IntentType.PRICE:
             return self._get_pricing_reply(language)

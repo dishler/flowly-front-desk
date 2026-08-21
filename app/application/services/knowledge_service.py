@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,11 +50,57 @@ class KnowledgeService:
     def get_all_faq(self) -> list[dict[str, Any]]:
         return self.get_faq()
 
+    def _normalize_question_for_match(self, text: str) -> str:
+        normalized = text.strip().lower()
+        normalized = re.sub(r"[^\w\sа-яіїєґё]", " ", normalized, flags=re.IGNORECASE)
+        return " ".join(normalized.split())
+
+    def _question_tokens(self, text: str) -> set[str]:
+        stopwords = {
+            "а",
+            "є",
+            "у",
+            "в",
+            "ви",
+            "вас",
+            "ваші",
+            "ваша",
+            "ваше",
+            "які",
+            "яка",
+            "який",
+            "що",
+            "чи",
+            "про",
+            "the",
+            "a",
+            "an",
+            "do",
+            "you",
+            "your",
+            "are",
+            "is",
+            "what",
+            "which",
+        }
+        return {
+            token
+            for token in self._normalize_question_for_match(text).split()
+            if len(token) > 2 and token not in stopwords
+        }
+
     def find_faq_answer(self, question_text: str, language: str = "uk") -> Optional[str]:
-        normalized = question_text.strip().lower()
+        normalized = self._normalize_question_for_match(question_text)
+        query_tokens = self._question_tokens(normalized)
         for item in self.get_faq():
-            question = str(item.get("question", "")).strip().lower()
-            if question and question in normalized:
+            question = self._normalize_question_for_match(str(item.get("question", "")))
+            question_tokens = self._question_tokens(question)
+            has_close_token_match = (
+                bool(query_tokens)
+                and bool(question_tokens)
+                and question_tokens.issubset(query_tokens)
+            )
+            if question and (question in normalized or normalized in question or has_close_token_match):
                 return (
                     item.get("answer_uk")
                     if language == "uk"

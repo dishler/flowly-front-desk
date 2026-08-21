@@ -394,6 +394,12 @@ class BookingService:
             "Залиште, будь ласка, ваше ім’я та номер телефону або email."
         )
 
+    def _build_another_time_reply(self, language: str) -> str:
+        return (
+            f"Добре, підберемо інший час для {self._appointment_label()}. "
+            "Підкажіть, будь ласка, який день і час вам зручний?"
+        )
+
     def _build_unrelated_during_booking_reply(self, language: str, state: BookingState) -> str:
         if self.front_desk_config_service is None:
             if state == BookingState.WAITING_FOR_CONTACT:
@@ -407,15 +413,15 @@ class BookingService:
                 "і допомагає доводити клієнтів до запису. Для дзвінка підкажіть, будь ласка, "
                 "зручний день і час."
             )
+        safety = self.front_desk_config_service.get_safety()
+        fallback = str(safety.get("unknown_fallback") or "Уточніть, будь ласка, що саме вас цікавить?")
         if state == BookingState.WAITING_FOR_CONTACT:
             return (
-                "Коротко: це AI-бот для месенджерів, який відповідає на типові звернення "
-                "і допомагає доводити клієнтів до запису. Щоб продовжити підтвердження "
+                f"{fallback} Щоб продовжити підтвердження "
                 f"{self._appointment_label()}, {self._build_name_and_contact_request(language)}."
             )
         return (
-            "Коротко: це AI-бот для месенджерів, який відповідає на типові звернення "
-            f"і допомагає доводити клієнтів до запису. Для {self._appointment_label()} підкажіть, будь ласка, "
+            f"{fallback} Для {self._appointment_label()} підкажіть, будь ласка, "
             "зручний день і час."
         )
 
@@ -650,6 +656,22 @@ class BookingService:
             "telegram",
         ]
         return "?" in text or any(marker in normalized for marker in markers)
+
+    def _looks_like_another_time_request(self, text: str) -> bool:
+        normalized = " ".join(text.strip().lower().split())
+        markers = [
+            "інший час",
+            "інший слот",
+            "інший варіант",
+            "давайте інший",
+            "давай інший",
+            "можна інший",
+            "іншу годину",
+            "another time",
+            "another slot",
+            "different time",
+        ]
+        return any(marker in normalized for marker in markers)
 
     def _save_captured_contact(
         self,
@@ -1756,6 +1778,22 @@ class BookingService:
                     "requires_contact": True,
                     "booking_state": BookingState.WAITING_FOR_CONTACT.value,
                     "start_dt": accepted_start_dt.isoformat(),
+                }
+
+            if pending.get("availability_context") and self._looks_like_another_time_request(message_text):
+                self._save_booking_state(
+                    sender_id,
+                    state=BookingState.WAITING_FOR_TIME,
+                    language=language,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    context_summary=pending.get("context_summary"),
+                )
+                return {
+                    "status": "waiting_for_time",
+                    "reply_text": self._build_another_time_reply(language),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
                 }
 
             contact_details = self._extract_contact_details(message_text)
