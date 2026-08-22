@@ -632,6 +632,88 @@ async def test_dental_closed_day_daypart_does_not_invent_slot():
 
 
 @pytest.mark.asyncio
+async def test_dental_live_transcript_monday_morning_preserves_selected_date():
+    monday = _next_date_for_weekday(0)
+    calendar = SelectiveAvailabilityCalendarService([_at(monday, 10), _at(monday, 11)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    sunday = await processor.process(_message("Хочу записатись на чистку завтра зранку"))
+    monday_selected = await processor.process(_message("на понеділок"))
+    morning = await processor.process(_message("зранку"))
+
+    assert sunday["booking_result"]["status"] == "availability_unavailable"
+    assert "завтра" in sunday["reply_text"].lower()
+    assert monday_selected["booking_result"]["status"] == "waiting_for_time"
+    assert monday_selected["booking_result"]["requested_date"] == monday.isoformat()
+    assert morning["booking_result"]["status"] == "availability_suggested"
+    assert "понеділок" in morning["reply_text"].lower()
+    assert "післязавтра" not in morning["reply_text"].lower()
+    assert "10:00" in morning["reply_text"]
+    assert calendar.range_calls[-1]["start_dt"].date() == monday
+    assert calendar.range_calls[-1]["start_dt"].hour == 9
+    assert calendar.range_calls[-1]["end_dt"].hour == 12
+    _assert_no_flowly_leakage(
+        sunday["reply_text"],
+        monday_selected["reply_text"],
+        morning["reply_text"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_dental_live_transcript_tuesday_daypart_same_turn_searches_availability():
+    tuesday = _next_date_for_weekday(1)
+    calendar = SelectiveAvailabilityCalendarService([_at(tuesday, 10), _at(tuesday, 11)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатись на чистку завтра зранку"))
+    result = await processor.process(_message("на вівторок зранку"))
+
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "10:00" in result["reply_text"]
+    assert "на котру годину" not in result["reply_text"].lower()
+    assert calendar.range_calls[-1]["start_dt"].date() == tuesday
+    assert calendar.range_calls[-1]["start_dt"].hour == 9
+    assert calendar.range_calls[-1]["end_dt"].hour == 12
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_live_transcript_tuesday_then_morning_same_result():
+    tuesday = _next_date_for_weekday(1)
+    calendar = SelectiveAvailabilityCalendarService([_at(tuesday, 10), _at(tuesday, 11)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатись на чистку завтра зранку"))
+    selected_day = await processor.process(_message("на вівторок"))
+    morning = await processor.process(_message("зранку"))
+
+    assert selected_day["booking_result"]["status"] == "waiting_for_time"
+    assert selected_day["booking_result"]["requested_date"] == tuesday.isoformat()
+    assert morning["booking_result"]["status"] == "availability_suggested"
+    assert "10:00" in morning["reply_text"]
+    assert calendar.range_calls[-1]["start_dt"].date() == tuesday
+    assert calendar.range_calls[-1]["start_dt"].hour == 9
+    assert calendar.range_calls[-1]["end_dt"].hour == 12
+    _assert_no_flowly_leakage(selected_day["reply_text"], morning["reply_text"])
+
+
+def test_dental_production_config_recognizes_weekday_hours():
+    service = BookingService(
+        calendar_service=RecordingConfiguredCalendarService(),
+        language_service=LanguageService(),
+        front_desk_config_service=FrontDeskConfigService("app/data/front_desk_config.json"),
+    )
+    monday = _next_date_for_weekday(0)
+    sunday = _next_date_for_weekday(6)
+
+    assert service._working_hours_status_for_date(monday) == (
+        "open",
+        (datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("19:00", "%H:%M").time()),
+    )
+    assert service._working_hours_status_for_date(sunday) == ("closed", None)
+
+
+@pytest.mark.asyncio
 async def test_dental_waiting_time_daypart_followup_preserves_requested_weekday():
     tuesday = _next_date_for_weekday(1)
     calendar = SelectiveAvailabilityCalendarService(

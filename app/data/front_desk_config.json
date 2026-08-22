@@ -1,6 +1,11 @@
 {
   "business": {
-    "name": "Smile Dental Clinic"
+    "name": "Smile Dental Clinic",
+    "working_hours": {
+      "Пн-Пт": "09:00-19:00",
+      "Сб": "10:00-16:00",
+      "Нд": "вихідний"
+    }
   },
   "assistant": {
     "supported_languages": ["uk", "en"],

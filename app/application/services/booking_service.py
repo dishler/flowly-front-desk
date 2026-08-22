@@ -545,25 +545,25 @@ class BookingService:
             return time(hour=hour, minute=minute)
         return None
 
-    def _parse_working_hours_value(self, value: Any) -> tuple[time, time] | None:
+    def _parse_working_hours_value(self, value: Any) -> tuple[str, tuple[time, time] | None]:
         if not isinstance(value, str):
-            return None
+            return "malformed", None
         normalized = value.strip().lower()
         if not normalized or any(marker in normalized for marker in ["вихід", "closed", "off"]):
-            return None
+            return "closed", None
         matches = re.findall(r"(\d{1,2}:\d{2})", normalized)
         if len(matches) < 2:
-            return None
+            return "malformed", None
         start_time = self._parse_hour_minute(matches[0])
         end_time = self._parse_hour_minute(matches[1])
         if start_time is None or end_time is None or end_time <= start_time:
-            return None
-        return start_time, end_time
+            return "malformed", None
+        return "open", (start_time, end_time)
 
-    def _working_hours_for_date(self, requested_date: date) -> tuple[time, time] | None:
+    def _working_hours_status_for_date(self, requested_date: date) -> tuple[str, tuple[time, time] | None]:
         working_hours = self._configured_working_hours()
         if not isinstance(working_hours, dict) or not working_hours:
-            return None
+            return "missing", None
 
         weekday = requested_date.weekday()
         direct_keys = {
@@ -604,7 +604,11 @@ class BookingService:
             if start_index <= weekday <= end_index:
                 return self._parse_working_hours_value(value)
 
-        return None
+        return "missing", None
+
+    def _working_hours_for_date(self, requested_date: date) -> tuple[time, time] | None:
+        _status, window = self._working_hours_status_for_date(requested_date)
+        return window
 
     def _intersect_time_windows(
         self,
@@ -719,18 +723,24 @@ class BookingService:
         language: str,
         *,
         requested_date: date,
+        requested_day_label: str | None = None,
         daypart: dict[str, Any],
         slots: list[datetime],
     ) -> str:
-        day_label = self._format_date_label_for_reply(requested_date, language) or "цей день"
+        day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language) or "цей день"
         daypart_label = daypart["label"]
         if slots:
             times = self._format_slot_times(slots, language)
             return f"На {day_label} {daypart_label} є вільний час {times}. Який варіант вам підійде?"
         return f"На {day_label} {daypart_label} вільного часу не бачу. Підкажіть інший день або час?"
 
-    def _build_day_closed_reply(self, language: str, requested_date: date) -> str:
-        day_label = self._format_date_label_for_reply(requested_date, language) or "цей день"
+    def _build_day_closed_reply(
+        self,
+        language: str,
+        requested_date: date,
+        requested_day_label: str | None = None,
+    ) -> str:
+        day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language) or "цей день"
         return f"На {day_label} не бачу доступних робочих годин. Підкажіть інший день?"
 
     def _save_availability_suggestions(
@@ -803,7 +813,31 @@ class BookingService:
                 "suggested_slots": [],
             }
 
-        working_window = self._working_hours_for_date(requested_date)
+        working_status, working_window = self._working_hours_status_for_date(requested_date)
+        if working_status in {"missing", "malformed"}:
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_TIME,
+                language=language,
+                source_channel=source_channel,
+                context_summary=message_text[:280],
+                requested_date=requested_date,
+                requested_day_label=requested_day_label,
+            )
+            logger.warning(
+                "availability search cannot resolve business hours sender_id=%s date=%s status=%s",
+                sender_id,
+                requested_date.isoformat(),
+                working_status,
+            )
+            return {
+                "status": "availability_unavailable",
+                "reply_text": self._build_availability_unavailable_reply(language),
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat(),
+                "suggested_slots": [],
+            }
+
         daypart_window = (
             time(hour=daypart["start_hour"], minute=0),
             time(hour=daypart["end_hour"], minute=0),
@@ -821,7 +855,11 @@ class BookingService:
             )
             return {
                 "status": "availability_unavailable",
-                "reply_text": self._build_day_closed_reply(language, requested_date),
+                "reply_text": self._build_day_closed_reply(
+                    language,
+                    requested_date,
+                    requested_day_label,
+                ),
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "requested_date": requested_date.isoformat(),
                 "suggested_slots": [],
@@ -847,6 +885,7 @@ class BookingService:
             "reply_text": self._build_daypart_slots_reply(
                 language,
                 requested_date=requested_date,
+                requested_day_label=requested_day_label,
                 daypart=daypart,
                 slots=slots,
             ),
