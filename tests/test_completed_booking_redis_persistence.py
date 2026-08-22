@@ -13,6 +13,7 @@ from app.application.services.memory_service import MemoryService
 from app.application.services.message_processor import MessageProcessor
 from app.application.services.outbound_service import OutboundService
 from app.application.services.redis_booking_state_service import RedisBookingStateService
+from app.application.services.redis_memory_service import RedisMemoryService
 from app.application.services.reply_service import ReplyService
 
 
@@ -24,6 +25,11 @@ class FakeRedis:
     def setex(self, key: str, ttl: int, value: str) -> None:
         self.store[key] = value
         self.ttls[key] = ttl
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
 
     def get(self, key: str):
         return self.store.get(key)
@@ -132,8 +138,11 @@ def _booking_service(fake_redis: FakeRedis, calendar_service=None) -> BookingSer
     )
 
 
-def _processor(booking_service: BookingService) -> MessageProcessor:
-    memory_service = MemoryService()
+def _processor(
+    booking_service: BookingService,
+    memory_service: MemoryService | RedisMemoryService | None = None,
+) -> MessageProcessor:
+    memory_service = memory_service or MemoryService()
     return MessageProcessor(
         memory_service=memory_service,
         reply_service=ReplyService(
@@ -268,6 +277,58 @@ async def test_reschedule_after_restart_updates_persisted_start_dt(fake_redis):
     assert calendar_service.rescheduled_events
     assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
     assert _completed_payload(fake_redis)["start_dt"].endswith("T15:00:00+03:00")
+
+
+async def test_fresh_booking_after_completed_state_does_not_reschedule_persisted_event(fake_redis):
+    _mark_completed(_booking_service(fake_redis))
+    original_start_dt = _completed_payload(fake_redis)["start_dt"]
+    calendar_service = RecordingCalendarService()
+    processor = _processor(_booking_service(fake_redis, calendar_service=calendar_service))
+
+    result = await processor.process(_message("хочу записатись на чистку завтра о 12"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "перенесли" not in result["reply_text"]
+    assert calendar_service.rescheduled_events == []
+    assert _completed_payload(fake_redis)["start_dt"] == original_start_dt
+    pending = _state_service(fake_redis).get_pending_confirmation("user-1")
+    assert pending is not None
+    assert pending["state"] == "WAITING_FOR_CONTACT"
+
+
+async def test_explicit_reschedule_after_completed_state_still_updates_persisted_event(fake_redis):
+    _mark_completed(_booking_service(fake_redis))
+    calendar_service = RecordingCalendarService()
+    processor = _processor(_booking_service(fake_redis, calendar_service=calendar_service))
+
+    result = await processor.process(_message("хочу перенести запис на завтра о 12"))
+
+    assert result["intent"] == "booking_reschedule"
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert calendar_service.rescheduled_events
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
+    assert _completed_payload(fake_redis)["start_dt"].endswith("T12:00:00+03:00")
+
+
+async def test_fresh_booking_with_redis_memory_after_completed_state(fake_redis):
+    _mark_completed(_booking_service(fake_redis))
+    original_start_dt = _completed_payload(fake_redis)["start_dt"]
+    calendar_service = RecordingCalendarService()
+    processor = _processor(
+        _booking_service(fake_redis, calendar_service=calendar_service),
+        memory_service=RedisMemoryService(fake_redis),
+    )
+
+    await processor.process(_message("поставив дзвінок?"))
+    result = await processor.process(_message("хочу записатись на чистку завтра о 12"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar_service.rescheduled_events == []
+    assert _completed_payload(fake_redis)["start_dt"] == original_start_dt
+    assert fake_redis.exists("meta_bot:memory:user-1") == 1
+    assert fake_redis.exists("booking:pending:user-1") == 1
 
 
 async def test_failed_reschedule_preserves_persisted_start_dt(fake_redis):

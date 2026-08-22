@@ -230,6 +230,30 @@ class MessageProcessor:
         ]
         return any(marker in normalized for marker in markers)
 
+    def _looks_like_fresh_booking_request(self, text: str) -> bool:
+        if self._looks_like_reschedule_request(text) or self._looks_like_cancel_request(text):
+            return False
+
+        normalized = self._normalize_for_booking_keywords(text)
+        explicit_booking_markers = [
+            "хочу записатися",
+            "хочу записатись",
+            "хочу запис",
+            "хочу ще один запис",
+            "запишіть мене",
+            "запиши мене",
+            "записати мене",
+            "можна записатися",
+            "можна записатись",
+            "book an appointment",
+            "new booking",
+            "book a new",
+        ]
+        if any(marker in normalized for marker in explicit_booking_markers):
+            return True
+
+        return self._looks_like_booking_message(text)
+
     def _looks_like_cancel_request(self, text: str) -> bool:
         normalized = text.strip().lower()
         markers = [
@@ -2135,6 +2159,19 @@ class MessageProcessor:
             booking_state == BookingState.NONE
             and self.booking_service.has_confirmed_booking(message.sender_id)
         ):
+            if self._looks_like_fresh_booking_request(message.user_message):
+                booking_result = self.booking_service.start_booking_flow(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_request",
+                    booking_result=booking_result,
+                )
+
             confirmed_result = self._handle_confirmed_booking_message(message)
             if confirmed_result is not None:
                 return confirmed_result

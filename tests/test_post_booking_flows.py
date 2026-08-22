@@ -1366,6 +1366,73 @@ async def test_confirmed_booking_datetime_followup_reschedules(processor_factory
     assert booking_service.get_booking_state("user-1").value == "NONE"
 
 
+async def test_confirmed_booking_fresh_booking_intent_starts_new_booking_without_reschedule(
+    processor_factory,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="давайте кол"))
+    await processor.process(_message(text="завтра 14:00"))
+    await processor.process(_message(text="Дмитро 0987121329"))
+    existing_created_count = len(calendar_service.created_events)
+
+    result = await processor.process(_message(text="хочу записатись на чистку завтра о 12"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "перенесли" not in result["reply_text"]
+    assert "залиште" in result["reply_text"].lower()
+    assert len(calendar_service.created_events) == existing_created_count
+    assert calendar_service.rescheduled_events == []
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_confirmed_booking_explicit_reschedule_still_updates_existing_booking(
+    processor_factory,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="давайте кол"))
+    await processor.process(_message(text="завтра 14:00"))
+    await processor.process(_message(text="Дмитро 0987121329"))
+    existing_created_count = len(calendar_service.created_events)
+
+    result = await processor.process(_message(text="хочу перенести запис на завтра о 12"))
+
+    assert result["intent"] == "booking_reschedule"
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert "перенесли на завтра о 12:00" in result["reply_text"]
+    assert len(calendar_service.created_events) == existing_created_count
+    assert calendar_service.rescheduled_events
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-created"
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_confirmed_booking_fresh_booking_after_faq_messages(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="давайте кол"))
+    await processor.process(_message(text="завтра 14:00"))
+    await processor.process(_message(text="Дмитро 0987121329"))
+    status = await processor.process(_message(text="поставив дзвінок?"))
+    faq = await processor.process(_message(text="а скільки коштує?"))
+    existing_created_count = len(calendar_service.created_events)
+
+    result = await processor.process(_message(text="хочу записатись на чистку завтра о 12"))
+
+    assert status["intent"] == "booking_status_confirmed"
+    assert faq["booking_result"] is None
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "перенесли" not in result["reply_text"]
+    assert len(calendar_service.created_events) == existing_created_count
+    assert calendar_service.rescheduled_events == []
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
 async def test_language_request_does_not_answer_in_russian(processor_factory):
     processor, _ = processor_factory()
 
