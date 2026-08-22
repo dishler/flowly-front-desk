@@ -1321,6 +1321,12 @@ class BookingService:
             "п'ятниц": 4,
             "п’ятниц": 4,
             "friday": 4,
+            "субота": 5,
+            "суботу": 5,
+            "saturday": 5,
+            "неділя": 6,
+            "неділю": 6,
+            "sunday": 6,
         }
 
     def _format_day_label_for_reply(self, value: str | None) -> str | None:
@@ -1335,12 +1341,16 @@ class BookingService:
             "wednesday": "середу",
             "thursday": "четвер",
             "friday": "п’ятницю",
+            "saturday": "суботу",
+            "sunday": "неділю",
             "понеділка": "понеділок",
             "вівторка": "вівторок",
             "середа": "середу",
             "четверг": "четвер",
             "п'ятниц": "п’ятницю",
             "п’ятниц": "п’ятницю",
+            "субота": "суботу",
+            "неділя": "неділю",
         }
         return labels.get(value, value)
 

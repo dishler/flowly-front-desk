@@ -174,6 +174,53 @@ def test_exact_time_booking_checks_calendar_for_open_monday(tmp_path):
     assert calendar.checked[-1]["start_dt"].hour == 12
 
 
+def test_exact_time_booking_rolls_same_weekday_saturday_to_next_week_and_rejects_9(tmp_path):
+    calendar = RecordingCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+
+    result = service.start_booking_flow("user-1", "Хочу записатися у суботу о 9")
+
+    assert result["status"] == "outside_business_hours"
+    assert result["start_dt"] == "2026-08-29T09:00:00+03:00"
+    assert calendar.checked == []
+
+
+def test_exact_time_booking_rolls_same_weekday_saturday_to_next_week_and_checks_10(tmp_path):
+    calendar = RecordingCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+
+    result = service.start_booking_flow("user-1", "Хочу записатися у суботу о 10")
+
+    assert result["status"] == "waiting_for_contact"
+    assert calendar.checked
+    assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
+
+
+def test_exact_time_booking_with_service_rolls_same_weekday_saturday_to_next_week(tmp_path):
+    calendar = RecordingCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+
+    result = service.start_booking_flow("user-1", "Хочу записатися на чистку у суботу о 10")
+
+    assert result["status"] == "waiting_for_contact"
+    assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
+
+
 def test_exact_time_booking_rejects_saturday_before_opening(tmp_path):
     calendar = RecordingCalendarService()
     service = _service(

@@ -373,6 +373,44 @@ async def test_dental_exact_time_booking_rejects_closed_sunday_before_calendar(d
 
 
 @pytest.mark.asyncio
+async def test_dental_exact_time_booking_rolls_saturday_9_to_next_week_and_rejects(dental_processor):
+    processor, calendar = dental_processor
+
+    result = await processor.process(_message("Хочу записатися у суботу о 9"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "outside_business_hours"
+    assert result["booking_result"]["start_dt"] == "2026-08-29T09:00:00+03:00"
+    assert calendar.checked == []
+    assert "клініка не працює" in result["reply_text"].lower()
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_exact_time_booking_rolls_saturday_10_to_next_week_and_checks_calendar(dental_processor):
+    processor, calendar = dental_processor
+
+    result = await processor.process(_message("Хочу записатися у суботу о 10"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_exact_time_booking_with_service_rolls_saturday_10(dental_processor):
+    processor, calendar = dental_processor
+
+    result = await processor.process(_message("Хочу записатися на чистку у суботу о 10"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_common_service_day_booking_phrase_golden_multiturn(dental_processor):
     processor, calendar = dental_processor
 
@@ -734,6 +772,31 @@ async def test_dental_active_booking_fresh_intent_bypasses_stale_pricing_context
     assert calendar.checked[-1]["start_dt"].hour == 12
     assert pending_after["state"] == "WAITING_FOR_CONTACT"
     assert pending_after["start_dt"][11:16] == "12:00"
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_fresh_saturday_9_rejects_next_week_without_calendar(dental_processor):
+    processor, calendar = dental_processor
+
+    await _seed_waiting_for_time_with_stale_pricing_context(processor)
+    result = await processor.process(_message("Хочу записатися у суботу о 9"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "outside_business_hours"
+    assert result["booking_result"]["start_dt"] == "2026-08-29T09:00:00+03:00"
+    assert calendar.checked == []
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_fresh_saturday_10_checks_calendar(dental_processor):
+    processor, calendar = dental_processor
+
+    await _seed_waiting_for_time_with_stale_pricing_context(processor)
+    result = await processor.process(_message("Хочу записатися у суботу о 10"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
 
 
 @pytest.mark.asyncio
