@@ -685,6 +685,93 @@ async def test_dental_time_window_refinement_between_after_suggestions_keeps_dat
 
 
 @pytest.mark.asyncio
+async def test_dental_active_booking_time_window_refinement_bypasses_contextual_pricing():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 10),
+        _kyiv_dt(2026, 8, 27, 10, 30),
+        _kyiv_dt(2026, 8, 27, 11),
+        _kyiv_dt(2026, 8, 27, 11, 30),
+        _kyiv_dt(2026, 8, 27, 12),
+        _kyiv_dt(2026, 8, 27, 12, 30),
+        _kyiv_dt(2026, 8, 27, 16, 30),
+        _kyiv_dt(2026, 8, 27, 17),
+        _kyiv_dt(2026, 8, 27, 18),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    initial = await processor.process(_message("Хочу записатися у четвер до 15"))
+    later = await processor.process(_message("а є щось пізніше?"))
+    before_refinement_calls = len(calendar.checked)
+    refined = await processor.process(_message("а після 16 є щось?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert initial["booking_result"]["status"] == "time_window_slots_suggested"
+    assert later["booking_result"]["status"] == "time_window_slots_suggested"
+    assert refined["intent"] == "booking_flow"
+    assert refined["booking_result"]["status"] == "time_window_slots_suggested"
+    assert refined["booking_result"]["requested_date"] == "2026-08-27"
+    assert refined["booking_result"]["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-27T16:30:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-27T17:00:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-27T18:00:00+03:00"},
+    ]
+    assert "коштує" not in refined["reply_text"].lower()
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["requested_date"] == "2026-08-27"
+    assert len(calendar.checked) > before_refinement_calls
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_time_window_refinement_beats_stale_pricing_context():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 10),
+        _kyiv_dt(2026, 8, 27, 16, 30),
+        _kyiv_dt(2026, 8, 27, 17),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатися у четвер до 15"))
+    processor.memory_service.update_context(
+        "patient-1",
+        current_service_id="teeth_whitening",
+        question_context="pricing",
+    )
+    refined = await processor.process(_message("а після 16 є щось?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert refined["intent"] == "booking_flow"
+    assert refined["booking_result"]["status"] == "time_window_slots_suggested"
+    assert refined["booking_result"]["requested_date"] == "2026-08-27"
+    assert refined["booking_result"]["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-27T16:30:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-27T17:00:00+03:00"},
+    ]
+    assert "6500" not in refined["reply_text"]
+    assert "відбілювання" not in refined["reply_text"].lower()
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["requested_date"] == "2026-08-27"
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_time_window_keeps_legitimate_price_faq():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 10),
+        _kyiv_dt(2026, 8, 27, 10, 30),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатися у четвер до 15"))
+    faq = await processor.process(_message("скільки коштує відбілювання?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert faq["intent"] == "booking_grounded_question"
+    assert faq["booking_result"] is None
+    assert "6500" in faq["reply_text"]
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["requested_date"] == "2026-08-27"
+
+
+@pytest.mark.asyncio
 async def test_dental_time_window_no_verified_slots_are_not_invented():
     calendar = SelectiveConfiguredCalendarService([])
     processor, calendar = _build_dental_processor(calendar_service=calendar)

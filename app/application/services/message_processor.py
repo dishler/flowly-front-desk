@@ -319,6 +319,17 @@ class MessageProcessor:
         ]
         return any(marker in normalized for marker in markers)
 
+    def _looks_like_time_window_constraint(self, text: str) -> bool:
+        normalized = " ".join(text.strip().lower().replace("–", "-").replace("—", "-").split())
+        time_pattern = r"\d{1,2}(?::\d{2})?"
+        return bool(
+            re.search(rf"\bпісля\s+{time_pattern}\b", normalized)
+            or re.search(rf"\bдо\s+{time_pattern}\b", normalized)
+            or re.search(rf"\bз\s+{time_pattern}(?:\s+годин[иу]?)?\s+до\s+{time_pattern}\b", normalized)
+            or re.search(rf"\bміж\s+{time_pattern}\s+(?:і|та)\s+{time_pattern}\b", normalized)
+            or re.search(rf"\b{time_pattern}\s*-\s*{time_pattern}\b", normalized)
+        )
+
     def _looks_like_call_explanation_question(self, text: str) -> bool:
         normalized = text.strip().lower()
         markers = [
@@ -2054,6 +2065,23 @@ class MessageProcessor:
                         source_channel=message.platform,
                     )
 
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                    )
+
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and self._looks_like_time_window_constraint(message.user_message)
+            ):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
                 if booking_result is not None:
                     return self._build_booking_reply_result(
                         message=message,
