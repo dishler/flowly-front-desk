@@ -1693,6 +1693,33 @@ class MessageProcessor:
             "якщо вам ок. Коли вам було б зручно?"
         )
 
+    def _message_has_valid_contact_data(self, text: str) -> bool:
+        contact_details = self.booking_service.extract_contact_details(text)
+        return bool(contact_details["has_phone"] or contact_details["has_email"])
+
+    def _find_service_correction(self, text: str) -> dict[str, Any] | None:
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        if knowledge_service is None:
+            return None
+
+        normalized = self._normalize_for_conversation_matching(text)
+        padded = f" {normalized} "
+        correction_markers = [" а не ", " не ", " not ", " instead ", " rather "]
+        if not any(marker in padded for marker in correction_markers):
+            return None
+
+        preferred_text = normalized
+        for marker in correction_markers:
+            if marker in padded:
+                preferred_text = padded.split(marker, maxsplit=1)[0].strip()
+                break
+
+        service = knowledge_service.find_service(preferred_text)
+        if service is not None:
+            return service
+
+        return knowledge_service.find_service(normalized)
+
     def _handle_confirmed_booking_message(self, message: NormalizedMessage) -> Dict[str, Any] | None:
         language = self.reply_service.detect_user_language(message.user_message)
 
@@ -1950,6 +1977,32 @@ class MessageProcessor:
 
             if self._looks_like_capability_question(message.user_message):
                 return self._build_capability_question_result(message)
+
+            if booking_state == BookingState.WAITING_FOR_CONTACT:
+                booking_result = None
+                service_correction = self._find_service_correction(message.user_message)
+                if service_correction is not None:
+                    booking_result = self.booking_service.handle_service_correction(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        service=service_correction,
+                    )
+                elif self._message_has_valid_contact_data(
+                    message.user_message
+                ) or self.booking_service._extract_corrected_time(message.user_message):
+                    booking_result = self.booking_service.process_booking_message(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        source_channel=message.platform,
+                    )
+
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                    )
 
             grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)
             if grounded_reply:

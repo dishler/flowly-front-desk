@@ -558,7 +558,20 @@ class BookingService:
             return True
         if self._extract_hour_only(normalized) is not None:
             return True
+        if self._looks_like_booking_correction(normalized) and self._extract_corrected_time(normalized):
+            return True
         non_names = {
+            "не",
+            "ні",
+            "не хочу",
+            "краще",
+            "давай",
+            "давайте",
+            "ну давай",
+            "тоді",
+            "інший",
+            "інший час",
+            "інша година",
             "цікаво",
             "гаразд цікаво",
             "ок цікаво",
@@ -1257,21 +1270,23 @@ class BookingService:
         normalized = " ".join(text.strip().lower().split())
         correction_markers = [
             "краще",
+            "не хочу",
             "мав на увазі",
             "мала на увазі",
             "маю на увазі",
             "я мав на увазі",
             "я мала на увазі",
+            "не ",
             "не о",
             "не на",
-            "а о",
-            "а на",
             "rather",
             "instead",
             "i mean",
             "meant",
         ]
-        return any(marker in normalized for marker in correction_markers)
+        if any(marker in normalized for marker in correction_markers):
+            return True
+        return bool(re.search(r"\bnot\s+(?:at\s+)?\d{1,2}\b", normalized))
 
     def _parse_time_candidates(self, text: str) -> list[time]:
         normalized = text.strip().lower()
@@ -1292,6 +1307,17 @@ class BookingService:
 
         return candidates
 
+    def _parse_loose_hour_candidates(self, text: str) -> list[time]:
+        candidates = self._parse_time_candidates(text)
+        normalized = text.strip().lower()
+        for hour_match in re.finditer(r"\b(\d{1,2})(?::00)?\b", normalized):
+            hour = int(hour_match.group(1))
+            if 0 <= hour <= 23:
+                candidate = time(hour=hour, minute=0)
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        return candidates
+
     def _extract_corrected_time(self, text: str) -> time | None:
         if not self._looks_like_booking_correction(text):
             return None
@@ -1299,16 +1325,63 @@ class BookingService:
         normalized = text.strip().lower()
         marker_positions = [
             normalized.rfind(marker)
-            for marker in [" а ", "краще", "мав на увазі", "мала на увазі", "маю на увазі", "rather", "instead", "mean", "meant"]
+            for marker in [
+                " а ",
+                "краще",
+                "мав на увазі",
+                "мала на увазі",
+                "маю на увазі",
+                "rather",
+                "instead",
+                "mean",
+                "meant",
+            ]
         ]
         last_marker = max(marker_positions)
         if last_marker >= 0:
             parsed = self._parse_time_only(normalized[last_marker:])
             if parsed is not None:
                 return parsed
+            candidates = self._parse_loose_hour_candidates(normalized[last_marker:])
+            if candidates:
+                return candidates[-1]
 
-        candidates = self._parse_time_candidates(text)
-        return candidates[-1] if candidates else None
+        candidates = self._parse_loose_hour_candidates(text)
+        has_negative_time_replacement = any(
+            marker in normalized for marker in ["не ", "not "]
+        ) and len(candidates) >= 2
+        return candidates[-1] if has_negative_time_replacement else None
+
+    def handle_service_correction(
+        self,
+        sender_id: str,
+        message_text: str,
+        service: dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        pending = self._get_pending_confirmation(sender_id)
+        if not pending:
+            return None
+
+        language = pending.get("language") or self._detect_language(message_text)
+        service_id = service.get("id")
+        service_name = service.get("name")
+        if service_id:
+            pending["service_id"] = str(service_id)
+        if service_name:
+            pending["service_name"] = str(service_name)
+        pending["context_summary"] = message_text[:280]
+        pending["customer_name"] = None
+        self._save_pending_confirmation(sender_id, pending)
+
+        return {
+            "status": "waiting_for_contact",
+            "reply_text": self._build_contact_retry_reply(language),
+            "event_created": False,
+            "requires_contact": True,
+            "booking_state": BookingState.WAITING_FOR_CONTACT.value,
+            "service_id": str(service_id) if service_id else None,
+            "start_dt": pending.get("start_dt"),
+        }
 
     def _deserialize_pending_requested_date(self, value: Any) -> date | None:
         if isinstance(value, datetime):

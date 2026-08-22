@@ -469,6 +469,131 @@ async def test_dental_combined_contact_completes_without_repeated_contact_questi
 
 
 @pytest.mark.asyncio
+async def test_dental_waiting_contact_customer_phone_phrase_is_captured(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 14"))
+    phone = await processor.process(_message("мій номер 0987121328"))
+    pending_after_phone = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    confirmed = await processor.process(_message("Дмитро"))
+
+    assert phone["booking_result"]["status"] == "waiting_for_name"
+    assert pending_after_phone["contact_phone"] == "0987121328"
+    assert pending_after_phone["customer_name"] is None
+    assert "ім" in phone["reply_text"].lower()
+    assert "Контакти:" not in phone["reply_text"]
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert confirmed["booking_result"]["customer_name"] == "Дмитро"
+    assert confirmed["booking_result"]["contact_phone"] == "0987121328"
+    assert calendar.created[-1]["start_dt"].weekday() == 1
+    assert calendar.created[-1]["start_dt"].hour == 14
+    _assert_no_flowly_leakage(phone["reply_text"], confirmed["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_contact_business_phone_question_remains_faq(dental_processor):
+    processor, _calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 14"))
+    faq = await processor.process(_message("який у вас номер телефону?"))
+    pending_after_faq = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert faq["intent"] == "booking_grounded_question"
+    assert "0987121328" not in faq["reply_text"]
+    assert pending_after_faq["contact_phone"] is None
+    assert pending_after_faq["customer_name"] is None
+    assert pending_after_faq["state"] == "WAITING_FOR_CONTACT"
+    _assert_no_flowly_leakage(faq["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_contact_compact_time_correction_updates_time_not_name(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 14"))
+    corrected = await processor.process(_message("не 14 а 16"))
+    pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert corrected["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_correction["customer_name"] is None
+    assert pending_after_correction["contact_phone"] is None
+    assert calendar.checked[-1]["start_dt"].weekday() == 1
+    assert calendar.checked[-1]["start_dt"].hour == 16
+    assert "16:00" in corrected["reply_text"]
+    _assert_no_flowly_leakage(corrected["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_contact_reject_and_replace_time_does_not_become_name(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 14"))
+    corrected = await processor.process(_message("не хочу 14, краще 16"))
+    pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert corrected["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_correction["customer_name"] is None
+    assert pending_after_correction["contact_phone"] is None
+    assert calendar.checked[-1]["start_dt"].weekday() == 1
+    assert calendar.checked[-1]["start_dt"].hour == 16
+    assert "16:00" in corrected["reply_text"]
+    _assert_no_flowly_leakage(corrected["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_contact_service_correction_updates_service_not_name(dental_processor):
+    processor, _calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на консультацію у вівторок"))
+    await processor.process(_message("На 14"))
+    corrected = await processor.process(_message("чистку, не консультацію"))
+    pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert corrected["booking_result"]["status"] == "waiting_for_contact"
+    assert corrected["booking_result"]["service_id"] == "dental_cleaning"
+    assert pending_after_correction["service_id"] == "dental_cleaning"
+    assert pending_after_correction["customer_name"] is None
+    assert pending_after_correction["contact_phone"] is None
+    assert "T14:00:00" in pending_after_correction["start_dt"]
+    assert "залиште" in corrected["reply_text"].lower()
+    _assert_no_flowly_leakage(corrected["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_contact_normal_names_still_work(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 14"))
+    name = await processor.process(_message("Дмитро"))
+    pending_after_name = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    completed = await processor.process(_message("0987121328"))
+
+    assert name["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_name["customer_name"] == "Дмитро"
+    assert pending_after_name["contact_phone"] is None
+    assert completed["booking_result"]["status"] == "confirmed"
+    assert completed["booking_result"]["customer_name"] == "Дмитро"
+    assert completed["booking_result"]["contact_phone"] == "0987121328"
+    assert calendar.created[-1]["start_dt"].hour == 14
+
+    processor, calendar = _build_dental_processor()
+    await processor.process(_message("Хочу записатись на чистку у вівторок"))
+    await processor.process(_message("На 14"))
+    combined = await processor.process(_message("Дмитро 0987121328"))
+
+    assert combined["booking_result"]["status"] == "confirmed"
+    assert combined["booking_result"]["customer_name"] == "Дмитро"
+    assert combined["booking_result"]["contact_phone"] == "0987121328"
+    assert calendar.created[-1]["start_dt"].hour == 14
+    _assert_no_flowly_leakage(name["reply_text"], completed["reply_text"], combined["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_active_booking_location_faq_preserves_booking_state(dental_processor):
     processor, calendar = dental_processor
 
