@@ -254,6 +254,27 @@ class MessageProcessor:
 
         return self._looks_like_booking_message(text)
 
+    def _looks_like_explicit_fresh_booking_request(self, text: str) -> bool:
+        if not self._looks_like_fresh_booking_request(text):
+            return False
+
+        normalized = self._normalize_for_booking_keywords(text)
+        explicit_booking_markers = [
+            "хочу записатися",
+            "хочу записатись",
+            "хочу запис",
+            "хочу ще один запис",
+            "запишіть мене",
+            "запиши мене",
+            "записати мене",
+            "можна записатися",
+            "можна записатись",
+            "book an appointment",
+            "new booking",
+            "book a new",
+        ]
+        return any(marker in normalized for marker in explicit_booking_markers)
+
     def _looks_like_cancel_request(self, text: str) -> bool:
         normalized = text.strip().lower()
         markers = [
@@ -2001,6 +2022,19 @@ class MessageProcessor:
 
             if self._looks_like_capability_question(message.user_message):
                 return self._build_capability_question_result(message)
+
+            if self._looks_like_explicit_fresh_booking_request(message.user_message):
+                booking_result = self.booking_service.start_booking_flow(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_request",
+                    booking_result=booking_result,
+                )
 
             if booking_state == BookingState.WAITING_FOR_CONTACT:
                 booking_result = None

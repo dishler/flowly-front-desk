@@ -691,6 +691,104 @@ async def test_dental_active_booking_location_faq_preserves_booking_state(dental
     _assert_no_flowly_leakage(start["reply_text"], faq["reply_text"], time["reply_text"])
 
 
+async def _seed_waiting_for_time_with_stale_pricing_context(processor):
+    start = await processor.process(_message("Хочу записатися на чистку у вівторок"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    processor.memory_service.update_context(
+        "patient-1",
+        current_service_id="dental_cleaning",
+        question_context="pricing",
+    )
+    return start, pending
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_fresh_intent_bypasses_stale_pricing_context(dental_processor):
+    processor, calendar = dental_processor
+
+    start, pending_before = await _seed_waiting_for_time_with_stale_pricing_context(processor)
+    result = await processor.process(_message("Хочу записатися на чистку завтра о 12"))
+    pending_after = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert start["booking_result"]["status"] == "waiting_for_time"
+    assert pending_before["state"] == "WAITING_FOR_TIME"
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "1800" not in result["reply_text"]
+    assert "коштує" not in result["reply_text"].lower()
+    assert calendar.checked
+    assert calendar.checked[-1]["start_dt"].hour == 12
+    assert pending_after["state"] == "WAITING_FOR_CONTACT"
+    assert pending_after["start_dt"][11:16] == "12:00"
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_price_faq_still_uses_stale_pricing_context(dental_processor):
+    processor, calendar = dental_processor
+
+    _start, pending_before = await _seed_waiting_for_time_with_stale_pricing_context(processor)
+    result = await processor.process(_message("скільки коштує чистка?"))
+    pending_after = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_grounded_question"
+    assert result["booking_result"] is None
+    assert "1800" in result["reply_text"]
+    assert pending_after["state"] == "WAITING_FOR_TIME"
+    assert pending_after["requested_date"] == pending_before["requested_date"]
+    assert calendar.checked == []
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_explicit_fresh_marker_starts_fresh_flow(dental_processor):
+    processor, calendar = dental_processor
+
+    await _seed_waiting_for_time_with_stale_pricing_context(processor)
+    result = await processor.process(_message("запишіть мене на завтра о 12"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "1800" not in result["reply_text"]
+    assert calendar.checked[-1]["start_dt"].hour == 12
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_reschedule_wording_does_not_start_fresh_flow(dental_processor):
+    processor, calendar = dental_processor
+
+    await _seed_waiting_for_time_with_stale_pricing_context(processor)
+    result = await processor.process(_message("хочу перенести запис на завтра о 12"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert result["intent"] != "booking_request"
+    assert calendar.checked[-1]["start_dt"].hour == 12
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_cancel_stays_unchanged(dental_processor):
+    processor, calendar = dental_processor
+
+    await _seed_waiting_for_time_with_stale_pricing_context(processor)
+    result = await processor.process(_message("скасуйте запис"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "cancelled"
+    assert result["booking_result"]["booking_state"] == "NONE"
+    assert calendar.checked == []
+
+
+@pytest.mark.asyncio
+async def test_dental_fresh_sender_exact_booking_phrase_unchanged(dental_processor):
+    processor, calendar = dental_processor
+
+    result = await processor.process(_message("Хочу записатися на чистку завтра о 12"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "1800" not in result["reply_text"]
+    assert calendar.checked[-1]["start_dt"].hour == 12
+
+
 @pytest.mark.asyncio
 async def test_dental_repeated_unresolved_fallback_has_no_product_leakage(dental_processor):
     processor, _calendar = dental_processor
