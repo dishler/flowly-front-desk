@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -103,6 +103,7 @@ class DummyConfiguredCalendarClient:
 class DefaultTestCalendarService(CalendarService):
     def __init__(self) -> None:
         super().__init__()
+        self.google_calendar_client = DummyConfiguredCalendarClient()
         self.rescheduled_events = []
 
     def get_available_slots(self, language: str):
@@ -125,6 +126,31 @@ class DefaultTestCalendarService(CalendarService):
         duration_minutes: int = 30,
     ) -> bool:
         return True
+
+    def get_available_slots_in_range(
+        self,
+        start_dt,
+        end_dt,
+        duration_minutes: int = 30,
+        step_minutes: int = 30,
+        limit: int | None = None,
+    ):
+        today = datetime.now().astimezone().date()
+        if start_dt.date() == today + timedelta(days=1):
+            preferred_hours = {12, 15}
+        elif start_dt.date() == today + timedelta(days=2):
+            preferred_hours = {11, 16}
+        else:
+            preferred_hours = {12, 15}
+        slots = []
+        cursor = start_dt
+        while cursor + timedelta(minutes=duration_minutes) <= end_dt:
+            if cursor.hour in preferred_hours and cursor.minute == 0:
+                slots.append(cursor)
+                if limit is not None and len(slots) >= limit:
+                    break
+            cursor += timedelta(minutes=step_minutes)
+        return slots
 
     def reschedule_event(self, event_id: str, start_dt, duration_minutes: int = 30) -> None:
         self.rescheduled_events.append(
@@ -220,17 +246,42 @@ class BusyUntil1430CreateCalendarService(RecordingCreateCalendarService):
         )
 
 
+class BookingConfigWithHours:
+    def get_business(self):
+        return {
+            "name": "Test Business",
+            "working_hours": {
+                "Пн-Пт": "09:00-19:00",
+                "Сб": "09:00-19:00",
+                "Нд": "09:00-19:00",
+            },
+        }
+
+    def get_booking(self):
+        return {
+            "enabled": True,
+            "appointment_label": "дзвінок",
+            "duration_minutes": 30,
+            "required_contact_fields": ["name", "phone_or_email"],
+        }
+
+    def get_safety(self):
+        return {"unknown_fallback": "Уточніть, будь ласка."}
+
+
 @pytest.fixture
 def processor_factory():
     def build(
         transcript: str = "",
         calendar_service: CalendarService | None = None,
         ai_service=None,
+        booking_config_service=None,
     ):
         memory_service = MemoryService()
         booking_service = BookingService(
             calendar_service=calendar_service or DefaultTestCalendarService(),
             language_service=LanguageService(),
+            front_desk_config_service=booking_config_service,
         )
         reply_service = ReplyService(
             ai_service=ai_service,
@@ -289,7 +340,7 @@ def _mark_confirmed(booking_service: BookingService, event_id: str | None = None
         (
             "коли є вільні слоти?",
             "booking_availability_question",
-            "завтра о 12:00 або 15:00",
+            "Не можу зараз надійно перевірити",
         ),
         (
             "Скасуйте дзвінок",
@@ -329,7 +380,7 @@ async def test_confirmed_booking_text_flows(processor_factory, text, expected_in
         (
             "коли є вільні слоти?",
             "booking_availability_question",
-            "завтра о 12:00 або 15:00",
+            "Не можу зараз надійно перевірити",
         ),
         (
             "Скасуйте дзвінок",
@@ -381,7 +432,7 @@ async def test_cancel_confirmed_booking_hands_off_when_calendar_delete_fails(pro
 
 
 async def test_availability_suggests_slots_and_day_followup(processor_factory):
-    processor, _ = processor_factory()
+    processor, _ = processor_factory(booking_config_service=BookingConfigWithHours())
 
     result = await processor.process(_message(text="коли є вільні слоти?"))
 
@@ -397,7 +448,7 @@ async def test_availability_suggests_slots_and_day_followup(processor_factory):
 
 
 async def test_availability_datetime_followup_asks_for_contact(processor_factory):
-    processor, _ = processor_factory()
+    processor, _ = processor_factory(booking_config_service=BookingConfigWithHours())
     await processor.process(_message(text="коли є вільні слоти?"))
 
     result = await processor.process(_message(text="завтра о 15"))
@@ -408,7 +459,7 @@ async def test_availability_datetime_followup_asks_for_contact(processor_factory
 
 
 async def test_availability_time_only_followup_uses_context(processor_factory):
-    processor, _ = processor_factory()
+    processor, _ = processor_factory(booking_config_service=BookingConfigWithHours())
     await processor.process(_message(text="коли є вільні слоти?"))
 
     result = await processor.process(_message(text="15"))
@@ -1185,7 +1236,7 @@ async def test_name_only_during_booking_asks_for_contact_with_name(processor_fac
 
 
 async def test_availability_question_while_waiting_for_time_returns_slots(processor_factory):
-    processor, booking_service = processor_factory()
+    processor, booking_service = processor_factory(booking_config_service=BookingConfigWithHours())
 
     await processor.process(_message(text="давайте кол"))
     result = await processor.process(_message(text="коли є слоти?"))
@@ -2160,7 +2211,7 @@ async def test_branch_routing_reply_does_not_use_forbidden_setup_phrase(processo
 
 
 async def test_price_and_call_typos_after_niche_reply_do_not_fallback(processor_factory):
-    processor, booking_service = processor_factory()
+    processor, booking_service = processor_factory(booking_config_service=BookingConfigWithHours())
 
     niche = await processor.process(_message(text="для стоматології як це працює?"))
     price = await processor.process(_message(text="що по ціні?"))
@@ -2176,10 +2227,10 @@ async def test_price_and_call_typos_after_niche_reply_do_not_fallback(processor_
     assert accepted["intent"] == "contextual_short_reply"
     assert "який у вас бізнес" in accepted["reply_text"]
     assert typo_call["intent"] == "booking_request"
-    assert "спеціалістом" in typo_call["reply_text"]
+    assert "дзвінок" in typo_call["reply_text"]
     assert "день" in typo_call["reply_text"] and "час" in typo_call["reply_text"]
     assert call["intent"] == "booking_flow"
-    assert "спеціалістом" in call["reply_text"]
+    assert "дзвінок" in call["reply_text"]
     assert "день" in call["reply_text"] and "час" in call["reply_text"]
     assert availability["intent"] == "booking_availability_question"
     assert "варіант" in availability["reply_text"]

@@ -146,6 +146,49 @@ class CalendarService:
             )
             return False
 
+    def get_available_slots_in_range(
+        self,
+        start_dt: datetime,
+        end_dt: datetime,
+        duration_minutes: int = 30,
+        step_minutes: int = 30,
+        limit: int | None = None,
+    ) -> list[datetime]:
+        calendar_configured = (
+            self.google_calendar_client.is_configured()
+            if self.google_calendar_client
+            else False
+        )
+        logger.info(f"Calendar configured: {calendar_configured}")
+
+        if not calendar_configured:
+            return []
+
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=self.timezone)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=self.timezone)
+        if end_dt <= start_dt:
+            return []
+
+        try:
+            busy_periods = self.google_calendar_client.get_busy_periods(start_dt, end_dt)
+        except Exception:
+            logger.exception("Google Calendar range availability check failed")
+            return []
+
+        slots: list[datetime] = []
+        cursor = start_dt
+        while cursor + timedelta(minutes=duration_minutes) <= end_dt:
+            slot_end = cursor + timedelta(minutes=duration_minutes)
+            is_busy = any(cursor < busy.end and slot_end > busy.start for busy in busy_periods)
+            if not is_busy:
+                slots.append(cursor)
+                if limit is not None and len(slots) >= limit:
+                    break
+            cursor += timedelta(minutes=step_minutes)
+        return slots
+
     def create_booking_event(
         self,
         start_dt: datetime,

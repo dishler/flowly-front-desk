@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -86,6 +86,31 @@ class RecordingConfiguredCalendarService:
     def get_available_slots(self, language: str):
         return ["завтра о 12:00", "завтра о 15:00"]
 
+    def get_available_slots_in_range(
+        self,
+        start_dt,
+        end_dt,
+        duration_minutes: int = 30,
+        step_minutes: int = 30,
+        limit: int | None = None,
+    ):
+        self.checked.append(
+            {
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "duration_minutes": duration_minutes,
+                "range": True,
+            }
+        )
+        slots = []
+        cursor = start_dt
+        while cursor + timedelta(minutes=duration_minutes) <= end_dt:
+            slots.append(cursor)
+            if limit is not None and len(slots) >= limit:
+                break
+            cursor += timedelta(minutes=step_minutes)
+        return slots
+
     def create_booking_event(
         self,
         start_dt,
@@ -124,15 +149,129 @@ class BusyAt12And13ConfiguredCalendarService(RecordingConfiguredCalendarService)
         return start_dt.hour not in {12, 13}
 
 
+class SelectiveAvailabilityCalendarService(RecordingConfiguredCalendarService):
+    def __init__(self, available_slots) -> None:
+        super().__init__()
+        self.range_calls: list[dict] = []
+        self.available_slots = {
+            (
+                slot.date().isoformat(),
+                slot.hour,
+                slot.minute,
+            )
+            for slot in available_slots
+        }
+
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append({"start_dt": start_dt, "duration_minutes": duration_minutes})
+        return (
+            start_dt.date().isoformat(),
+            start_dt.hour,
+            start_dt.minute,
+        ) in self.available_slots
+
+    def get_available_slots_in_range(
+        self,
+        start_dt,
+        end_dt,
+        duration_minutes: int = 30,
+        step_minutes: int = 30,
+        limit: int | None = None,
+    ):
+        self.range_calls.append(
+            {
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "duration_minutes": duration_minutes,
+                "step_minutes": step_minutes,
+                "limit": limit,
+            }
+        )
+        slots = []
+        cursor = start_dt
+        while cursor + timedelta(minutes=duration_minutes) <= end_dt:
+            if (
+                cursor.date().isoformat(),
+                cursor.hour,
+                cursor.minute,
+            ) in self.available_slots:
+                slots.append(cursor)
+                if limit is not None and len(slots) >= limit:
+                    break
+            cursor += timedelta(minutes=step_minutes)
+        return slots
+
+
+class UnavailableCalendarService(SelectiveAvailabilityCalendarService):
+    def __init__(self) -> None:
+        super().__init__([])
+
+
+class ErrorRangeCalendarService(SelectiveAvailabilityCalendarService):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def get_available_slots_in_range(self, *args, **kwargs):
+        self.range_calls.append({"error": True})
+        return []
+
+
+class DentalConfigWithHours:
+    def __init__(self, working_hours=None) -> None:
+        self.working_hours = working_hours or {
+            "Пн-Нд": "09:00-19:00",
+            "Сб": "10:00-16:00",
+        }
+
+    def get_business(self):
+        return {
+            "name": "Smile Dental Clinic",
+            "working_hours": self.working_hours,
+        }
+
+    def get_booking(self):
+        return {
+            "enabled": True,
+            "appointment_label": "візит",
+            "duration_minutes": 30,
+            "required_contact_fields": ["name", "phone"],
+        }
+
+    def get_safety(self):
+        return {
+            "unknown_fallback": "Хочу правильно зорієнтувати. Уточніть, будь ласка, що саме вас цікавить: послуга, ціна, графік чи запис на візит?"
+        }
+
+    def get_handoff(self):
+        return {
+            "rules": [
+                "medical_emergency",
+                "diagnosis_request",
+                "complex_treatment_estimate",
+            ],
+            "reply": "Передам адміністратору клініки, щоб вам коректно допомогли.",
+        }
+
+    def get_assistant(self):
+        return {
+            "supported_languages": ["uk", "en"],
+            "tone": "calm, concise, reassuring dental front desk receptionist",
+            "default_language": "uk",
+        }
+
+    def get_qualification(self):
+        return {"enabled": True, "questions": []}
+
+
 @pytest.fixture
 def dental_processor():
     return _build_dental_processor()
 
 
-def _build_dental_processor(ai_service=None, calendar_service=None):
+def _build_dental_processor(ai_service=None, calendar_service=None, config_service=None):
     memory_service = MemoryService()
     calendar_service = calendar_service or RecordingConfiguredCalendarService()
-    config_service = FrontDeskConfigService("app/data/front_desk_config.json")
+    config_service = config_service or FrontDeskConfigService("app/data/front_desk_config.json")
     booking_service = BookingService(
         calendar_service=calendar_service,
         language_service=LanguageService(),
@@ -163,6 +302,26 @@ def _message(text: str, sender_id: str = "patient-1") -> NormalizedMessage:
         recipient_id="clinic",
         message_mid="",
         user_message=text,
+    )
+
+
+def _next_date_for_weekday(weekday: int):
+    today = datetime.now().astimezone().date()
+    days_ahead = (weekday - today.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return today + timedelta(days=days_ahead)
+
+
+def _at(target_date, hour: int, minute: int = 0) -> datetime:
+    return datetime.now().astimezone().replace(
+        year=target_date.year,
+        month=target_date.month,
+        day=target_date.day,
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
     )
 
 
@@ -372,6 +531,314 @@ async def test_dental_common_service_day_booking_phrase_golden_multiturn(dental_
     assert calendar.checked[-1]["start_dt"].weekday() == 1
     assert calendar.checked[-1]["start_dt"].hour == 16
     _assert_no_flowly_leakage(start["reply_text"], time["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_daypart_tomorrow_morning_suggests_real_slots_without_contact_request():
+    tomorrow = datetime.now().astimezone().date() + timedelta(days=1)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(tomorrow, 10), _at(tomorrow, 11, 30)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    result = await processor.process(_message("хочу на чистку завтра зранку"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "10:00" in result["reply_text"]
+    assert "11:30" in result["reply_text"]
+    assert "ім" not in result["reply_text"].lower()
+    assert "номер телефону" not in result["reply_text"].lower()
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["customer_name"] is None
+    assert pending["contact_phone"] is None
+    assert {slot["start_dt"][11:16] for slot in pending["suggested_slots"]} == {"10:00", "11:30"}
+    assert len(calendar.range_calls) == 1
+    assert calendar.range_calls[0]["start_dt"].hour == 9
+    assert calendar.range_calls[0]["end_dt"].hour == 12
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_daypart_wednesday_afternoon_suggests_real_slots():
+    wednesday = _next_date_for_weekday(2)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(wednesday, 14), _at(wednesday, 16)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    result = await processor.process(_message("хочу на чистку у середу після обіду"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "14:00" in result["reply_text"]
+    assert "16:00" in result["reply_text"]
+    assert len(calendar.range_calls) == 1
+    assert calendar.range_calls[0]["start_dt"].weekday() == 2
+    assert calendar.range_calls[0]["start_dt"].hour == 12
+    assert calendar.range_calls[0]["end_dt"].hour == 17
+    assert {slot["start_dt"][11:16] for slot in pending["suggested_slots"]} == {"14:00", "16:00"}
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_daypart_search_intersects_configured_business_hours():
+    wednesday = _next_date_for_weekday(2)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(wednesday, 10), _at(wednesday, 11), _at(wednesday, 17)]
+    )
+    config = DentalConfigWithHours({"Ср": "10:00-18:00"})
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=config,
+    )
+
+    morning = await processor.process(_message("хочу на чистку у середу зранку"))
+    evening = await processor.process(_message("хочу на чистку у середу ввечері", sender_id="patient-2"))
+
+    assert "10:00" in morning["reply_text"]
+    assert "11:00" in morning["reply_text"]
+    assert "17:00" not in morning["reply_text"]
+    assert calendar.range_calls[0]["start_dt"].hour == 10
+    assert calendar.range_calls[0]["end_dt"].hour == 12
+    assert "17:00" in evening["reply_text"]
+    assert "10:00" not in evening["reply_text"]
+    assert calendar.range_calls[1]["start_dt"].hour == 17
+    assert calendar.range_calls[1]["end_dt"].hour == 18
+    _assert_no_flowly_leakage(morning["reply_text"], evening["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_closed_day_daypart_does_not_invent_slot():
+    sunday = _next_date_for_weekday(6)
+    calendar = SelectiveAvailabilityCalendarService([_at(sunday, 10)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours({"Нд": "вихідний"}),
+    )
+
+    result = await processor.process(_message("хочу на чистку у неділю зранку"))
+
+    assert result["booking_result"]["status"] == "availability_unavailable"
+    assert "10:00" not in result["reply_text"]
+    assert calendar.range_calls == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_time_daypart_followup_preserves_requested_weekday():
+    tuesday = _next_date_for_weekday(1)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(tuesday, 9, 30), _at(tuesday, 11)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    start = await processor.process(_message("хочу на чистку у вівторок"))
+    result = await processor.process(_message("краще зранку"))
+
+    assert start["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "09:30" in result["reply_text"]
+    assert "11:00" in result["reply_text"]
+    assert len(calendar.range_calls) == 1
+    assert calendar.range_calls[0]["start_dt"].weekday() == 1
+    assert calendar.range_calls[0]["start_dt"].hour == 9
+    assert calendar.range_calls[0]["end_dt"].hour == 12
+    _assert_no_flowly_leakage(start["reply_text"], result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_daypart_followup_after_busy_suggestion_preserves_same_date():
+    tuesday = _next_date_for_weekday(1)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(tuesday, 9), _at(tuesday, 10), _at(tuesday, 14)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    await processor.process(_message("хочу записатись на чистку у вівторок"))
+    suggested = await processor.process(_message("на 13"))
+    result = await processor.process(_message("а є щось зранку?"))
+
+    assert suggested["booking_result"]["status"] == "slot_suggested"
+    assert "14:00" in suggested["reply_text"]
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "09:00" in result["reply_text"]
+    assert "10:00" in result["reply_text"]
+    assert calendar.range_calls[-1]["start_dt"].weekday() == 1
+    assert calendar.range_calls[-1]["start_dt"].hour == 9
+    assert calendar.range_calls[-1]["end_dt"].hour == 12
+    _assert_no_flowly_leakage(suggested["reply_text"], result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_this_week_availability_returns_small_real_shortlist():
+    today = datetime.now().astimezone().date()
+    sunday = today + timedelta(days=6 - today.weekday())
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(today, 10), _at(sunday, 11), _at(sunday, 16)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    result = await processor.process(_message("є щось цього тижня на чистку?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "10:00" in result["reply_text"]
+    assert "11:00" in result["reply_text"]
+    assert len(pending["suggested_slots"]) == 3
+    assert len(calendar.range_calls) <= 2
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_this_week_availability_uses_bounded_range_calls():
+    today = datetime.now().astimezone().date()
+    sunday = today + timedelta(days=6 - today.weekday())
+    calendar = SelectiveAvailabilityCalendarService([_at(sunday, 11)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    result = await processor.process(_message("є щось цього тижня на чистку?"))
+
+    print(f"this_week_range_call_count={len(calendar.range_calls)}")
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert len(calendar.range_calls) <= 7
+    assert len(calendar.checked) == 0
+    assert "11:00" in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_calendar_unavailable_does_not_output_invented_times():
+    calendar = RecordingConfiguredCalendarService()
+    calendar.google_calendar_client = None
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    result = await processor.process(_message("хочу на чистку завтра зранку"))
+
+    assert result["booking_result"]["status"] == "availability_unavailable"
+    assert "10:00" not in result["reply_text"]
+    assert "11:00" not in result["reply_text"]
+    assert "15:00" not in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_no_availability_does_not_fallback_to_hardcoded_slots():
+    processor, _calendar = _build_dental_processor(
+        calendar_service=UnavailableCalendarService(),
+        config_service=DentalConfigWithHours(),
+    )
+
+    result = await processor.process(_message("коли найближчий вільний час?"))
+
+    assert result["booking_result"]["status"] == "availability_unavailable"
+    assert "11:00" not in result["reply_text"]
+    assert "12:00" not in result["reply_text"]
+    assert "15:00" not in result["reply_text"]
+    assert "16:00" not in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_nearest_availability_returns_calendar_backed_slots():
+    tomorrow = datetime.now().astimezone().date() + timedelta(days=1)
+    day_after = tomorrow + timedelta(days=1)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(tomorrow, 15), _at(day_after, 9, 30)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    result = await processor.process(_message("коли найближчий вільний час?"))
+
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "15:00" in result["reply_text"]
+    assert "09:30" in result["reply_text"]
+    assert "12:00" not in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_select_day_and_time_from_proposed_range_moves_to_contact_stage():
+    tuesday = _next_date_for_weekday(1)
+    wednesday = _next_date_for_weekday(2)
+    friday = _next_date_for_weekday(4)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(tuesday, 10), _at(wednesday, 16), _at(friday, 11)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    suggested = await processor.process(_message("коли найближчий вільний час?"))
+    selected = await processor.process(_message("давай середу о 16"))
+
+    assert suggested["booking_result"]["status"] == "availability_suggested"
+    assert "16:00" in suggested["reply_text"]
+    assert selected["booking_result"]["status"] == "waiting_for_contact"
+    assert "16:00" in selected["reply_text"]
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["start_dt"][11:16] == "16:00"
+    assert pending["customer_name"] is None
+    assert calendar.checked[-1]["start_dt"].weekday() == 2
+    assert calendar.checked[-1]["start_dt"].hour == 16
+    _assert_no_flowly_leakage(suggested["reply_text"], selected["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_changing_day_invalidates_old_suggested_slots():
+    tuesday = _next_date_for_weekday(1)
+    wednesday = _next_date_for_weekday(2)
+    calendar = SelectiveAvailabilityCalendarService(
+        [_at(tuesday, 10), _at(tuesday, 11), _at(wednesday, 10)]
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        config_service=DentalConfigWithHours(),
+    )
+
+    suggested = await processor.process(_message("хочу на чистку у вівторок зранку"))
+    changed_day = await processor.process(_message("краще в середу"))
+    pending_after_change = processor.booking_service._get_pending_confirmation("patient-1")
+    selected = await processor.process(_message("о 10"))
+
+    assert suggested["booking_result"]["status"] == "availability_suggested"
+    assert "10:00" in suggested["reply_text"]
+    assert changed_day["booking_result"]["status"] == "waiting_for_time"
+    assert pending_after_change.get("suggested_slots") is None
+    assert pending_after_change.get("availability_context") is None
+    assert selected["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.checked[-1]["start_dt"].weekday() == 2
+    assert selected["booking_result"]["start_dt"][11:16] == "10:00"
+    _assert_no_flowly_leakage(
+        suggested["reply_text"],
+        changed_day["reply_text"],
+        selected["reply_text"],
+    )
 
 
 @pytest.mark.asyncio
