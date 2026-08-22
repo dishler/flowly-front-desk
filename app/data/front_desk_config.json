@@ -1,6 +1,11 @@
 {
   "business": {
-    "name": "Smile Dental Clinic"
+    "name": "Smile Dental Clinic",
+    "working_hours": {
+      "Mon-Fri": "09:00-19:00",
+      "Sat": "10:00-16:00",
+      "Sun": "closed"
+    }
   },
   "assistant": {
     "supported_languages": ["uk", "en"],

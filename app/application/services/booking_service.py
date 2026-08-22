@@ -62,6 +62,135 @@ class BookingService:
             return f"Booked via {business_name} front desk"
         return "Booked via front desk assistant"
 
+    def _business_working_hours(self) -> dict[str, Any] | None:
+        if self.front_desk_config_service is None:
+            return None
+        business = self.front_desk_config_service.get_business()
+        working_hours = business.get("working_hours")
+        return working_hours if isinstance(working_hours, dict) else None
+
+    def _weekday_indexes_for_hours_key(self, raw_key: str) -> set[int]:
+        aliases = {
+            "mon": 0,
+            "monday": 0,
+            "пн": 0,
+            "понеділок": 0,
+            "tue": 1,
+            "tuesday": 1,
+            "вт": 1,
+            "вівторок": 1,
+            "wed": 2,
+            "wednesday": 2,
+            "ср": 2,
+            "середа": 2,
+            "thu": 3,
+            "thursday": 3,
+            "чт": 3,
+            "четвер": 3,
+            "fri": 4,
+            "friday": 4,
+            "пт": 4,
+            "п'ятниця": 4,
+            "п’ятниця": 4,
+            "sat": 5,
+            "saturday": 5,
+            "сб": 5,
+            "субота": 5,
+            "sun": 6,
+            "sunday": 6,
+            "нд": 6,
+            "неділя": 6,
+        }
+
+        parts = [part.strip().lower() for part in re.split(r"\s*[-–—]\s*", raw_key) if part.strip()]
+        if len(parts) == 1:
+            weekday = aliases.get(parts[0])
+            return {weekday} if weekday is not None else set()
+        if len(parts) == 2:
+            start = aliases.get(parts[0])
+            end = aliases.get(parts[1])
+            if start is None or end is None:
+                return set()
+            if start <= end:
+                return set(range(start, end + 1))
+            return set(range(start, 7)).union(range(0, end + 1))
+        return set()
+
+    def _is_closed_working_hours_value(self, raw_value: Any) -> bool:
+        return isinstance(raw_value, str) and raw_value.strip().lower() in {
+            "closed",
+            "зачинено",
+            "вихідний",
+            "закрито",
+        }
+
+    def _parse_working_hours_window(self, raw_value: Any) -> tuple[time, time] | None:
+        if not isinstance(raw_value, str):
+            return None
+        value = raw_value.strip().lower()
+        if self._is_closed_working_hours_value(value):
+            return None
+
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})\s*", value)
+        if not match:
+            return None
+
+        start_hour, start_minute, end_hour, end_minute = [int(part) for part in match.groups()]
+        if not (
+            0 <= start_hour <= 23
+            and 0 <= end_hour <= 23
+            and 0 <= start_minute <= 59
+            and 0 <= end_minute <= 59
+        ):
+            return None
+
+        start = time(start_hour, start_minute)
+        end = time(end_hour, end_minute)
+        if start >= end:
+            return None
+        return start, end
+
+    def _business_hours_status_for_date(self, target_date: date) -> tuple[str, tuple[time, time] | None]:
+        working_hours = self._business_working_hours()
+        if working_hours is None:
+            return ("legacy_open" if self.front_desk_config_service is None else "missing", None)
+
+        for raw_key, raw_value in working_hours.items():
+            weekdays = self._weekday_indexes_for_hours_key(str(raw_key))
+            if not weekdays:
+                logger.warning("Ignoring malformed working-hours day key: %r", raw_key)
+                continue
+            if target_date.weekday() not in weekdays:
+                continue
+            if self._is_closed_working_hours_value(raw_value):
+                return ("closed", None)
+            window = self._parse_working_hours_window(raw_value)
+            if window is None:
+                logger.warning("Ignoring malformed working-hours window for %r: %r", raw_key, raw_value)
+                return ("malformed", None)
+            return ("open", window)
+
+        return ("missing_day", None)
+
+    def _is_within_business_hours(self, start_dt: datetime, duration_minutes: int) -> bool:
+        local_start = start_dt.astimezone(self.timezone)
+        status, window = self._business_hours_status_for_date(local_start.date())
+        if status == "legacy_open":
+            return True
+        if status in {"missing", "malformed", "missing_day"}:
+            logger.warning(
+                "Booking time rejected due to working-hours config status=%s date=%s",
+                status,
+                local_start.date().isoformat(),
+            )
+        if status != "open" or window is None:
+            return False
+
+        local_end = local_start + timedelta(minutes=duration_minutes)
+        business_start = datetime.combine(local_start.date(), window[0], tzinfo=self.timezone)
+        business_end = datetime.combine(local_start.date(), window[1], tzinfo=self.timezone)
+        return business_start <= local_start and local_end <= business_end
+
     def _required_contact_fields(self) -> list[str]:
         fields = self._booking_config().get("required_contact_fields")
         if isinstance(fields, list) and fields:
@@ -274,6 +403,9 @@ class BookingService:
     def _build_unavailable_reply(self, language: str) -> str:
         slots = self.calendar_service.get_available_slots(language)
         return f"На цей час слот уже зайнятий. Можу запропонувати: {', '.join(slots)}."
+
+    def _build_outside_business_hours_reply(self, language: str) -> str:
+        return "На цей час клініка не працює. Підкажіть, будь ласка, інший день або час?"
 
     def _build_name_and_contact_request(self, language: str) -> str:
         fields = set(self._required_contact_fields())
@@ -501,6 +633,8 @@ class BookingService:
     def _find_next_available_slot(self, requested_dt: datetime) -> datetime | None:
         for hours in [1, 2, 3, 4]:
             next_dt = requested_dt + timedelta(hours=hours)
+            if not self._is_within_business_hours(next_dt, self._booking_duration_minutes()):
+                continue
             if self.calendar_service.check_specific_time_availability(
                 next_dt,
                 self._booking_duration_minutes(),
@@ -1637,6 +1771,15 @@ class BookingService:
 
         self._clear_pending_confirmation(sender_id)
 
+        if not self._is_within_business_hours(requested_dt, self._booking_duration_minutes()):
+            return {
+                "status": "outside_business_hours",
+                "reply_text": self._build_outside_business_hours_reply(language),
+                "requires_confirmation": False,
+                "booking_state": BookingState.NONE.value,
+                "start_dt": requested_dt.isoformat(),
+            }
+
         is_available = self.calendar_service.check_specific_time_availability(
             start_dt=requested_dt,
             duration_minutes=self._booking_duration_minutes(),
@@ -2091,10 +2234,13 @@ class BookingService:
             }
 
         try:
-            still_available = self.calendar_service.check_specific_time_availability(
-                start_dt=start_dt,
-                duration_minutes=pending["duration_minutes"],
-            )
+            if not self._is_within_business_hours(start_dt, pending["duration_minutes"]):
+                still_available = False
+            else:
+                still_available = self.calendar_service.check_specific_time_availability(
+                    start_dt=start_dt,
+                    duration_minutes=pending["duration_minutes"],
+                )
         except Exception:
             logger.exception(
                 "booking availability recheck failed sender_id=%s start_dt=%s",
