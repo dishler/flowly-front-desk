@@ -560,6 +560,17 @@ class BookingService:
             return True
         if self._looks_like_booking_correction(normalized) and self._extract_corrected_time(normalized):
             return True
+        compact = re.sub(r"[^\w\sа-яіїєґё]", " ", normalized, flags=re.IGNORECASE)
+        compact = " ".join(compact.split())
+        if (
+            len(compact.split()) <= 4
+            and re.search(
+                r"\b(?:так|ок|окей|давай|давайте|тоді)?\s*\d{1,2}(?::00)?\s*(?:норм|гуд|добре)?\b",
+                compact,
+            )
+            and any(marker in compact for marker in ["так", "ок", "давай", "тоді", "норм", "гуд"])
+        ):
+            return True
         non_names = {
             "не",
             "ні",
@@ -582,6 +593,10 @@ class BookingService:
             "так цікаво",
             "тоді на буде гуд",
             "на буде гуд",
+            "так норм",
+            "так гуд",
+            "ок норм",
+            "ок гуд",
         }
         return normalized in non_names
 
@@ -713,12 +728,17 @@ class BookingService:
             return suggested_start
 
         normalized = " ".join(text.strip().lower().split())
+        normalized = re.sub(r"[^\w\sа-яіїєґё:]", " ", normalized, flags=re.IGNORECASE)
+        normalized = " ".join(normalized.split())
         accept_markers = [
+            "так",
             "підійде",
             "підходить",
             "підходе",
             "буде гуд",
             "гуд",
+            "норм",
+            "нормально",
             "добре",
             "ок",
             "окей",

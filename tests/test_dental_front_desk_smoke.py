@@ -118,6 +118,12 @@ class BusyAt13ConfiguredCalendarService(RecordingConfiguredCalendarService):
         return start_dt.hour != 13
 
 
+class BusyAt12And13ConfiguredCalendarService(RecordingConfiguredCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append({"start_dt": start_dt, "duration_minutes": duration_minutes})
+        return start_dt.hour not in {12, 13}
+
+
 @pytest.fixture
 def dental_processor():
     return _build_dental_processor()
@@ -449,6 +455,76 @@ async def test_dental_suggested_slot_acceptance_does_not_become_customer_name():
         phone["reply_text"],
         confirmed["reply_text"],
     )
+
+
+@pytest.mark.asyncio
+async def test_dental_suggested_slot_acceptance_with_tak_norm_never_becomes_name():
+    calendar = BusyAt12And13ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    requested = await processor.process(_message("хочу записатись на чистку завтра о 12"))
+    accepted = await processor.process(_message("так, 14 норм"))
+    pending_after_accept = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    phone = await processor.process(_message("мій номер 0987121328"))
+    pending_after_phone = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    confirmed = await processor.process(_message("Дмитро"))
+
+    assert requested["booking_result"]["status"] == "slot_suggested"
+    assert "14:00" in requested["reply_text"]
+    assert accepted["booking_result"]["status"] == "waiting_for_contact"
+    assert "14:00" in accepted["reply_text"]
+    assert pending_after_accept["customer_name"] is None
+    assert pending_after_accept["contact_phone"] is None
+    assert phone["booking_result"]["status"] == "waiting_for_name"
+    assert pending_after_phone["contact_phone"] == "0987121328"
+    assert pending_after_phone["customer_name"] is None
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert confirmed["booking_result"]["customer_name"] == "Дмитро"
+    assert "так норм" not in confirmed["reply_text"].lower()
+    assert calendar.created[-1]["start_dt"].hour == 14
+    _assert_no_flowly_leakage(accepted["reply_text"], phone["reply_text"], confirmed["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_combined_contact_after_suggested_slot_acceptance_confirms_normally():
+    calendar = BusyAt12And13ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу записатись на чистку завтра о 12"))
+    accepted = await processor.process(_message("так, 14 норм"))
+    confirmed = await processor.process(_message("Дмитро 0987121328"))
+
+    assert accepted["booking_result"]["status"] == "waiting_for_contact"
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert confirmed["booking_result"]["customer_name"] == "Дмитро"
+    assert confirmed["booking_result"]["contact_phone"] == "0987121328"
+    assert "так норм" not in confirmed["reply_text"].lower()
+    assert calendar.created[-1]["start_dt"].hour == 14
+    _assert_no_flowly_leakage(accepted["reply_text"], confirmed["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acceptance_text", ["ок 14", "давай 14", "14 норм"])
+async def test_dental_suggested_slot_acceptance_variants_never_become_customer_names(
+    acceptance_text,
+):
+    calendar = BusyAt12And13ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу записатись на чистку завтра о 12"))
+    accepted = await processor.process(_message(acceptance_text))
+    pending_after_accept = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    phone = await processor.process(_message("мій номер 0987121328"))
+    pending_after_phone = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert accepted["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_accept["customer_name"] is None
+    assert pending_after_accept["contact_phone"] is None
+    assert phone["booking_result"]["status"] == "waiting_for_name"
+    assert pending_after_phone["contact_phone"] == "0987121328"
+    assert pending_after_phone["customer_name"] is None
+    assert calendar.checked[-1]["start_dt"].hour == 14
+    _assert_no_flowly_leakage(accepted["reply_text"], phone["reply_text"])
 
 
 @pytest.mark.asyncio
