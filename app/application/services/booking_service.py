@@ -407,6 +407,22 @@ class BookingService:
     def _build_outside_business_hours_reply(self, language: str) -> str:
         return "На цей час клініка не працює. Підкажіть, будь ласка, інший день або час?"
 
+    def _build_daypart_slots_reply(
+        self,
+        language: str,
+        *,
+        requested_date: date,
+        requested_day_label: str | None = None,
+        daypart_label: str,
+        slots: list[datetime],
+    ) -> str:
+        day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language) or "цей день"
+        day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
+        times = self._format_slot_times(slots, language)
+        if times:
+            return f"{day_prefix} {day_label} {daypart_label} можу запропонувати {times}. Який час вам зручніший?"
+        return f"{day_prefix} {day_label} {daypart_label} не бачу вільних слотів. Підкажіть інший день або час?"
+
     def _build_name_and_contact_request(self, language: str) -> str:
         fields = set(self._required_contact_fields())
         if fields == {"name", "phone"}:
@@ -641,6 +657,109 @@ class BookingService:
             ):
                 return next_dt
         return None
+
+    def _extract_daypart(self, text: str) -> dict[str, Any] | None:
+        normalized = text.strip().lower()
+        if "зранку" in normalized or "вранці" in normalized:
+            return {"label": "зранку", "start": time(9, 0), "end": time(12, 0)}
+        return None
+
+    def _get_verified_daypart_slots(
+        self,
+        *,
+        requested_date: date,
+        daypart: dict[str, Any],
+    ) -> tuple[str, list[datetime]]:
+        status, business_window = self._business_hours_status_for_date(requested_date)
+        if status != "open" or business_window is None:
+            return status, []
+
+        duration = self._booking_duration_minutes()
+        window_start = max(business_window[0], daypart["start"])
+        window_end = min(business_window[1], daypart["end"])
+        if window_start >= window_end:
+            return "outside_business_hours", []
+
+        cursor = datetime.combine(requested_date, window_start, tzinfo=self.timezone)
+        end_dt = datetime.combine(requested_date, window_end, tzinfo=self.timezone)
+        slots: list[datetime] = []
+
+        while cursor + timedelta(minutes=duration) <= end_dt:
+            if self._is_within_business_hours(cursor, duration):
+                try:
+                    if self.calendar_service.check_specific_time_availability(
+                        cursor,
+                        duration_minutes=duration,
+                    ):
+                        slots.append(cursor)
+                except Exception:
+                    logger.exception("daypart availability check failed start_dt=%s", cursor.isoformat())
+            cursor += timedelta(minutes=30)
+
+        return "open", slots
+
+    def _suggest_daypart_slots(
+        self,
+        sender_id: str,
+        *,
+        language: str,
+        message_text: str,
+        source_channel: str | None,
+        requested_date: date,
+        requested_day_label: str | None,
+        daypart: dict[str, Any],
+    ) -> Dict[str, Any]:
+        status, slots = self._get_verified_daypart_slots(
+            requested_date=requested_date,
+            daypart=daypart,
+        )
+
+        if status != "open":
+            self._clear_pending_confirmation(sender_id)
+            return {
+                "status": "outside_business_hours",
+                "reply_text": self._build_outside_business_hours_reply(language),
+                "requires_confirmation": False,
+                "booking_state": BookingState.NONE.value,
+                "requested_date": requested_date.isoformat(),
+            }
+
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel,
+            context_summary=message_text[:280],
+            requested_date=requested_date,
+            requested_day_label=requested_day_label,
+        )
+        pending = self._get_pending_confirmation(sender_id) or {}
+        day_key = "selected_day"
+        pending["availability_context"] = True
+        pending["suggested_slots"] = [
+            {
+                "day_key": day_key,
+                "start_dt": self._serialize_pending_start_dt(slot),
+            }
+            for slot in slots
+        ]
+        pending["last_suggested_day"] = day_key
+        self._save_pending_confirmation(sender_id, pending)
+
+        return {
+            "status": "daypart_slots_suggested",
+            "reply_text": self._build_daypart_slots_reply(
+                language,
+                requested_date=requested_date,
+                requested_day_label=requested_day_label,
+                daypart_label=daypart["label"],
+                slots=slots,
+            ),
+            "requires_confirmation": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+            "requested_date": requested_date.isoformat(),
+            "suggested_slots": pending["suggested_slots"],
+        }
 
     def _extract_contact_details(self, text: str) -> Dict[str, Any]:
         emails = []
@@ -1157,6 +1276,8 @@ class BookingService:
                 )
             except Exception:
                 logger.warning("invalid suggested slot skipped: %r", item)
+        if "suggested_slots" in pending:
+            return slots_by_day
         return slots_by_day or self._get_suggested_slots_by_day()
 
     def _detect_requested_day_key(self, text: str) -> str | None:
@@ -1264,25 +1385,11 @@ class BookingService:
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
             }
 
-        day_text_by_language = {
-            "uk": {
-                "tomorrow": "завтра",
-                "day_after_tomorrow": "післязавтра",
-            },
-            "en": {
-                "tomorrow": "tomorrow",
-                "day_after_tomorrow": "day after tomorrow",
-            },
-        }
-        day_text = day_text_by_language.get(language, day_text_by_language["en"]).get(
-            preferred_day,
-            "tomorrow",
-        )
-        booking_text = f"{day_text} о {matched_slot.hour}" if language == "uk" else f"{day_text} at {matched_slot.hour}"
         return self.start_booking_flow(
             sender_id=sender_id,
-            message_text=booking_text,
+            message_text=message_text,
             source_channel=source_channel or pending.get("source_channel"),
+            requested_dt_override=matched_slot,
         )
 
     def _serialize_pending_start_dt(self, value: datetime) -> str:
@@ -1736,6 +1843,7 @@ class BookingService:
         language = self._detect_language(message_text)
         requested_dt = requested_dt_override or self._parse_requested_datetime(message_text)
         partial_date = self._extract_requested_date(message_text)
+        daypart = self._extract_daypart(message_text)
 
         if not self._booking_enabled():
             return {
@@ -1757,6 +1865,16 @@ class BookingService:
         if requested_dt is None:
             requested_date = partial_date.get("date") if partial_date else None
             requested_day_label = partial_date.get("day_label") if partial_date else None
+            if requested_date is not None and daypart is not None:
+                return self._suggest_daypart_slots(
+                    sender_id,
+                    language=language,
+                    message_text=message_text,
+                    source_channel=source_channel,
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
+                    daypart=daypart,
+                )
             self._save_booking_state(
                 sender_id,
                 state=BookingState.WAITING_FOR_TIME,
@@ -2017,6 +2135,7 @@ class BookingService:
 
             partial_date = self._extract_requested_date(message_text)
             requested_time = self._parse_time_only(message_text)
+            daypart = self._extract_daypart(message_text)
             pending_requested_date = None
             if pending.get("requested_date"):
                 try:
@@ -2035,6 +2154,17 @@ class BookingService:
                 pending["requested_date"] = pending_requested_date.isoformat()
                 pending["requested_day_label"] = partial_date.get("day_label")
                 self._save_pending_confirmation(sender_id, pending)
+
+            if daypart is not None and pending_requested_date is not None:
+                return self._suggest_daypart_slots(
+                    sender_id,
+                    language=language,
+                    message_text=message_text,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    requested_date=pending_requested_date,
+                    requested_day_label=pending.get("requested_day_label"),
+                    daypart=daypart,
+                )
 
             if requested_time is not None and pending_requested_date is not None:
                 requested_dt = self._combine_requested_date_and_time(
