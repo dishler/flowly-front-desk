@@ -1298,6 +1298,9 @@ class BookingService:
     def get_reschedule_handoff_reply(self, language: str) -> str:
         return f"Добре, передам команді, щоб перенесли {self._appointment_label()} без зайвих дій з вашого боку."
 
+    def _build_reschedule_unavailable_reply(self, language: str) -> str:
+        return "На цей час слот уже зайнятий. Підкажіть, будь ласка, інший день або час?"
+
     def handle_reschedule_request(self, sender_id: str, message_text: str) -> Dict[str, Any]:
         language = self._detect_language(message_text)
         requested_dt = self._parse_requested_datetime(message_text)
@@ -1318,11 +1321,46 @@ class BookingService:
                 "booking_state": BookingState.NONE.value,
             }
 
+        duration_minutes = self._booking_duration_minutes()
+        if not self._is_within_business_hours(requested_dt, duration_minutes):
+            return {
+                "status": "reschedule_rejected_outside_business_hours",
+                "reply_text": self._build_outside_business_hours_reply(language),
+                "booking_state": BookingState.NONE.value,
+                "start_dt": requested_dt.isoformat(),
+            }
+
+        try:
+            is_available = self.calendar_service.check_specific_time_availability(
+                start_dt=requested_dt,
+                duration_minutes=duration_minutes,
+            )
+        except Exception:
+            logger.exception(
+                "calendar reschedule availability check failed sender_id=%s start_dt=%s",
+                sender_id,
+                requested_dt.isoformat(),
+            )
+            return {
+                "status": "reschedule_handoff",
+                "reply_text": self.get_reschedule_handoff_reply(language),
+                "booking_state": BookingState.NONE.value,
+                "start_dt": requested_dt.isoformat(),
+            }
+
+        if not is_available:
+            return {
+                "status": "reschedule_rejected_unavailable",
+                "reply_text": self._build_reschedule_unavailable_reply(language),
+                "booking_state": BookingState.NONE.value,
+                "start_dt": requested_dt.isoformat(),
+            }
+
         try:
             self.calendar_service.reschedule_event(
                 event_id=calendar_event_id,
                 start_dt=requested_dt,
-                duration_minutes=self._booking_duration_minutes(),
+                duration_minutes=duration_minutes,
             )
         except Exception:
             logger.exception(

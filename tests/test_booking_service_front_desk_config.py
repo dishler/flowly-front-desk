@@ -13,6 +13,7 @@ class RecordingCalendarService:
     def __init__(self) -> None:
         self.checked = []
         self.created = []
+        self.rescheduled = []
         self.google_calendar_client = self
 
     def is_configured(self) -> bool:
@@ -51,6 +52,42 @@ class RecordingCalendarService:
             status = "confirmed"
 
         return CreatedEvent()
+
+    def reschedule_event(self, event_id: str, start_dt, duration_minutes: int = 30) -> None:
+        self.rescheduled.append(
+            {
+                "event_id": event_id,
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
+
+
+class BusyCalendarService(RecordingCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
+        return False
+
+
+class FailingAvailabilityCalendarService(RecordingCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
+        raise RuntimeError("availability failed")
+
+
+class FailingRescheduleCalendarService(RecordingCalendarService):
+    def reschedule_event(self, event_id: str, start_dt, duration_minutes: int = 30) -> None:
+        raise RuntimeError("reschedule failed")
 
 
 def _write_config(tmp_path, *, booking: dict, business: dict | None = None):
@@ -411,3 +448,158 @@ def test_booking_without_config_preserves_legacy_email_or_phone_contact_behavior
     assert result["status"] == "confirmed"
     assert calendar.created[0]["duration_minutes"] == 30
     assert "дзвінок" in result["reply_text"]
+
+
+def _mark_completed(service: BookingService) -> None:
+    service._mark_booking_completed(
+        "user-1",
+        start_dt=_dt(2026, 8, 25, 14),
+        phone="0987121328",
+        email=None,
+        customer_name="Іван",
+        calendar_event_id="event-1",
+    )
+
+
+def _completed_start(service: BookingService) -> str:
+    completed = service._get_completed_booking("user-1")
+    assert completed is not None
+    return str(completed["start_dt"])
+
+
+def test_reschedule_rejects_closed_day_before_calendar_update(tmp_path):
+    calendar = RecordingCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+    _mark_completed(service)
+    original_start = _completed_start(service)
+
+    result = service.handle_reschedule_request("user-1", "перенесіть на неділю о 22")
+
+    assert result["status"] == "reschedule_rejected_outside_business_hours"
+    assert calendar.checked == []
+    assert calendar.rescheduled == []
+    assert _completed_start(service) == original_start
+    assert "перенесли" not in result["reply_text"]
+
+
+def test_reschedule_rejects_outside_working_hours_before_calendar_update(tmp_path):
+    calendar = RecordingCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+    _mark_completed(service)
+    original_start = _completed_start(service)
+
+    result = service.handle_reschedule_request("user-1", "перенесіть на суботу о 9")
+
+    assert result["status"] == "reschedule_rejected_outside_business_hours"
+    assert calendar.checked == []
+    assert calendar.rescheduled == []
+    assert _completed_start(service) == original_start
+
+
+def test_reschedule_rejects_slot_crossing_closing_time_before_calendar_update(tmp_path):
+    calendar = RecordingCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+    _mark_completed(service)
+    original_start = _completed_start(service)
+
+    result = service.handle_reschedule_request("user-1", "перенесіть на 2026-08-31 18:45")
+
+    assert result["status"] == "reschedule_rejected_outside_business_hours"
+    assert calendar.checked == []
+    assert calendar.rescheduled == []
+    assert _completed_start(service) == original_start
+
+
+def test_reschedule_rejects_busy_calendar_target_before_calendar_update(tmp_path):
+    calendar = BusyCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+    _mark_completed(service)
+    original_start = _completed_start(service)
+
+    result = service.handle_reschedule_request("user-1", "перенесіть на 2026-08-31 14:00")
+
+    assert result["status"] == "reschedule_rejected_unavailable"
+    assert len(calendar.checked) == 1
+    assert calendar.rescheduled == []
+    assert _completed_start(service) == original_start
+    assert "перенесли" not in result["reply_text"]
+
+
+def test_reschedule_availability_exception_fails_closed_before_calendar_update(tmp_path):
+    calendar = FailingAvailabilityCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+    _mark_completed(service)
+    original_start = _completed_start(service)
+
+    result = service.handle_reschedule_request("user-1", "перенесіть на 2026-08-31 14:00")
+
+    assert result["status"] == "reschedule_handoff"
+    assert len(calendar.checked) == 1
+    assert calendar.rescheduled == []
+    assert _completed_start(service) == original_start
+    assert "перенесли на" not in result["reply_text"]
+
+
+def test_reschedule_valid_verified_slot_updates_once_and_preserves_event_id(tmp_path):
+    calendar = RecordingCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+    _mark_completed(service)
+
+    result = service.handle_reschedule_request("user-1", "перенесіть на 2026-08-31 14:00")
+
+    assert result["status"] == "rescheduled"
+    assert len(calendar.checked) == 1
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "event-1"
+    assert calendar.rescheduled[0]["start_dt"].isoformat() == "2026-08-31T14:00:00+03:00"
+    assert _completed_start(service) == "2026-08-31T14:00:00+03:00"
+
+
+def test_reschedule_update_failure_hands_off_after_verified_availability(tmp_path):
+    calendar = FailingRescheduleCalendarService()
+    service = _service(
+        tmp_path,
+        booking=_booking_config(),
+        calendar_service=calendar,
+        business=_smile_business_hours(),
+    )
+    _mark_completed(service)
+    original_start = _completed_start(service)
+
+    result = service.handle_reschedule_request("user-1", "перенесіть на 2026-08-31 14:00")
+
+    assert result["status"] == "reschedule_handoff"
+    assert len(calendar.checked) == 1
+    assert calendar.rescheduled == []
+    assert _completed_start(service) == original_start
+    assert "перенесли на" not in result["reply_text"]
