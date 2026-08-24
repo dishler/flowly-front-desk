@@ -138,6 +138,12 @@ class SelectiveConfiguredCalendarService(RecordingConfiguredCalendarService):
         return (start_dt.date().isoformat(), start_dt.hour, start_dt.minute) in self.available_slots
 
 
+class FailingConfiguredCalendarService(RecordingConfiguredCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append({"start_dt": start_dt, "duration_minutes": duration_minutes})
+        raise RuntimeError("calendar unavailable")
+
+
 @pytest.fixture
 def dental_processor():
     return _build_dental_processor()
@@ -424,6 +430,230 @@ async def test_dental_booking_intent_still_enters_booking(dental_processor):
     assert result["intent"] == "booking_request"
     assert result["booking_result"]["status"] == "waiting_for_time"
     assert result["booking_result"]["booking_state"] == "WAITING_FOR_TIME"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_want_cleaning_enters_booking():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу на чистку"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["current_service_id"] == "dental_cleaning"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_cleaning_tuesday_preserves_date_and_service():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("чистка у вівторок"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["requested_date"] is not None
+    assert pending["requested_day_label"] == "вівторок"
+    assert pending["current_service_id"] == "dental_cleaning"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_cleaning_tomorrow_enters_booking():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("можна на чистку завтра?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["requested_date"] is not None
+    assert pending["requested_day_label"] == "завтра"
+    assert pending["current_service_id"] == "dental_cleaning"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_whitening_enters_booking():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("запишіть на відбілювання"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "teeth_whitening"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_exact_datetime_uses_calendar_verification():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("на чистку у вівторок о 14"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert len(calendar.checked) == 1
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending["start_dt"] == result["booking_result"]["start_dt"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_time_window_uses_verified_slots():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("чистка в середу після 15"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert len(calendar.checked) > 0
+    assert result["booking_result"]["suggested_slots"]
+    assert pending["current_service_id"] == "dental_cleaning"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_context_survives_multiturn_booking():
+    processor, calendar = _build_dental_processor()
+
+    start = await processor.process(_message("хочу на чистку"))
+    date = await processor.process(_message("у четвер"))
+    window = await processor.process(_message("після 15"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert start["booking_result"]["status"] == "waiting_for_time"
+    assert date["booking_result"]["status"] == "waiting_for_time"
+    assert window["booking_result"]["status"] == "time_window_slots_suggested"
+    assert len(calendar.checked) > 0
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending["requested_day_label"] == "четвер"
+    _assert_no_flowly_leakage(start["reply_text"], date["reply_text"], window["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_price_followup_during_booking_preserves_booking_context():
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    price = await processor.process(_message("а скільки вона коштує?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert price["intent"] == "booking_grounded_question"
+    assert "1800 грн" in price["reply_text"]
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["current_service_id"] == "dental_cleaning"
+    _assert_no_flowly_leakage(price["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_price_faq_does_not_enter_booking(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("скільки коштує чистка"))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert result["booking_result"] is None
+    assert "1800 грн" in result["reply_text"]
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_description_faq_does_not_enter_booking(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("що входить у чистку"))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert result["booking_result"] is None
+    assert "Комплексна чистка зубів" in result["reply_text"]
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_bare_service_mention_does_not_enter_booking(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("чистка"))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert result["booking_result"] is None
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_availability_faq_does_not_enter_booking(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("є чистка?"))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert result["booking_result"] is None
+    assert "Професійна гігієна" in result["reply_text"]
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "чистка у вівторок дорожча?",
+        "у вівторок чистка скільки коштує?",
+        "чистку робите у суботу?",
+        "у неділю є чистка?",
+    ],
+)
+async def test_dental_service_date_faq_does_not_enter_booking(text):
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert result["booking_result"] is None
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_booking_service_survives_different_service_faq_interruption():
+    processor, _calendar = _build_dental_processor()
+
+    start = await processor.process(_message("хочу на чистку"))
+    faq = await processor.process(_message("а скільки коштує відбілювання?"))
+    resume = await processor.process(_message("давай 16:00"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert start["booking_result"]["status"] == "waiting_for_time"
+    assert faq["intent"] == "booking_grounded_question"
+    assert "6500 грн" in faq["reply_text"]
+    assert resume["intent"] == "booking_flow"
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending["current_service_name"] == "Професійна гігієна зубів"
+    _assert_no_flowly_leakage(start["reply_text"], faq["reply_text"], resume["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_calendar_failure_fails_closed():
+    calendar = FailingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("на чистку у вівторок о 14"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "availability_check_failed"
+    assert len(calendar.checked) == 1
+    assert "вільний" not in result["reply_text"].lower()
     _assert_no_flowly_leakage(result["reply_text"])
 
 

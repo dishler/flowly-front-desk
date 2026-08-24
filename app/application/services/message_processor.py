@@ -78,6 +78,209 @@ class MessageProcessor:
             )
         return word in normalized
 
+    def _find_configured_front_desk_service(self, text: str) -> dict[str, Any] | None:
+        if not self._is_configured_front_desk_mode():
+            return None
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        if knowledge_service is None:
+            return None
+
+        normalized = self._normalize_for_conversation_matching(text)
+        query_tokens = {
+            token
+            for token in re.sub(r"[^\w\sа-яіїєґё]", " ", normalized, flags=re.IGNORECASE).split()
+            if len(token) > 2
+        }
+        if not query_tokens:
+            return None
+
+        best_service = None
+        best_score = 0
+        for service in knowledge_service.get_services():
+            service_parts = [
+                str(service.get("id") or "").replace("_", " "),
+                str(service.get("name") or ""),
+            ]
+            aliases = service.get("aliases")
+            if isinstance(aliases, list):
+                service_parts.extend(str(alias) for alias in aliases if alias)
+
+            service_tokens = {
+                token
+                for token in re.sub(
+                    r"[^\w\sа-яіїєґё]",
+                    " ",
+                    self._normalize_for_conversation_matching(" ".join(service_parts)),
+                    flags=re.IGNORECASE,
+                ).split()
+                if len(token) > 2
+            }
+            score = 0
+            for token in query_tokens:
+                for candidate in service_tokens:
+                    if token == candidate or (
+                        len(token) >= 4
+                        and len(candidate) >= 4
+                        and (
+                            token.startswith(candidate[:4])
+                            or candidate.startswith(token[:4])
+                        )
+                    ):
+                        score += 1
+                        break
+
+            if score > best_score:
+                best_score = score
+                best_service = service
+
+        return best_service if best_score > 0 else None
+
+    def _looks_like_service_faq_request(self, normalized: str) -> bool:
+        faq_markers = [
+            "скільки",
+            "коштує",
+            "ціна",
+            "ціну",
+            "ціни",
+            "вартість",
+            "прайс",
+            "дорожч",
+            "платн",
+            "боляче",
+            "трива",
+            "що входить",
+            "що таке",
+            "розкажіть про",
+            "розкажи про",
+            "які послуги",
+            "робите",
+            "чи робите",
+            "є ",
+            "price",
+            "cost",
+            "how much",
+            "what is",
+        ]
+        return any(marker in normalized for marker in faq_markers)
+
+    def _has_service_booking_action_signal(self, normalized: str) -> bool:
+        action_markers = [
+            "хочу",
+            "мені",
+            "можна на",
+            "можна запис",
+            "запишіть",
+            "запиши",
+            "записати",
+            "запис на",
+            "потрібно",
+            "треба",
+            "можна",
+            "want",
+            "book",
+        ]
+        return any(marker in normalized for marker in action_markers)
+
+    def _has_service_scheduling_signal(self, normalized: str) -> bool:
+        date_markers = [
+            "сьогодні",
+            "завтра",
+            "післязавтра",
+            "понеділ",
+            "вівтор",
+            "серед",
+            "четвер",
+            "п'ятниц",
+            "п’ятниц",
+            "пятниц",
+            "субот",
+            "неділ",
+            "today",
+            "tomorrow",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+        ]
+        has_date = any(marker in normalized for marker in date_markers)
+        has_time = bool(
+            re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", normalized)
+            or re.search(r"\b(о|на|at)\s*(10|11|12|13|14|15|16|17|18|19|20|21|22|23)\b", normalized)
+        )
+        return has_date or has_time or self._looks_like_time_window_constraint(normalized)
+
+    def _looks_like_service_booking_request(self, text: str) -> bool:
+        service = self._find_configured_front_desk_service(text)
+        if service is None:
+            return False
+
+        normalized = self._normalize_for_booking_keywords(text)
+        has_action = self._has_service_booking_action_signal(normalized)
+        has_scheduling = self._has_service_scheduling_signal(normalized)
+        if self._looks_like_service_faq_request(normalized) and not has_action:
+            return False
+
+        return has_action or has_scheduling
+
+    def _restore_pending_front_desk_service_context(
+        self,
+        sender_id: str,
+        service_id: str | None,
+        service_name: str | None,
+    ) -> None:
+        if not service_id:
+            return
+        if self.memory_service is not None:
+            values = {"current_service_id": service_id, "question_context": "services"}
+            if service_name:
+                values["current_service_name"] = service_name
+            self.memory_service.update_context(sender_id, **values)
+
+    def _get_pending_front_desk_service_context(
+        self,
+        sender_id: str,
+    ) -> tuple[str | None, str | None]:
+        pending = self.booking_service._get_pending_confirmation(sender_id) or {}
+        return pending.get("current_service_id"), pending.get("current_service_name")
+
+    def _remember_front_desk_booking_service_context(
+        self,
+        sender_id: str,
+        text: str,
+        fallback_service_id: str | None = None,
+        fallback_service_name: str | None = None,
+    ) -> None:
+        if not self._is_configured_front_desk_mode():
+            return
+
+        service = self._find_configured_front_desk_service(text)
+        service_id = str(service.get("id")) if service and service.get("id") else None
+        service_name = str(service.get("name")) if service and service.get("name") else None
+        if service_id is None:
+            service_id = fallback_service_id
+            service_name = fallback_service_name
+        if service_id is None:
+            context = self.memory_service.get_context(sender_id) if self.memory_service else {}
+            service_id = context.get("current_service_id")
+            service_name = context.get("current_service_name")
+
+        if not service_id:
+            return
+
+        if self.memory_service is not None:
+            values = {"current_service_id": service_id, "question_context": "services"}
+            if service_name:
+                values["current_service_name"] = service_name
+            self.memory_service.update_context(sender_id, **values)
+
+        pending = self.booking_service._get_pending_confirmation(sender_id)
+        if pending and pending.get("is_active") is True:
+            pending["current_service_id"] = service_id
+            if service_name:
+                pending["current_service_name"] = service_name
+            self.booking_service._save_pending_confirmation(sender_id, pending)
+
     def _looks_like_booking_message(self, text: str) -> bool:
         normalized = text.strip().lower()
         keyword_normalized = self._normalize_for_booking_keywords(text)
@@ -191,6 +394,9 @@ class MessageProcessor:
             service = knowledge_service.find_service(keyword_normalized)
             if service is not None and has_call_request and (has_date_word or has_time):
                 return True
+
+        if self._looks_like_service_booking_request(text):
+            return True
 
         return False
 
@@ -1143,7 +1349,15 @@ class MessageProcessor:
         reply_text: str,
         intent_value: str,
         booking_result: Dict[str, Any] | None = None,
+        fallback_service_id: str | None = None,
+        fallback_service_name: str | None = None,
     ) -> Dict[str, Any]:
+        self._remember_front_desk_booking_service_context(
+            message.sender_id,
+            message.user_message,
+            fallback_service_id=fallback_service_id,
+            fallback_service_name=fallback_service_name,
+        )
         reply_text = self.reply_service.enforce_response_policy(
             reply_text=reply_text,
             user_text=message.user_message,
@@ -2035,6 +2249,9 @@ class MessageProcessor:
         logger.info("Booking state: %s", booking_state.value)
 
         if booking_state != BookingState.NONE:
+            active_service_id, active_service_name = self._get_pending_front_desk_service_context(
+                message.sender_id
+            )
             if self._looks_like_booking_pause_or_postpone(message.user_message):
                 booking_result = self.booking_service.process_booking_message(
                     sender_id=message.sender_id,
@@ -2047,6 +2264,8 @@ class MessageProcessor:
                         reply_text=booking_result["reply_text"],
                         intent_value="booking_flow",
                         booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
                     )
 
             if self._looks_like_capability_question(message.user_message):
@@ -2063,6 +2282,8 @@ class MessageProcessor:
                     reply_text=booking_result["reply_text"],
                     intent_value="booking_request",
                     booking_result=booking_result,
+                    fallback_service_id=active_service_id,
+                    fallback_service_name=active_service_name,
                 )
 
             if booking_state == BookingState.WAITING_FOR_CONTACT:
@@ -2089,6 +2310,8 @@ class MessageProcessor:
                         reply_text=booking_result["reply_text"],
                         intent_value="booking_flow",
                         booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
                     )
 
             if (
@@ -2106,10 +2329,18 @@ class MessageProcessor:
                         reply_text=booking_result["reply_text"],
                         intent_value="booking_flow",
                         booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
                     )
 
             grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)
             if grounded_reply:
+                pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
+                self._restore_pending_front_desk_service_context(
+                    message.sender_id,
+                    pending.get("current_service_id"),
+                    pending.get("current_service_name"),
+                )
                 return self._build_direct_reply_result(
                     message=message,
                     reply_text=grounded_reply,
@@ -2174,6 +2405,8 @@ class MessageProcessor:
                     reply_text=booking_result["reply_text"],
                     intent_value="booking_availability_question",
                     booking_result=booking_result,
+                    fallback_service_id=active_service_id,
+                    fallback_service_name=active_service_name,
                 )
 
             if booking_state == BookingState.WAITING_FOR_CONTACT:
@@ -2209,6 +2442,12 @@ class MessageProcessor:
             else:
                 reply_text = self.reply_service.generate_reply(message, intent=IntentType.BOOKING_REQUEST)
             reply_text_before_guard = reply_text
+            self._remember_front_desk_booking_service_context(
+                message.sender_id,
+                message.user_message,
+                fallback_service_id=active_service_id,
+                fallback_service_name=active_service_name,
+            )
             logger.info(
                 "Reply before guard metadata intent=%s routing_category=%s reply_length=%s",
                 intent_value,
