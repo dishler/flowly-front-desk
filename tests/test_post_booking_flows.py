@@ -10,6 +10,7 @@ os.environ.setdefault("DEBUG", "false")
 from app.application.dto.normalized_message import NormalizedMessage
 from app.application.services.booking_service import BookingService
 from app.application.services.calendar_service import CalendarService
+from app.application.services.front_desk_config_service import FrontDeskConfigService
 from app.application.services.intent_service import IntentService
 from app.application.services.knowledge_service import KnowledgeService
 from app.application.services.language_service import LanguageService
@@ -220,6 +221,25 @@ class BusyUntil1430CreateCalendarService(RecordingCreateCalendarService):
         )
 
 
+class SelectiveSuggestedAvailabilityCalendarService(RecordingCreateCalendarService):
+    def __init__(self, available_hours: set[tuple[int, int]]) -> None:
+        super().__init__()
+        self.available_hours = available_hours
+
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        return (start_dt.hour, start_dt.minute) in self.available_hours
+
+
+class BusySuggestedAvailabilityCalendarService(RecordingCreateCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        return False
+
+
+class FailingSuggestedAvailabilityCalendarService(RecordingCreateCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        raise RuntimeError("availability failed")
+
+
 @pytest.fixture
 def processor_factory():
     def build(
@@ -299,7 +319,13 @@ def _mark_confirmed(booking_service: BookingService, event_id: str | None = None
     ],
 )
 async def test_confirmed_booking_text_flows(processor_factory, text, expected_intent, reply_part):
-    processor, booking_service = processor_factory()
+    processor, booking_service = processor_factory(
+        calendar_service=(
+            RecordingCreateCalendarService()
+            if expected_intent == "booking_availability_question"
+            else None
+        )
+    )
     _mark_confirmed(
         booking_service,
         event_id="calendar-event-123" if expected_intent == "booking_reschedule" else None,
@@ -339,7 +365,14 @@ async def test_confirmed_booking_text_flows(processor_factory, text, expected_in
     ],
 )
 async def test_confirmed_booking_voice_flows(processor_factory, transcript, expected_intent, reply_part):
-    processor, booking_service = processor_factory(transcript)
+    processor, booking_service = processor_factory(
+        transcript,
+        calendar_service=(
+            RecordingCreateCalendarService()
+            if expected_intent == "booking_availability_question"
+            else None
+        ),
+    )
     _mark_confirmed(
         booking_service,
         event_id="calendar-event-123" if expected_intent == "booking_reschedule" else None,
@@ -381,7 +414,7 @@ async def test_cancel_confirmed_booking_hands_off_when_calendar_delete_fails(pro
 
 
 async def test_availability_suggests_slots_and_day_followup(processor_factory):
-    processor, _ = processor_factory()
+    processor, _ = processor_factory(calendar_service=RecordingCreateCalendarService())
 
     result = await processor.process(_message(text="коли є вільні слоти?"))
 
@@ -397,7 +430,7 @@ async def test_availability_suggests_slots_and_day_followup(processor_factory):
 
 
 async def test_availability_datetime_followup_asks_for_contact(processor_factory):
-    processor, _ = processor_factory()
+    processor, _ = processor_factory(calendar_service=RecordingCreateCalendarService())
     await processor.process(_message(text="коли є вільні слоти?"))
 
     result = await processor.process(_message(text="завтра о 15"))
@@ -408,7 +441,7 @@ async def test_availability_datetime_followup_asks_for_contact(processor_factory
 
 
 async def test_availability_time_only_followup_uses_context(processor_factory):
-    processor, _ = processor_factory()
+    processor, _ = processor_factory(calendar_service=RecordingCreateCalendarService())
     await processor.process(_message(text="коли є вільні слоти?"))
 
     result = await processor.process(_message(text="15"))
@@ -416,6 +449,93 @@ async def test_availability_time_only_followup_uses_context(processor_factory):
     assert result["intent"] == "booking_flow"
     assert "о 15:00 вільний" in result["reply_text"]
     assert "ваше ім’я та номер телефону або email" in result["reply_text"]
+
+
+async def test_general_availability_returns_only_calendar_verified_slots(processor_factory):
+    processor, _ = processor_factory(
+        calendar_service=SelectiveSuggestedAvailabilityCalendarService({(15, 0), (16, 0)})
+    )
+
+    result = await processor.process(_message(text="коли є вільні слоти?"))
+
+    assert result["intent"] == "booking_availability_question"
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "15:00" in result["reply_text"]
+    assert "16:00" in result["reply_text"]
+    assert "12:00" not in result["reply_text"]
+    assert "11:00" not in result["reply_text"]
+
+
+async def test_general_availability_all_busy_fails_closed_without_fake_slots(processor_factory):
+    processor, _ = processor_factory(calendar_service=BusySuggestedAvailabilityCalendarService())
+
+    result = await processor.process(_message(text="коли є вільні слоти?"))
+
+    assert result["intent"] == "booking_availability_question"
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert "підтверджених вільних слотів" in result["reply_text"]
+    assert "12:00" not in result["reply_text"]
+    assert "15:00" not in result["reply_text"]
+    assert "11:00" not in result["reply_text"]
+    assert "16:00" not in result["reply_text"]
+    assert result["booking_result"]["suggested_slots"] == []
+
+
+async def test_general_availability_unconfigured_calendar_fails_closed_without_fake_slots(processor_factory):
+    processor, _ = processor_factory(calendar_service=CalendarService())
+
+    result = await processor.process(_message(text="коли є вільні слоти?"))
+
+    assert result["intent"] == "booking_availability_question"
+    assert "підтверджених вільних слотів" in result["reply_text"]
+    assert "12:00" not in result["reply_text"]
+    assert "15:00" not in result["reply_text"]
+    assert "11:00" not in result["reply_text"]
+    assert "16:00" not in result["reply_text"]
+    assert result["booking_result"]["suggested_slots"] == []
+
+
+async def test_general_availability_calendar_exception_fails_closed_without_fake_slots(processor_factory):
+    processor, _ = processor_factory(calendar_service=FailingSuggestedAvailabilityCalendarService())
+
+    result = await processor.process(_message(text="коли є вільні слоти?"))
+
+    assert result["intent"] == "booking_availability_question"
+    assert "підтверджених вільних слотів" in result["reply_text"]
+    assert "12:00" not in result["reply_text"]
+    assert "15:00" not in result["reply_text"]
+    assert "11:00" not in result["reply_text"]
+    assert "16:00" not in result["reply_text"]
+    assert result["booking_result"]["suggested_slots"] == []
+
+
+async def test_general_availability_fix_keeps_exact_time_booking_working(processor_factory):
+    processor, _ = processor_factory(calendar_service=RecordingCreateCalendarService())
+
+    result = await processor.process(_message(text="завтра о 15"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "о 15:00 вільний" in result["reply_text"]
+
+
+async def test_general_availability_fix_keeps_daypart_and_time_window_verified(processor_factory):
+    booking_service = BookingService(
+        calendar_service=SelectiveSuggestedAvailabilityCalendarService({(10, 0), (16, 0)}),
+        language_service=LanguageService(),
+        front_desk_config_service=FrontDeskConfigService("app/data/front_desk_config.json"),
+    )
+
+    daypart = booking_service.start_booking_flow("user-1", "хочу записатись у четвер зранку")
+    time_window = booking_service.process_booking_message("user-1", "після 15")
+
+    assert daypart["status"] == "daypart_slots_suggested"
+    assert "10:00" in daypart["reply_text"]
+    assert "09:00" not in daypart["reply_text"]
+    assert [datetime.fromisoformat(slot["start_dt"]).hour for slot in daypart["suggested_slots"]] == [10]
+    assert time_window["status"] == "time_window_slots_suggested"
+    assert "16:00" in time_window["reply_text"]
+    assert [datetime.fromisoformat(slot["start_dt"]).hour for slot in time_window["suggested_slots"]] == [16]
 
 
 async def test_empty_voice_transcription_uses_audio_retry_reply(processor_factory):
@@ -1185,7 +1305,7 @@ async def test_name_only_during_booking_asks_for_contact_with_name(processor_fac
 
 
 async def test_availability_question_while_waiting_for_time_returns_slots(processor_factory):
-    processor, booking_service = processor_factory()
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
 
     await processor.process(_message(text="давайте кол"))
     result = await processor.process(_message(text="коли є слоти?"))
@@ -2160,7 +2280,7 @@ async def test_branch_routing_reply_does_not_use_forbidden_setup_phrase(processo
 
 
 async def test_price_and_call_typos_after_niche_reply_do_not_fallback(processor_factory):
-    processor, booking_service = processor_factory()
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
 
     niche = await processor.process(_message(text="для стоматології як це працює?"))
     price = await processor.process(_message(text="що по ціні?"))

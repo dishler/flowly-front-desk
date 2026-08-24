@@ -526,7 +526,10 @@ class BookingService:
             return f"Можемо запропонувати завтра {tomorrow_times}. Який час вам найзручніший?"
         if day_after_times:
             return f"Можемо запропонувати післязавтра {day_after_times}. Який час вам найзручніший?"
-        return f"Можемо підібрати час для {self._appointment_label()}. Підкажіть, будь ласка, який день вам зручний?"
+        return (
+            "Зараз не бачу підтверджених вільних слотів. "
+            "Можете написати бажаний день і час, і я перевірю."
+        )
 
     def _build_confirm_prompt_reply(self, language: str) -> str:
         return "Напишіть, будь ласка, «так», щоб підтвердити, або надішліть інший час."
@@ -1391,7 +1394,7 @@ class BookingService:
 
         client = self.calendar_service.google_calendar_client
         if not client or not client.is_configured():
-            return candidates
+            return {}
 
         checked: dict[str, list[datetime]] = {}
         for day_key, slots in candidates.items():
@@ -1405,10 +1408,11 @@ class BookingService:
                         checked[day_key].append(slot)
                 except Exception:
                     logger.exception("suggested slot availability check failed start_dt=%s", slot.isoformat())
+                    return {}
             if not checked[day_key]:
                 checked.pop(day_key, None)
 
-        return checked or candidates
+        return checked
 
     def _format_slot_times(self, slots: list[datetime], language: str) -> str:
         times = [slot.strftime("%H:%M") for slot in slots]
