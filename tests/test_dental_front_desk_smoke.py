@@ -831,6 +831,8 @@ async def test_dental_daypart_one_turn_monday_morning_suggests_calendar_verified
 
     assert result["booking_result"]["status"] == "daypart_slots_suggested"
     assert "У понеділок зранку" in result["reply_text"]
+    assert "можу запропонувати" in result["reply_text"]
+    assert "Який час вам зручніший" in result["reply_text"]
     assert "10:00" in result["reply_text"]
     assert "11:30" in result["reply_text"]
     assert "09:00" not in result["reply_text"]
@@ -864,6 +866,8 @@ async def test_dental_time_window_after_suggests_calendar_verified_slots():
 
     assert result["booking_result"]["status"] == "time_window_slots_suggested"
     assert "У вівторок після 15:00" in result["reply_text"]
+    assert "можу запропонувати" in result["reply_text"]
+    assert "Який час вам зручніший" in result["reply_text"]
     assert "15:30" in result["reply_text"]
     assert "16:30" in result["reply_text"]
     assert "15:00" not in result["reply_text"].replace("після 15:00", "")
@@ -885,6 +889,9 @@ async def test_dental_time_window_before_suggests_only_slots_before_end():
     result = await processor.process(_message("Хочу записатися у вівторок до 14"))
 
     assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert "У вівторок до 14:00" in result["reply_text"]
+    assert "можу запропонувати" in result["reply_text"]
+    assert "Який час вам зручніший" in result["reply_text"]
     assert {slot["start_dt"] for slot in result["booking_result"]["suggested_slots"]} == {
         "2026-08-25T09:00:00+03:00",
         "2026-08-25T13:30:00+03:00",
@@ -903,6 +910,9 @@ async def test_dental_time_window_range_suggests_only_slots_inside_range():
     result = await processor.process(_message("Хочу записатися у вівторок з 13 до 16"))
 
     assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert "У вівторок з 13:00 до 16:00" in result["reply_text"]
+    assert "можу запропонувати" in result["reply_text"]
+    assert "Який час вам зручніший" in result["reply_text"]
     assert {slot["start_dt"] for slot in result["booking_result"]["suggested_slots"]} == {
         "2026-08-25T13:00:00+03:00",
         "2026-08-25T15:30:00+03:00",

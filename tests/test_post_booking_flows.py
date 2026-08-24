@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -21,6 +23,14 @@ from app.domain.enums import IntentType
 
 
 FORBIDDEN_GENERIC_CTA = "Так, це можна налаштувати, але краще спершу зрозуміти ваш процес"
+
+
+def _kyiv_dt(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+
+def _visible_times(text: str) -> list[str]:
+    return re.findall(r"\b\d{2}:\d{2}\b", text)
 
 
 class DummyDedupService:
@@ -393,7 +403,7 @@ def _mark_confirmed(booking_service: BookingService, event_id: str | None = None
         (
             "коли є вільні слоти?",
             "booking_availability_question",
-            "завтра о 12:00 або 15:00",
+            "На завтра можу запропонувати 12:00 або 15:00",
         ),
         (
             "Скасуйте дзвінок",
@@ -439,7 +449,7 @@ async def test_confirmed_booking_text_flows(processor_factory, text, expected_in
         (
             "коли є вільні слоти?",
             "booking_availability_question",
-            "завтра о 12:00 або 15:00",
+            "На завтра можу запропонувати 12:00 або 15:00",
         ),
         (
             "Скасуйте дзвінок",
@@ -503,14 +513,211 @@ async def test_availability_suggests_slots_and_day_followup(processor_factory):
     result = await processor.process(_message(text="коли є вільні слоти?"))
 
     assert result["intent"] == "booking_availability_question"
-    assert "завтра о 12:00 або 15:00" in result["reply_text"]
-    assert "післязавтра о 11:00 або 16:00" in result["reply_text"]
+    assert "На завтра можу запропонувати 12:00 або 15:00" in result["reply_text"]
+    assert "Також післязавтра о 11:00" in result["reply_text"]
+    assert "16:00" not in result["reply_text"]
 
     result = await processor.process(_message(text="завтра"))
 
     assert result["intent"] == "booking_flow"
-    assert "завтра можемо запропонувати о 12:00 або 15:00" in result["reply_text"]
+    assert "завтра можемо запропонувати 12:00 або 15:00" in result["reply_text"]
     assert result["routing_category"] != "escalate_to_human"
+
+
+@pytest.mark.parametrize(
+    ("slots", "expected_times"),
+    [
+        ([_kyiv_dt(2026, 8, 24, 16, 30)], ["16:30"]),
+        ([_kyiv_dt(2026, 8, 24, 14), _kyiv_dt(2026, 8, 24, 16, 30)], ["14:00", "16:30"]),
+        (
+            [_kyiv_dt(2026, 8, 24, 10), _kyiv_dt(2026, 8, 24, 11, 30), _kyiv_dt(2026, 8, 24, 15)],
+            ["10:00", "11:30", "15:00"],
+        ),
+        (
+            [
+                _kyiv_dt(2026, 8, 24, 10),
+                _kyiv_dt(2026, 8, 24, 11),
+                _kyiv_dt(2026, 8, 24, 12),
+                _kyiv_dt(2026, 8, 24, 13),
+                _kyiv_dt(2026, 8, 24, 14),
+            ],
+            ["10:00", "11:00", "12:00"],
+        ),
+    ],
+)
+async def test_availability_slot_presentation_is_natural_and_limited(
+    processor_factory,
+    monkeypatch,
+    slots,
+    expected_times,
+):
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
+    monkeypatch.setattr(
+        booking_service,
+        "_get_suggested_slots_by_day",
+        lambda: {"tomorrow": slots},
+    )
+
+    result = await processor.process(_message(text="коли є час?"))
+    pending = booking_service._get_pending_confirmation("user-1")
+
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert _visible_times(result["reply_text"]) == expected_times
+    assert "На завтра можу запропонувати" in result["reply_text"]
+    assert "Який час вам зручніший" in result["reply_text"] or "Підійде" in result["reply_text"]
+    assert "ім’я" not in result["reply_text"]
+    assert "телефон" not in result["reply_text"]
+    assert result["booking_result"]["booking_state"] == "WAITING_FOR_TIME"
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert [slot["start_dt"] for slot in result["booking_result"]["suggested_slots"]] == [
+        slot.isoformat() for slot in slots[:3]
+    ]
+
+
+async def test_availability_hidden_fourth_slot_is_not_selectable(processor_factory, monkeypatch):
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
+    monkeypatch.setattr(
+        booking_service,
+        "_get_suggested_slots_by_day",
+        lambda: {
+            "tomorrow": [
+                _kyiv_dt(2026, 8, 24, 10),
+                _kyiv_dt(2026, 8, 24, 11),
+                _kyiv_dt(2026, 8, 24, 12),
+                _kyiv_dt(2026, 8, 24, 13),
+            ]
+        },
+    )
+
+    await processor.process(_message(text="коли є час?"))
+    hidden = await processor.process(_message(text="13:00"))
+
+    assert hidden["booking_result"]["status"] == "availability_time_not_offered"
+    assert _visible_times(hidden["reply_text"]) == ["10:00", "11:00", "12:00"]
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_availability_displayed_slot_selection_still_starts_contact_collection(
+    processor_factory,
+    monkeypatch,
+):
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
+    monkeypatch.setattr(
+        booking_service,
+        "_get_suggested_slots_by_day",
+        lambda: {
+            "tomorrow": [
+                _kyiv_dt(2026, 8, 24, 10),
+                _kyiv_dt(2026, 8, 24, 11, 30),
+                _kyiv_dt(2026, 8, 24, 15),
+            ]
+        },
+    )
+
+    suggested = await processor.process(_message(text="коли є час?"))
+    selected = await processor.process(_message(text="давайте 11:30"))
+
+    assert suggested["booking_result"]["booking_state"] == "WAITING_FOR_TIME"
+    assert selected["booking_result"]["status"] == "waiting_for_contact"
+    assert selected["booking_result"]["booking_state"] == "WAITING_FOR_CONTACT"
+    assert selected["booking_result"]["start_dt"] == "2026-08-24T11:30:00+03:00"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "11",
+        "11:00",
+        "давайте 11",
+        "давай 11",
+        "тоді 11",
+        "на 11",
+        "о 11",
+        "давайте 11:00",
+        "11 підійде",
+        "11 норм",
+    ],
+)
+async def test_availability_natural_selection_accepts_only_displayed_slot(
+    processor_factory,
+    monkeypatch,
+    selection,
+):
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
+    monkeypatch.setattr(
+        booking_service,
+        "_get_suggested_slots_by_day",
+        lambda: {
+            "tomorrow": [
+                _kyiv_dt(2026, 8, 24, 10),
+                _kyiv_dt(2026, 8, 24, 11),
+                _kyiv_dt(2026, 8, 24, 12),
+            ]
+        },
+    )
+
+    await processor.process(_message(text="коли є час?"))
+    selected = await processor.process(_message(text=selection))
+    pending = booking_service._get_pending_confirmation("user-1")
+
+    assert selected["booking_result"]["status"] == "waiting_for_contact"
+    assert selected["booking_result"]["booking_state"] == "WAITING_FOR_CONTACT"
+    assert selected["booking_result"]["start_dt"] == "2026-08-24T11:00:00+03:00"
+    assert pending["customer_name"] is None
+    assert pending["state"] == "WAITING_FOR_CONTACT"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    ["13", "давайте 13", "на 13", "а можна якось", "давайте"],
+)
+async def test_availability_natural_selection_rejects_unoffered_or_ambiguous_text(
+    processor_factory,
+    monkeypatch,
+    selection,
+):
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
+    monkeypatch.setattr(
+        booking_service,
+        "_get_suggested_slots_by_day",
+        lambda: {
+            "tomorrow": [
+                _kyiv_dt(2026, 8, 24, 10),
+                _kyiv_dt(2026, 8, 24, 11),
+                _kyiv_dt(2026, 8, 24, 12),
+            ]
+        },
+    )
+
+    await processor.process(_message(text="коли є час?"))
+    result = await processor.process(_message(text=selection))
+
+    assert (result["booking_result"] or {}).get("status") != "waiting_for_contact"
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_availability_day_followup_uses_contextual_cta(processor_factory):
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
+
+    await processor.process(_message(text="коли є час?"))
+    result = await processor.process(_message(text="завтра"))
+
+    assert result["booking_result"]["status"] == "availability_day_selected"
+    assert "завтра можемо запропонувати" in result["reply_text"]
+    assert "інший день" not in result["reply_text"].lower()
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_availability_request_for_tomorrow_preserves_requested_day(processor_factory):
+    processor, booking_service = processor_factory(calendar_service=RecordingCreateCalendarService())
+
+    result = await processor.process(_message(text="завтра коли вільно?"))
+
+    assert result["booking_result"]["status"] == "availability_suggested"
+    assert _visible_times(result["reply_text"]) == ["12:00", "15:00"]
+    assert "завтра можемо запропонувати" in result["reply_text"]
+    assert "післязавтра" not in result["reply_text"]
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
 
 
 async def test_availability_datetime_followup_asks_for_contact(processor_factory):
@@ -2511,7 +2718,7 @@ async def test_price_and_call_typos_after_niche_reply_do_not_fallback(processor_
     assert "спеціалістом" in call["reply_text"]
     assert "день" in call["reply_text"] and "час" in call["reply_text"]
     assert availability["intent"] == "booking_availability_question"
-    assert "варіант" in availability["reply_text"]
+    assert "Який час вам зручніший" in availability["reply_text"]
     assert "завтра" in availability["reply_text"]
     assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
     for result in [price, accepted, typo_call, call, availability]:

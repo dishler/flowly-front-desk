@@ -410,6 +410,24 @@ class BookingService:
     def _build_outside_business_hours_reply(self, language: str) -> str:
         return "На цей час клініка не працює. Підкажіть, будь ласка, інший день або час?"
 
+    def _display_slots(self, slots: list[datetime]) -> list[datetime]:
+        return slots[:3]
+
+    def _display_slots_by_day(
+        self,
+        slots_by_day: dict[str, list[datetime]],
+    ) -> dict[str, list[datetime]]:
+        display_slots: dict[str, list[datetime]] = {}
+        remaining = 3
+        for day_key, slots in slots_by_day.items():
+            if remaining <= 0:
+                break
+            selected = slots[:remaining]
+            if selected:
+                display_slots[day_key] = selected
+                remaining -= len(selected)
+        return display_slots
+
     def _build_daypart_slots_reply(
         self,
         language: str,
@@ -421,7 +439,7 @@ class BookingService:
     ) -> str:
         day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language) or "цей день"
         day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
-        times = self._format_slot_times(slots, language)
+        times = self._format_slot_times(self._display_slots(slots), language)
         if times:
             return f"{day_prefix} {day_label} {daypart_label} можу запропонувати {times}. Який час вам зручніший?"
         return f"{day_prefix} {day_label} {daypart_label} не бачу вільних слотів. Підкажіть інший день або час?"
@@ -437,9 +455,9 @@ class BookingService:
     ) -> str:
         day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language) or "цей день"
         day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
-        times = self._format_slot_times(slots, language)
+        times = self._format_slot_times(self._display_slots(slots), language)
         if times:
-            return f"{day_prefix} {day_label} {window_label} є вільний час {times}. Який варіант вам підійде?"
+            return f"{day_prefix} {day_label} {window_label} можу запропонувати {times}. Який час вам зручніший?"
         return f"{day_prefix} {day_label} {window_label} не бачу вільних слотів. Підкажіть інший час?"
 
     def _build_name_and_contact_request(self, language: str) -> str:
@@ -517,18 +535,19 @@ class BookingService:
         language: str,
         slots_by_day: dict[str, list[datetime]],
     ) -> str:
-        tomorrow_times = self._format_slot_times(slots_by_day.get("tomorrow", []), language)
-        day_after_times = self._format_slot_times(slots_by_day.get("day_after_tomorrow", []), language)
+        display_slots_by_day = self._display_slots_by_day(slots_by_day)
+        tomorrow_times = self._format_slot_times(display_slots_by_day.get("tomorrow", []), language)
+        day_after_times = self._format_slot_times(display_slots_by_day.get("day_after_tomorrow", []), language)
 
         if tomorrow_times and day_after_times:
             return (
-                f"Можемо запропонувати кілька варіантів: завтра {tomorrow_times}, "
-                f"а також післязавтра {day_after_times}. Який день і час вам найзручніший?"
+                f"На завтра можу запропонувати {tomorrow_times}. "
+                f"Також післязавтра {day_after_times}. Який варіант вам зручніший?"
             )
         if tomorrow_times:
-            return f"Можемо запропонувати завтра {tomorrow_times}. Який час вам найзручніший?"
+            return f"На завтра можу запропонувати {tomorrow_times}. Підійде щось із цього чи перевірити інший день?"
         if day_after_times:
-            return f"Можемо запропонувати післязавтра {day_after_times}. Який час вам найзручніший?"
+            return f"На післязавтра можу запропонувати {day_after_times}. Який час вам зручніший?"
         return (
             "Зараз не бачу підтверджених вільних слотів. "
             "Можете написати бажаний день і час, і я перевірю."
@@ -1251,7 +1270,14 @@ class BookingService:
         source_channel: str | None = None,
     ) -> Dict[str, Any]:
         language = self._detect_language(message_text)
-        slots_by_day = self._get_suggested_slots_by_day()
+        requested_day_key = self._detect_requested_day_key(message_text)
+        verified_slots_by_day = self._get_suggested_slots_by_day()
+        if requested_day_key is not None:
+            slots_by_day = self._display_slots_by_day(
+                {requested_day_key: verified_slots_by_day.get(requested_day_key, [])}
+            )
+        else:
+            slots_by_day = self._display_slots_by_day(verified_slots_by_day)
 
         self._save_booking_state(
             sender_id,
@@ -1271,12 +1297,22 @@ class BookingService:
             for day_key, slots in slots_by_day.items()
             for slot in slots
         ]
-        pending["last_suggested_day"] = "tomorrow"
+        pending["last_suggested_day"] = requested_day_key or next(iter(slots_by_day), "tomorrow")
         self._save_pending_confirmation(sender_id, pending)
+
+        reply_text = (
+            self._build_day_slots_reply(
+                language,
+                requested_day_key,
+                slots_by_day.get(requested_day_key, []),
+            )
+            if requested_day_key is not None
+            else self._build_availability_question_reply(language, slots_by_day)
+        )
 
         return {
             "status": "availability_suggested",
-            "reply_text": self._build_availability_question_reply(language, slots_by_day),
+            "reply_text": reply_text,
             "booking_state": BookingState.WAITING_FOR_TIME.value,
             "suggested_slots": pending["suggested_slots"],
         }
@@ -1491,12 +1527,14 @@ class BookingService:
         return checked
 
     def _format_slot_times(self, slots: list[datetime], language: str) -> str:
-        times = [slot.strftime("%H:%M") for slot in slots]
+        times = [slot.strftime("%H:%M") for slot in self._display_slots(slots)]
         if not times:
             return ""
         if len(times) == 1:
             return f"о {times[0]}"
-        return "о " + " або ".join(times)
+        if len(times) == 2:
+            return f"{times[0]} або {times[1]}"
+        return f"{', '.join(times[:-1])} або {times[-1]}"
 
     def _suggested_slots_from_pending(self, pending: dict[str, Any]) -> dict[str, list[datetime]]:
         slots_by_day: dict[str, list[datetime]] = {}
@@ -1535,6 +1573,27 @@ class BookingService:
 
     def _extract_selected_slot_time(self, text: str) -> time | None:
         return self._parse_time_only(text)
+
+    def _extract_suggested_slot_selection_time(self, text: str) -> time | None:
+        selected = self._extract_selected_slot_time(text)
+        if selected is not None:
+            return selected
+
+        normalized = " ".join(text.strip().lower().split())
+        normalized = re.sub(r"[^\w\sа-яіїєґё:]", " ", normalized, flags=re.IGNORECASE)
+        normalized = " ".join(normalized.split())
+        patterns = [
+            r"^(?:давайте|давай|тоді|на|о)\s+(\d{1,2})$",
+            r"^(\d{1,2})\s+(?:підійде|підходить|норм|нормально|добре|ок|окей)$",
+        ]
+        for pattern in patterns:
+            match = re.fullmatch(pattern, normalized)
+            if match:
+                hour = int(match.group(1))
+                if 0 <= hour <= 23:
+                    return time(hour=hour, minute=0)
+
+        return None
 
     def _deserialize_pending_time_window(self, pending: dict[str, Any]) -> dict[str, Any] | None:
         raw = pending.get("time_window")
@@ -1597,10 +1656,10 @@ class BookingService:
 
     def _build_day_slots_reply(self, language: str, day_key: str, slots: list[datetime]) -> str:
         day_label_uk = "завтра" if day_key == "tomorrow" else "післязавтра"
-        times = self._format_slot_times(slots, language)
+        times = self._format_slot_times(self._display_slots(slots), language)
         if times:
             return f"Добре, {day_label_uk} можемо запропонувати {times}. Який час вам зручніший?"
-        return f"Добре, підкажіть, будь ласка, який час {day_label_uk} вам зручний?"
+        return f"На {day_label_uk} вільного часу не бачу. Можете написати інший день або конкретний час, і я перевірю."
 
     def _process_availability_followup(
         self,
@@ -1633,29 +1692,28 @@ class BookingService:
                 time_window=time_window,
             )
 
-        if self._is_confirmation_text(normalized):
-            preferred_day = pending.get("last_suggested_day") or "tomorrow"
-            candidate_slots = self._suggested_slots_from_pending(pending).get(preferred_day, [])
-            if candidate_slots:
-                matched_slot = candidate_slots[0]
-                self._save_booking_state(
-                    sender_id,
-                    state=BookingState.WAITING_FOR_CONTACT,
-                    language=language,
-                    start_dt=matched_slot,
-                    source_channel=source_channel or pending.get("source_channel"),
-                    context_summary=pending.get("context_summary"),
-                )
-                return {
-                    "status": "waiting_for_contact",
-                    "reply_text": self._build_suggested_slot_accepted_reply(language, matched_slot),
-                    "requires_confirmation": False,
-                    "requires_contact": True,
-                    "booking_state": BookingState.WAITING_FOR_CONTACT.value,
-                    "start_dt": matched_slot.isoformat(),
-                }
-
         slots_by_day = self._suggested_slots_from_pending(pending)
+        preferred_day = pending.get("last_suggested_day") or "tomorrow"
+        candidate_slots = slots_by_day.get(preferred_day, [])
+        if self._is_confirmation_text(normalized) and len(candidate_slots) == 1:
+            matched_slot = candidate_slots[0]
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_CONTACT,
+                language=language,
+                start_dt=matched_slot,
+                source_channel=source_channel or pending.get("source_channel"),
+                context_summary=pending.get("context_summary"),
+            )
+            return {
+                "status": "waiting_for_contact",
+                "reply_text": self._build_suggested_slot_accepted_reply(language, matched_slot),
+                "requires_confirmation": False,
+                "requires_contact": True,
+                "booking_state": BookingState.WAITING_FOR_CONTACT.value,
+                "start_dt": matched_slot.isoformat(),
+            }
+
         requested_day_key = self._detect_requested_day_key(message_text)
         if requested_day_key:
             pending["last_suggested_day"] = requested_day_key
@@ -1670,12 +1728,10 @@ class BookingService:
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
             }
 
-        requested_time = self._extract_selected_slot_time(message_text)
+        requested_time = self._extract_suggested_slot_selection_time(message_text)
         if requested_time is None:
             return None
 
-        preferred_day = pending.get("last_suggested_day") or "tomorrow"
-        candidate_slots = slots_by_day.get(preferred_day, [])
         matched_slot = next(
             (
                 slot
