@@ -404,6 +404,9 @@ class BookingService:
         slots = self.calendar_service.get_available_slots(language)
         return f"На цей час слот уже зайнятий. Можу запропонувати: {', '.join(slots)}."
 
+    def _build_availability_check_failed_reply(self, language: str) -> str:
+        return "Не вдалося перевірити доступність цього часу. Напишіть, будь ласка, бажаний день і час, і ми перевіримо запис."
+
     def _build_outside_business_hours_reply(self, language: str) -> str:
         return "На цей час клініка не працює. Підкажіть, будь ласка, інший день або час?"
 
@@ -2194,9 +2197,11 @@ class BookingService:
                 "requested_date": requested_date.isoformat() if requested_date else None,
             }
 
-        self._clear_pending_confirmation(sender_id)
+        previous_pending = self._get_pending_confirmation(sender_id)
+        duration_minutes = self._booking_duration_minutes()
 
-        if not self._is_within_business_hours(requested_dt, self._booking_duration_minutes()):
+        if not self._is_within_business_hours(requested_dt, duration_minutes):
+            self._clear_pending_confirmation(sender_id)
             return {
                 "status": "outside_business_hours",
                 "reply_text": self._build_outside_business_hours_reply(language),
@@ -2205,10 +2210,29 @@ class BookingService:
                 "start_dt": requested_dt.isoformat(),
             }
 
-        is_available = self.calendar_service.check_specific_time_availability(
-            start_dt=requested_dt,
-            duration_minutes=self._booking_duration_minutes(),
-        )
+        try:
+            is_available = self.calendar_service.check_specific_time_availability(
+                start_dt=requested_dt,
+                duration_minutes=duration_minutes,
+            )
+        except Exception:
+            logger.exception(
+                "booking availability check failed sender_id=%s start_dt=%s",
+                sender_id,
+                requested_dt.isoformat(),
+            )
+            return {
+                "status": "availability_check_failed",
+                "reply_text": self._build_availability_check_failed_reply(language),
+                "requires_confirmation": False,
+                "event_created": False,
+                "booking_state": (
+                    previous_pending.get("state")
+                    if previous_pending
+                    else BookingState.NONE.value
+                ),
+                "start_dt": requested_dt.isoformat(),
+            }
 
         logger.info(
             "booking availability sender_id=%s start_dt=%s is_available=%s",
@@ -2218,7 +2242,27 @@ class BookingService:
         )
 
         if not is_available:
-            next_slot = self._find_next_available_slot(requested_dt)
+            try:
+                next_slot = self._find_next_available_slot(requested_dt)
+            except Exception:
+                logger.exception(
+                    "booking next-slot availability check failed sender_id=%s start_dt=%s",
+                    sender_id,
+                    requested_dt.isoformat(),
+                )
+                return {
+                    "status": "availability_check_failed",
+                    "reply_text": self._build_availability_check_failed_reply(language),
+                    "requires_confirmation": False,
+                    "event_created": False,
+                    "booking_state": (
+                        previous_pending.get("state")
+                        if previous_pending
+                        else BookingState.NONE.value
+                    ),
+                    "start_dt": requested_dt.isoformat(),
+                }
+            self._clear_pending_confirmation(sender_id)
             if next_slot:
                 self._save_booking_state(
                     sender_id,
@@ -2256,6 +2300,7 @@ class BookingService:
                 "start_dt": requested_dt.isoformat(),
             }
 
+        self._clear_pending_confirmation(sender_id)
         contact_details = self._extract_contact_details(message_text)
 
         if self._has_required_contact(

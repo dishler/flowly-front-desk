@@ -140,11 +140,18 @@ class DefaultTestCalendarService(CalendarService):
 class RecordingCreateCalendarService(CalendarService):
     def __init__(self) -> None:
         super().__init__(google_calendar_client=DummyConfiguredCalendarClient())
+        self.availability_checks = []
         self.created_descriptions = []
         self.created_events = []
         self.rescheduled_events = []
 
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
         return True
 
     def create_booking_event(
@@ -202,6 +209,12 @@ class BusyThenAvailableCalendarService(CalendarService):
 
 class BusyAt13CreateCalendarService(RecordingCreateCalendarService):
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
         return not (
             start_dt.minute == 0
             and start_dt.hour in {13, 14}
@@ -210,11 +223,23 @@ class BusyAt13CreateCalendarService(RecordingCreateCalendarService):
 
 class BusyAt19CreateCalendarService(RecordingCreateCalendarService):
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
         return not (start_dt.hour == 19 and start_dt.minute == 0)
 
 
 class BusyUntil1430CreateCalendarService(RecordingCreateCalendarService):
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
         return not (
             start_dt.hour == 12 and start_dt.minute == 30
             or start_dt.hour == 13 and start_dt.minute == 30
@@ -227,16 +252,75 @@ class SelectiveSuggestedAvailabilityCalendarService(RecordingCreateCalendarServi
         self.available_hours = available_hours
 
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
         return (start_dt.hour, start_dt.minute) in self.available_hours
 
 
 class BusySuggestedAvailabilityCalendarService(RecordingCreateCalendarService):
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
         return False
 
 
 class FailingSuggestedAvailabilityCalendarService(RecordingCreateCalendarService):
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
+        raise RuntimeError("availability failed")
+
+
+class UnconfiguredExactTimeCalendarService(RecordingCreateCalendarService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.google_calendar_client = None
+
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
+        return False
+
+
+class FailsOnceThenAvailableCalendarService(RecordingCreateCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
+        if len(self.availability_checks) == 1:
+            raise RuntimeError("availability failed")
+        return True
+
+
+class BusyThenFailsAlternativeCalendarService(RecordingCreateCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+            }
+        )
+        if len(self.availability_checks) == 1:
+            return False
         raise RuntimeError("availability failed")
 
 
@@ -793,6 +877,131 @@ async def test_waiting_for_time_combines_saved_weekday_with_time(processor_facto
     assert pending["step"] == "WAITING_FOR_CONTACT"
     assert pending["start_dt"]
     assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_exact_time_booking_available_still_waits_for_contact(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="хочу записатись"))
+    result = await processor.process(_message(text="завтра о 14:30"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert "14:30 вільний" in result["reply_text"]
+    assert len(calendar_service.availability_checks) == 1
+    assert calendar_service.created_events == []
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_exact_time_booking_busy_does_not_create_event_or_claim_requested_slot(processor_factory):
+    calendar_service = BusySuggestedAvailabilityCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="хочу записатись"))
+    result = await processor.process(_message(text="завтра о 14:30"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "unavailable"
+    assert "14:30 вільний" not in result["reply_text"]
+    assert calendar_service.created_events == []
+    assert not booking_service.has_confirmed_booking("user-1")
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_exact_time_booking_availability_exception_fails_closed(processor_factory):
+    calendar_service = FailingSuggestedAvailabilityCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="хочу записатись"))
+    result = await processor.process(_message(text="завтра о 14:30"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "availability_check_failed"
+    assert "Не вдалося перевірити доступність цього часу" in result["reply_text"]
+    assert "вільний" not in result["reply_text"]
+    assert "підтвердили" not in result["reply_text"]
+    assert len(calendar_service.availability_checks) == 1
+    assert calendar_service.created_events == []
+    assert not booking_service.has_confirmed_booking("user-1")
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
+
+
+async def test_exact_time_booking_unconfigured_calendar_fails_closed(processor_factory):
+    calendar_service = UnconfiguredExactTimeCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="хочу записатись"))
+    result = await processor.process(_message(text="завтра о 14:30"))
+
+    assert result["intent"] == "booking_flow"
+    assert result["booking_result"]["status"] == "unavailable"
+    assert "вільний" not in result["reply_text"]
+    assert len(calendar_service.availability_checks) >= 1
+    assert calendar_service.created_events == []
+    assert not booking_service.has_confirmed_booking("user-1")
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_exact_time_booking_outside_hours_rejects_before_calendar_check(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    booking_service = BookingService(
+        calendar_service=calendar_service,
+        language_service=LanguageService(),
+        front_desk_config_service=FrontDeskConfigService("app/data/front_desk_config.json"),
+    )
+
+    result = booking_service.start_booking_flow("user-1", "сьогодні о 3")
+
+    assert result["status"] == "outside_business_hours"
+    assert calendar_service.availability_checks == []
+    assert calendar_service.created_events == []
+    assert not booking_service.has_confirmed_booking("user-1")
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_exact_time_booking_availability_exception_with_contact_does_not_complete(processor_factory):
+    calendar_service = FailingSuggestedAvailabilityCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    result = await processor.process(_message(text="Хочу записатись завтра о 14:30 Іван 0987121328"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "availability_check_failed"
+    assert calendar_service.created_events == []
+    assert not booking_service.has_confirmed_booking("user-1")
+    assert booking_service._get_pending_confirmation("user-1") is None
+
+
+async def test_exact_time_booking_retry_after_availability_exception(processor_factory):
+    calendar_service = FailsOnceThenAvailableCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="хочу записатись на завтра"))
+    failed = await processor.process(_message(text="о 14:30"))
+    retry = await processor.process(_message(text="о 15"))
+
+    assert failed["booking_result"]["status"] == "availability_check_failed"
+    assert retry["booking_result"]["status"] == "waiting_for_contact"
+    assert "15:00 вільний" in retry["reply_text"]
+    assert len(calendar_service.availability_checks) == 2
+    assert calendar_service.created_events == []
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+async def test_exact_time_busy_alternative_lookup_exception_preserves_retry_state(processor_factory):
+    calendar_service = BusyThenFailsAlternativeCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+
+    await processor.process(_message(text="хочу записатись на завтра"))
+    result = await processor.process(_message(text="о 14:30"))
+
+    assert result["booking_result"]["status"] == "availability_check_failed"
+    assert "вільний" not in result["reply_text"]
+    assert len(calendar_service.availability_checks) == 2
+    assert calendar_service.created_events == []
+    assert not booking_service.has_confirmed_booking("user-1")
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
 
 
 async def test_booking_with_weekday_and_time_keeps_existing_booking_path(processor_factory):
