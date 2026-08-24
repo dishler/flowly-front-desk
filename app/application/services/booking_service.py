@@ -974,6 +974,14 @@ class BookingService:
             return True
         if self._looks_like_booking_correction(normalized) and self._extract_corrected_time(normalized):
             return True
+        if self._is_rejection(normalized):
+            return True
+        if re.search(r"\b(?:ні|не|no|not)\b.*\b\d{1,2}(?::00)?\b", normalized):
+            return True
+        if re.search(r"\b(?:краще|тоді|давай|давайте)\b.*\b(?:після|до)\s+\d{1,2}(?::\d{2})?\b", normalized):
+            return True
+        if re.search(r"\b(?:передумав|передумала|передумали|потім|пізніше)\b", normalized):
+            return True
         compact = re.sub(r"[^\w\sа-яіїєґё]", " ", normalized, flags=re.IGNORECASE)
         compact = " ".join(compact.split())
         if (
@@ -994,6 +1002,10 @@ class BookingService:
             "давайте",
             "ну давай",
             "тоді",
+            "ок",
+            "окей",
+            "гуд",
+            "ага",
             "інший",
             "інший час",
             "інша година",
@@ -1012,7 +1024,30 @@ class BookingService:
             "ок норм",
             "ок гуд",
         }
-        return normalized in non_names
+        if normalized in non_names:
+            return True
+        service_control_markers = [
+            "краще",
+            "не",
+            "ні",
+            "не консультац",
+            "не запис",
+        ]
+        service_words = [
+            "чистк",
+            "гігієн",
+            "відбілюван",
+            "консультац",
+            "карієс",
+            "дитяч",
+            "протез",
+            "імплант",
+        ]
+        return (
+            len(compact.split()) <= 5
+            and any(marker in compact for marker in service_control_markers)
+            and any(word in compact for word in service_words)
+        )
 
     def _extract_customer_name(
         self,
@@ -1830,6 +1865,7 @@ class BookingService:
         normalized = " ".join(text.strip().lower().split())
         correction_markers = [
             "краще",
+            "ні",
             "не хочу",
             "мав на увазі",
             "мала на увазі",
@@ -1887,6 +1923,7 @@ class BookingService:
             normalized.rfind(marker)
             for marker in [
                 " а ",
+                "ні",
                 "краще",
                 "мав на увазі",
                 "мала на увазі",

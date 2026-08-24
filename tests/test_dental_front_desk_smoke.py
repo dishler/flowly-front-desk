@@ -1382,6 +1382,53 @@ async def test_dental_waiting_contact_compact_time_correction_updates_time_not_n
 
 
 @pytest.mark.asyncio
+async def test_dental_waiting_contact_reject_hour_updates_time_not_name(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    corrected = await processor.process(_message("ні 16"))
+    pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert corrected["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_correction["customer_name"] is None
+    assert pending_after_correction["contact_phone"] is None
+    assert calendar.checked[-1]["start_dt"].hour == 16
+    assert "16:00" in corrected["reply_text"]
+    _assert_no_flowly_leakage(corrected["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_contact_reject_better_hour_updates_time_not_name(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    corrected = await processor.process(_message("ні, краще о 16"))
+    pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert corrected["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_correction["customer_name"] is None
+    assert pending_after_correction["contact_phone"] is None
+    assert calendar.checked[-1]["start_dt"].hour == 16
+    assert "16:00" in corrected["reply_text"]
+    _assert_no_flowly_leakage(corrected["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_contact_time_window_control_never_becomes_name(dental_processor):
+    processor, calendar = dental_processor
+
+    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    corrected = await processor.process(_message("краще після 15"))
+    pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert corrected["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_correction["customer_name"] is None
+    assert pending_after_correction["contact_phone"] is None
+    assert calendar.checked[-1]["start_dt"].hour == 15
+    _assert_no_flowly_leakage(corrected["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_waiting_contact_reject_and_replace_time_does_not_become_name(dental_processor):
     processor, calendar = dental_processor
 
@@ -1419,6 +1466,54 @@ async def test_dental_waiting_contact_service_correction_updates_service_not_nam
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["чистку краще", "ні чистку", "чистку не консультацію"])
+async def test_dental_waiting_contact_service_control_phrases_never_become_names(text):
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    result = await processor.process(_message(text))
+    pending_after = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert pending_after["customer_name"] is None
+    assert pending_after["contact_phone"] is None
+    assert pending_after["state"] == "WAITING_FOR_CONTACT"
+    assert "T14:00:00" in pending_after["start_dt"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["ок", "так", "гуд", "ага"])
+async def test_dental_waiting_contact_acknowledgements_never_become_names(text):
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    result = await processor.process(_message(text))
+    pending_after = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after["customer_name"] is None
+    assert pending_after["contact_phone"] is None
+    assert pending_after["state"] == "WAITING_FOR_CONTACT"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["номер потім дам", "я передумав", "не треба"])
+async def test_dental_waiting_contact_control_phrases_never_become_names(text):
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    result = await processor.process(_message(text))
+    pending_after = processor.booking_service._get_pending_confirmation("patient-1")
+
+    if pending_after is not None:
+        assert pending_after["customer_name"] is None
+        assert pending_after["contact_phone"] is None
+    assert "передумав" not in result["reply_text"].lower()
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_waiting_contact_normal_names_still_work(dental_processor):
     processor, calendar = dental_processor
 
@@ -1446,6 +1541,21 @@ async def test_dental_waiting_contact_normal_names_still_work(dental_processor):
     assert combined["booking_result"]["contact_phone"] == "0987121328"
     assert calendar.created[-1]["start_dt"].hour == 14
     _assert_no_flowly_leakage(name["reply_text"], completed["reply_text"], combined["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["Дмитро", "Іван", "Анна", "Олександр", "Марія", "Діма"])
+async def test_dental_waiting_contact_common_single_names_still_work(name):
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    result = await processor.process(_message(name))
+    pending_after_name = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert pending_after_name["customer_name"] == name
+    assert pending_after_name["contact_phone"] is None
+    _assert_no_flowly_leakage(result["reply_text"])
 
 
 @pytest.mark.asyncio
