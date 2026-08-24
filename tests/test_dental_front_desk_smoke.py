@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.application.dto.normalized_message import NormalizedMessage
+from app.application.services import booking_service as booking_service_module
 from app.application.services.booking_service import BookingService
 from app.application.services.front_desk_config_service import FrontDeskConfigService
 from app.application.services.intent_service import IntentService
@@ -69,6 +70,26 @@ class DummyOutboundService:
 class DummySpeechService:
     async def transcribe_audio(self, file_url: str) -> str:
         return ""
+
+
+_REAL_DATETIME = datetime
+
+
+class FixedDentalSmokeDatetimeMeta(type):
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, _REAL_DATETIME)
+
+
+class FixedDentalSmokeDatetime(_REAL_DATETIME, metaclass=FixedDentalSmokeDatetimeMeta):
+    @classmethod
+    def now(cls, tz=None):
+        fixed = _REAL_DATETIME(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+        return fixed if tz is None else fixed.astimezone(tz)
+
+
+@pytest.fixture(autouse=True)
+def freeze_dental_smoke_booking_clock(monkeypatch):
+    monkeypatch.setattr(booking_service_module, "datetime", FixedDentalSmokeDatetime)
 
 
 class RecordingConfiguredCalendarService:
@@ -1385,7 +1406,7 @@ async def test_dental_waiting_contact_compact_time_correction_updates_time_not_n
 async def test_dental_waiting_contact_reject_hour_updates_time_not_name(dental_processor):
     processor, calendar = dental_processor
 
-    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    await processor.process(_message("Хочу записатись на консультацію у понеділок о 14"))
     corrected = await processor.process(_message("ні 16"))
     pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
 
@@ -1401,7 +1422,7 @@ async def test_dental_waiting_contact_reject_hour_updates_time_not_name(dental_p
 async def test_dental_waiting_contact_reject_better_hour_updates_time_not_name(dental_processor):
     processor, calendar = dental_processor
 
-    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    await processor.process(_message("Хочу записатись на консультацію у понеділок о 14"))
     corrected = await processor.process(_message("ні, краще о 16"))
     pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
 
@@ -1417,7 +1438,7 @@ async def test_dental_waiting_contact_reject_better_hour_updates_time_not_name(d
 async def test_dental_waiting_contact_time_window_control_never_becomes_name(dental_processor):
     processor, calendar = dental_processor
 
-    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    await processor.process(_message("Хочу записатись на консультацію у понеділок о 14"))
     corrected = await processor.process(_message("краще після 15"))
     pending_after_correction = dict(processor.booking_service._get_pending_confirmation("patient-1"))
 
@@ -1470,7 +1491,7 @@ async def test_dental_waiting_contact_service_correction_updates_service_not_nam
 async def test_dental_waiting_contact_service_control_phrases_never_become_names(text):
     processor, _calendar = _build_dental_processor()
 
-    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    await processor.process(_message("Хочу записатись на консультацію у понеділок о 14"))
     result = await processor.process(_message(text))
     pending_after = dict(processor.booking_service._get_pending_confirmation("patient-1"))
 
@@ -1486,7 +1507,7 @@ async def test_dental_waiting_contact_service_control_phrases_never_become_names
 async def test_dental_waiting_contact_acknowledgements_never_become_names(text):
     processor, _calendar = _build_dental_processor()
 
-    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    await processor.process(_message("Хочу записатись на консультацію у понеділок о 14"))
     result = await processor.process(_message(text))
     pending_after = dict(processor.booking_service._get_pending_confirmation("patient-1"))
 
@@ -1502,7 +1523,7 @@ async def test_dental_waiting_contact_acknowledgements_never_become_names(text):
 async def test_dental_waiting_contact_control_phrases_never_become_names(text):
     processor, _calendar = _build_dental_processor()
 
-    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    await processor.process(_message("Хочу записатись на консультацію у понеділок о 14"))
     result = await processor.process(_message(text))
     pending_after = processor.booking_service._get_pending_confirmation("patient-1")
 
@@ -1548,7 +1569,7 @@ async def test_dental_waiting_contact_normal_names_still_work(dental_processor):
 async def test_dental_waiting_contact_common_single_names_still_work(name):
     processor, _calendar = _build_dental_processor()
 
-    await processor.process(_message("Хочу записатись на консультацію завтра о 14"))
+    await processor.process(_message("Хочу записатись на консультацію у понеділок о 14"))
     result = await processor.process(_message(name))
     pending_after_name = dict(processor.booking_service._get_pending_confirmation("patient-1"))
 
