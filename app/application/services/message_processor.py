@@ -393,6 +393,24 @@ class MessageProcessor:
             return set()
         return {str(rule) for rule in rules}
 
+    def _is_configured_front_desk_mode(self) -> bool:
+        config_service = getattr(self.reply_service, "front_desk_config_service", None)
+        if config_service is None:
+            return False
+        return not self.reply_service._is_legacy_flowly_kb()
+
+    def _build_front_desk_safe_fallback_result(self, message: NormalizedMessage) -> Dict[str, Any]:
+        return self._build_direct_reply_result(
+            message=message,
+            reply_text=self.reply_service.generate_reply(
+                message,
+                intent=IntentType.GENERAL_QUESTION,
+            ),
+            intent_value="front_desk_safe_fallback",
+            routing_category="safe_handoff",
+            intent_for_policy=IntentType.GENERAL_QUESTION,
+        )
+
     def _detect_configured_handoff(self, text: str) -> tuple[str, str] | None:
         rules = self._configured_handoff_rules()
         if not rules:
@@ -2101,6 +2119,18 @@ class MessageProcessor:
                 )
 
             if (
+                self._is_configured_front_desk_mode()
+                and (
+                    self._looks_like_product_question_during_booking(message.user_message)
+                    or self._looks_like_capability_question(message.user_message)
+                    or self._looks_like_bot_identity_question(message.user_message)
+                    or self._looks_like_price_objection(message.user_message)
+                    or self._get_niche_fit_reply(message.user_message) is not None
+                )
+            ):
+                return self._build_front_desk_safe_fallback_result(message)
+
+            if (
                 booking_state == BookingState.WAITING_FOR_TIME
                 and self._looks_like_product_question_during_booking(message.user_message)
             ):
@@ -2284,6 +2314,63 @@ class MessageProcessor:
                     routing_category="answered_basic",
                     intent_for_policy=IntentType.GENERAL_QUESTION,
                 )
+
+        if self._is_configured_front_desk_mode():
+            if self._looks_like_availability_question(message.user_message):
+                booking_result = self.booking_service.handle_availability_question(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_availability_question",
+                    booking_result=booking_result,
+                )
+
+            if self._looks_like_call_explanation_question(message.user_message):
+                language = self.reply_service.detect_user_language(message.user_message)
+                reply_text = self.booking_service.get_call_explanation_reply(language)
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=reply_text,
+                    intent_value="booking_call_explanation",
+                )
+
+            if (
+                self._looks_like_greeting_text(message.user_message)
+                and not self._looks_like_booking_message(message.user_message)
+            ):
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=self.reply_service.generate_reply(
+                        message,
+                        intent=IntentType.GENERAL_QUESTION,
+                    ),
+                    intent_value="general_question",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
+            if (
+                self._looks_like_fresh_booking_request(message.user_message)
+                or self._looks_like_booking_message(message.user_message)
+                or self._looks_like_datetime_only_message(message.user_message)
+            ):
+                booking_result = self.booking_service.start_booking_flow(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_request",
+                    booking_result=booking_result,
+                )
+
+            return self._build_front_desk_safe_fallback_result(message)
 
         if self._looks_like_bot_identity_question(message.user_message):
             return self._build_direct_reply_result(

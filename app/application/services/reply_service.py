@@ -231,6 +231,9 @@ class ReplyService:
         if service is not None and context.get("question_context") == "services":
             return self._reply_with_service_summary(message.sender_id, service)
 
+        if service is not None:
+            return self._reply_with_service_summary(message.sender_id, service)
+
         fact_reply = self._get_business_fact_reply(normalized, language)
         if fact_reply:
             self._remember_front_desk_context(
@@ -1527,6 +1530,35 @@ class ReplyService:
             )
             if pricing_followup_reply:
                 return pricing_followup_reply
+
+            if resolved_intent == IntentType.PRICE:
+                return self._get_pricing_reply(language)
+
+            if self._is_greeting(normalized):
+                return self._get_greeting_reply(language)
+
+            if resolved_intent == IntentType.REJECTION:
+                return self._get_rejection_reply(language)
+
+            if resolved_intent == IntentType.FRUSTRATED:
+                return self._get_frustrated_reply(language)
+
+            if resolved_intent == IntentType.AGGRESSIVE_OBJECTION:
+                return self._get_unknown_fallback_reply(language)
+
+            if self._is_service_query(normalized) or self._is_mid_level_query(normalized):
+                history = self.memory_service.get_history(message.sender_id)
+                return self._generate_service_ai_reply(
+                    user_message=text,
+                    history=history,
+                    language=language,
+                )
+
+            ai_reply = self._get_ai_fallback_reply(text, language)
+            if ai_reply:
+                return ai_reply
+
+            return self._get_unknown_fallback_reply(language)
 
         if resolved_intent == IntentType.PRICE:
             return self._get_pricing_reply(language)

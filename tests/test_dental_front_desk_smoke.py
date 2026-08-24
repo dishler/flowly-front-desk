@@ -364,6 +364,116 @@ async def test_dental_business_question_can_still_use_knowledge_base(dental_proc
 
 
 @pytest.mark.asyncio
+async def test_dental_price_objection_without_context_cannot_leak_flowly_sales(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("це дорого"))
+
+    assert result["intent"] == "front_desk_safe_fallback"
+    assert result["routing_category"] == "safe_handoff"
+    assert "старт від 200" not in result["reply_text"]
+    assert "мінімального сценарію" not in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_pediatric_question_cannot_leak_flowly_niche_copy(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("є дитячий стоматолог"))
+
+    assert result["intent"] in {"front_desk_contextual_answer", "front_desk_safe_fallback"}
+    assert "для стоматологій" not in result["reply_text"].lower()
+    assert "сценар" not in result["reply_text"].lower()
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_unknown_business_question_cannot_reach_flowly_sales_fallback(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("що ви взагалі робите"))
+
+    assert result["intent"] == "front_desk_safe_fallback"
+    assert result["routing_category"] == "safe_handoff"
+    assert "що робить бот" not in result["reply_text"].lower()
+    assert "для яких бізнесів" not in result["reply_text"].lower()
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_price_objection_after_price_context_stays_dental(dental_processor):
+    processor, _calendar = dental_processor
+
+    price = await processor.process(_message("Скільки коштує відбілювання?"))
+    objection = await processor.process(_message("це дорого"))
+
+    assert "6500" in price["reply_text"]
+    assert objection["intent"] == "front_desk_safe_fallback"
+    assert "старт від 200" not in objection["reply_text"]
+    assert "мінімального сценарію" not in objection["reply_text"]
+    _assert_no_flowly_leakage(price["reply_text"], objection["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_booking_intent_still_enters_booking(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("хочу записатись"))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["booking_state"] == "WAITING_FOR_TIME"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_faq_interruption_preserves_booking_context(dental_processor):
+    processor, _calendar = dental_processor
+
+    await processor.process(_message("хочу записатись"))
+    faq = await processor.process(_message("скільки коштує відбілювання?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert faq["intent"] == "booking_grounded_question"
+    assert "6500" in faq["reply_text"]
+    assert pending["state"] == "WAITING_FOR_TIME"
+    _assert_no_flowly_leakage(faq["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "дорого",
+        "чому так дорого",
+        "а дешевше є",
+        "як це працює",
+        "це бот?",
+        "ви бот?",
+        "це штучний інтелект?",
+        "які у вас можливості",
+        "кому це підходить",
+        "для стоматологій працює?",
+        "лікуєте дітей?",
+        "дитині 8 років можна?",
+        "можна дитину записати?",
+        "у вас є ортодонт?",
+        "ставите брекети?",
+    ],
+)
+async def test_dental_adversarial_sales_triggers_do_not_leak_flowly_copy(text):
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    _assert_no_flowly_leakage(result["reply_text"])
+    assert "старт від 200" not in result["reply_text"]
+    assert "для стоматологій це" not in result["reply_text"].lower()
+    assert "бот може забрати першу лінію" not in result["reply_text"].lower()
+
+
+@pytest.mark.asyncio
 async def test_dental_booking_unrelated_question_has_no_flowly_leakage(dental_processor):
     processor, _calendar = dental_processor
 
