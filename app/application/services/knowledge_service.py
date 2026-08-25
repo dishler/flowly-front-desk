@@ -39,6 +39,47 @@ class KnowledgeService:
         return None
 
     def find_service(self, text: str) -> Optional[dict[str, Any]]:
+        return self._find_service(text, include_description=True)
+
+    def find_confident_service(self, text: str) -> Optional[dict[str, Any]]:
+        normalized = self._normalize_question_for_match(text)
+        query_tokens = self._service_query_tokens(normalized)
+        if not query_tokens:
+            return None
+
+        best_service = None
+        best_score = 0
+        for service in self.get_services():
+            score = 0
+            aliases = service.get("aliases")
+            if not isinstance(aliases, list):
+                continue
+
+            for alias in aliases:
+                alias_text = str(alias or "").strip()
+                if not alias_text:
+                    continue
+                alias_normalized = self._normalize_question_for_match(alias_text)
+                alias_tokens = self._service_query_tokens(alias_normalized)
+                if not alias_tokens:
+                    continue
+
+                if len(alias_tokens) > 1:
+                    if alias_normalized in normalized:
+                        score += len(alias_tokens)
+                    continue
+
+                alias_token = next(iter(alias_tokens))
+                if self._token_matches_any(alias_token, query_tokens):
+                    score += 1
+
+            if score > best_score:
+                best_score = score
+                best_service = service
+
+        return best_service if best_score > 0 else None
+
+    def _find_service(self, text: str, *, include_description: bool) -> Optional[dict[str, Any]]:
         query_tokens = self._service_query_tokens(text)
         if not query_tokens:
             return None
@@ -46,7 +87,10 @@ class KnowledgeService:
         best_service = None
         best_score = 0
         for service in self.get_services():
-            service_tokens = self._service_tokens(service)
+            service_tokens = self._service_tokens(
+                service,
+                include_description=include_description,
+            )
             if not service_tokens:
                 continue
             score = sum(1 for token in query_tokens if self._token_matches_any(token, service_tokens))
@@ -137,12 +181,13 @@ class KnowledgeService:
             if len(token) > 2 and token not in stopwords
         }
 
-    def _service_tokens(self, service: dict[str, Any]) -> set[str]:
+    def _service_tokens(self, service: dict[str, Any], *, include_description: bool = True) -> set[str]:
         parts = [
             str(service.get("id") or ""),
-            str(service.get("name") or ""),
-            str(service.get("description") or ""),
         ]
+        if include_description:
+            parts.append(str(service.get("name") or ""))
+            parts.append(str(service.get("description") or ""))
         aliases = service.get("aliases")
         if isinstance(aliases, list):
             parts.extend(str(alias) for alias in aliases if alias)

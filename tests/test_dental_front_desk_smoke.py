@@ -629,6 +629,105 @@ async def test_dental_service_availability_faq_does_not_enter_booking(dental_pro
 @pytest.mark.parametrize(
     "text",
     [
+        "хочу полікувати зуби",
+        "треба лікування",
+        "болить зуб",
+        "хочу до стоматолога",
+        "треба глянути зуб",
+    ],
+)
+async def test_dental_ambiguous_requests_do_not_confidently_select_cleaning(text):
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Професійна гігієна" not in result["reply_text"]
+    assert "1800 грн" not in result["reply_text"]
+    assert pending.get("current_service_id") != "dental_cleaning"
+    assert context.get("current_service_id") != "dental_cleaning"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_ambiguous_treatment_with_friday_preserves_date_without_cleaning():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу полікувати зуби в п'ятницю"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["requested_date"] == "2026-08-28"
+    assert pending["requested_day_label"] == "п’ятницю"
+    assert pending.get("current_service_id") is None
+    assert "Професійна гігієна" not in result["reply_text"]
+    assert "1800 грн" not in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_pain_symptom_does_not_become_service_summary_but_diagnosis_safety_still_works():
+    processor, _calendar = _build_dental_processor()
+
+    pain = await processor.process(_message("болить зуб"))
+    diagnosis = await processor.process(_message("болить зуб шо робити", sender_id="patient-2"))
+    emergency = await processor.process(_message("кров тече", sender_id="patient-3"))
+
+    assert pain["intent"] == "front_desk_safe_fallback"
+    assert "Лікування карієсу" not in pain["reply_text"]
+    assert "Професійна гігієна" not in pain["reply_text"]
+    assert diagnosis["intent"] == "diagnosis_request"
+    assert "діагноз" in diagnosis["reply_text"].lower()
+    assert emergency["intent"] == "medical_emergency"
+    assert "невідкладна" in emergency["reply_text"].lower()
+    _assert_no_flowly_leakage(pain["reply_text"], diagnosis["reply_text"], emergency["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_cleaning_natural_alias_still_enters_booking():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу почистити зуби"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "dental_cleaning"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_filling_alias_maps_to_caries_treatment_when_grounded():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу поставити пломбу"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "caries_treatment"
+    assert pending["current_service_id"] != "dental_cleaning"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_pediatric_question_remains_grounded_after_confidence_tightening(dental_processor):
+    processor, _calendar = dental_processor
+
+    result = await processor.process(_message("є дитячий стоматолог"))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert "Дитяча стоматологія" in result["reply_text"]
+    assert "700 грн" in result["reply_text"]
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
         "чистка у вівторок дорожча?",
         "у вівторок чистка скільки коштує?",
         "чистку робите у суботу?",

@@ -209,7 +209,11 @@ class ReplyService:
         language = self._detect_language(text)
         normalized = self._normalize(text)
         context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
-        service = self.knowledge_service.find_service(normalized) if self.knowledge_service else None
+        service = (
+            self.knowledge_service.find_confident_service(normalized)
+            if self.knowledge_service
+            else None
+        )
         price_requested = (
             self._looks_like_price_query(normalized)
             or intent == IntentType.PRICE

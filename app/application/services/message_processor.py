@@ -85,55 +85,7 @@ class MessageProcessor:
         if knowledge_service is None:
             return None
 
-        normalized = self._normalize_for_conversation_matching(text)
-        query_tokens = {
-            token
-            for token in re.sub(r"[^\w\sа-яіїєґё]", " ", normalized, flags=re.IGNORECASE).split()
-            if len(token) > 2
-        }
-        if not query_tokens:
-            return None
-
-        best_service = None
-        best_score = 0
-        for service in knowledge_service.get_services():
-            service_parts = [
-                str(service.get("id") or "").replace("_", " "),
-                str(service.get("name") or ""),
-            ]
-            aliases = service.get("aliases")
-            if isinstance(aliases, list):
-                service_parts.extend(str(alias) for alias in aliases if alias)
-
-            service_tokens = {
-                token
-                for token in re.sub(
-                    r"[^\w\sа-яіїєґё]",
-                    " ",
-                    self._normalize_for_conversation_matching(" ".join(service_parts)),
-                    flags=re.IGNORECASE,
-                ).split()
-                if len(token) > 2
-            }
-            score = 0
-            for token in query_tokens:
-                for candidate in service_tokens:
-                    if token == candidate or (
-                        len(token) >= 4
-                        and len(candidate) >= 4
-                        and (
-                            token.startswith(candidate[:4])
-                            or candidate.startswith(token[:4])
-                        )
-                    ):
-                        score += 1
-                        break
-
-            if score > best_score:
-                best_score = score
-                best_service = service
-
-        return best_service if best_score > 0 else None
+        return knowledge_service.find_confident_service(text)
 
     def _looks_like_service_faq_request(self, normalized: str) -> bool:
         faq_markers = [
