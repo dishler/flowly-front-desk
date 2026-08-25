@@ -477,6 +477,56 @@ class MessageProcessor:
         ]
         return any(marker in normalized for marker in markers)
 
+    def _looks_like_active_booking_availability_question(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        business_hours_markers = [
+            "графік",
+            "години роботи",
+            "робочі години",
+            "режим роботи",
+            "до котрої",
+            "працюєте",
+            "працює",
+            "працювати",
+            "відкриті",
+            "зачинені",
+            "закриті",
+            "working hours",
+            "business hours",
+        ]
+        if any(marker in normalized for marker in business_hours_markers):
+            return False
+
+        appointment_markers = [
+            "вільні слоти",
+            "вільний слот",
+            "вільний час",
+            "вільні години",
+            "вільні годинки",
+            "години вільні",
+            "доступні слоти",
+            "які слоти",
+            "які є варіанти",
+            "варіанти по часу",
+            "коли є",
+            "коли можна",
+            "коли вільно",
+            "коли вільні",
+            "що є віль",
+            "вільно",
+            "free slots",
+            "free time",
+            "available slots",
+        ]
+        if any(marker in normalized for marker in appointment_markers):
+            return True
+
+        has_date = self.booking_service._extract_requested_date(text) is not None
+        if has_date and "що є" in normalized:
+            return True
+
+        return "підлаштуюсь" in normalized and "що є" in normalized
+
     def _looks_like_time_window_constraint(self, text: str) -> bool:
         normalized = " ".join(text.strip().lower().replace("–", "-").replace("—", "-").split())
         time_pattern = r"\d{1,2}(?::\d{2})?"
@@ -2280,6 +2330,26 @@ class MessageProcessor:
                         message=message,
                         reply_text=booking_result["reply_text"],
                         intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and self._is_configured_front_desk_mode()
+                and self._looks_like_active_booking_availability_question(message.user_message)
+            ):
+                booking_result = self.booking_service.handle_active_booking_availability_question(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_availability_question",
                         booking_result=booking_result,
                         fallback_service_id=active_service_id,
                         fallback_service_name=active_service_name,

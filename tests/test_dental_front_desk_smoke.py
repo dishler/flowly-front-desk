@@ -1223,6 +1223,141 @@ async def test_dental_active_booking_time_window_refinement_beats_stale_pricing_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "на котрі години є вільні слоти?",
+        "які години вільні?",
+        "коли є вільно?",
+        "що є вільне?",
+        "я підлаштуюсь, що є?",
+        "коли можна у четвер?",
+        "що є на четвер?",
+        "які є вільні години у четвер?",
+    ],
+)
+async def test_dental_active_booking_availability_questions_use_known_date(text):
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 10),
+        _kyiv_dt(2026, 8, 27, 11),
+        _kyiv_dt(2026, 8, 27, 15),
+        _kyiv_dt(2026, 8, 28, 9),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    start = await processor.process(_message("Хочу на чистку у четвер"))
+    initial_checks = len(calendar.checked)
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert start["booking_result"]["status"] == "waiting_for_time"
+    assert start["booking_result"]["requested_date"] == "2026-08-27"
+    assert result["intent"] == "booking_availability_question"
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert result["booking_result"]["requested_date"] == "2026-08-27"
+    assert result["booking_result"]["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-27T10:00:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-27T11:00:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-27T15:00:00+03:00"},
+    ]
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["requested_date"] == "2026-08-27"
+    assert "Графік роботи" not in result["reply_text"]
+    assert len(calendar.checked) > initial_checks
+    assert {
+        item["start_dt"].date().isoformat()
+        for item in calendar.checked[initial_checks:]
+    } == {"2026-08-27"}
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_availability_question_can_override_known_date():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 10),
+        _kyiv_dt(2026, 8, 28, 9),
+        _kyiv_dt(2026, 8, 28, 10),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу на чистку у четвер"))
+    initial_checks = len(calendar.checked)
+    result = await processor.process(_message("а що є у п'ятницю?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_availability_question"
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert result["booking_result"]["requested_date"] == "2026-08-28"
+    assert result["booking_result"]["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-28T09:00:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-28T10:00:00+03:00"},
+    ]
+    assert pending["requested_date"] == "2026-08-28"
+    assert {
+        item["start_dt"].date().isoformat()
+        for item in calendar.checked[initial_checks:]
+    } == {"2026-08-28"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text, expected_fragment",
+    [
+        ("який у вас графік роботи?", "Графік роботи"),
+        ("до котрої ви працюєте?", "Графік роботи"),
+        ("в неділю ви працюєте?", "Графік роботи"),
+        ("скільки коштує відбілювання?", "6500 грн"),
+        ("скільки коштує чистка?", "1800 грн"),
+    ],
+)
+async def test_dental_active_booking_availability_priority_keeps_faq_boundaries(text, expected_fragment):
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 10),
+        _kyiv_dt(2026, 8, 27, 11),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу на чистку у четвер"))
+    initial_checks = len(calendar.checked)
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_grounded_question"
+    assert result["booking_result"] is None
+    assert expected_fragment in result["reply_text"]
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["requested_date"] == "2026-08-27"
+    assert len(calendar.checked) == initial_checks
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_daypart_and_time_window_still_use_existing_verified_logic():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 10),
+        _kyiv_dt(2026, 8, 27, 11),
+        _kyiv_dt(2026, 8, 27, 16, 30),
+        _kyiv_dt(2026, 8, 27, 17),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу на чистку у четвер"))
+    morning = await processor.process(_message("чи є щось зранку?"))
+    later = await processor.process(_message("а після 16?"))
+
+    assert morning["booking_result"]["status"] == "daypart_slots_suggested"
+    assert morning["booking_result"]["requested_date"] == "2026-08-27"
+    assert morning["booking_result"]["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-27T10:00:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-27T11:00:00+03:00"},
+    ]
+    assert later["booking_result"]["status"] == "time_window_slots_suggested"
+    assert later["booking_result"]["requested_date"] == "2026-08-27"
+    assert later["booking_result"]["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-27T16:30:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-27T17:00:00+03:00"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_dental_active_booking_time_window_keeps_legitimate_price_faq():
     calendar = SelectiveConfiguredCalendarService([
         _kyiv_dt(2026, 8, 27, 10),

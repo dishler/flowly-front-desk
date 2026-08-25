@@ -1317,6 +1317,56 @@ class BookingService:
             "suggested_slots": pending["suggested_slots"],
         }
 
+    def handle_active_booking_availability_question(
+        self,
+        sender_id: str,
+        message_text: str,
+        source_channel: str | None = None,
+    ) -> Dict[str, Any] | None:
+        pending = self._get_pending_confirmation(sender_id)
+        if not pending:
+            return None
+
+        language = pending.get("language") or self._detect_language(message_text)
+        partial_date = self._extract_requested_date(message_text)
+        requested_day_label = None
+
+        if partial_date is not None:
+            requested_date = partial_date["date"]
+            requested_day_label = partial_date.get("day_label")
+        elif pending.get("requested_date"):
+            try:
+                requested_date = self._deserialize_pending_requested_date(
+                    pending.get("requested_date")
+                )
+            except Exception:
+                logger.warning(
+                    "invalid pending requested_date ignored during availability question sender_id=%s raw_requested_date=%r",
+                    sender_id,
+                    pending.get("requested_date"),
+                )
+                return None
+            requested_day_label = pending.get("requested_day_label")
+        else:
+            return None
+
+        if requested_date is None:
+            return None
+
+        return self._suggest_time_window_slots(
+            sender_id,
+            language=language,
+            message_text=message_text,
+            source_channel=source_channel or pending.get("source_channel"),
+            requested_date=requested_date,
+            requested_day_label=requested_day_label,
+            time_window={
+                "label": "вільний час",
+                "start": None,
+                "end": None,
+            },
+        )
+
     def cancel_confirmed_booking(self, sender_id: str, message_text: str) -> Dict[str, Any]:
         language = self._detect_language(message_text)
         completed_booking = self._get_completed_booking(sender_id) or {}
