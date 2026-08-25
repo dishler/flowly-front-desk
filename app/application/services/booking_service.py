@@ -1863,27 +1863,48 @@ class BookingService:
     def _weekday_map(self) -> dict[str, int]:
         return {
             "monday": 0,
+            "пн": 0,
             "понеділок": 0,
             "понеділка": 0,
+            "вт": 1,
             "вівторок": 1,
             "вівторка": 1,
             "tuesday": 1,
+            "ср": 2,
             "середа": 2,
             "середу": 2,
             "wednesday": 2,
+            "чт": 3,
             "четвер": 3,
             "четверг": 3,
             "thursday": 3,
+            "пт": 4,
             "п'ятниц": 4,
+            "п'ятниця": 4,
+            "п'ятницю": 4,
             "п’ятниц": 4,
+            "п’ятниця": 4,
+            "п’ятницю": 4,
+            "пятниця": 4,
+            "пятницю": 4,
             "friday": 4,
+            "сб": 5,
             "субота": 5,
             "суботу": 5,
             "saturday": 5,
+            "нд": 6,
             "неділя": 6,
             "неділю": 6,
             "sunday": 6,
         }
+
+    def _find_weekday_marker(self, text: str) -> tuple[str, int] | None:
+        token_boundary = r"0-9A-Za-zА-Яа-яІіЇїЄєҐґЁё"
+        for marker, weekday in sorted(self._weekday_map().items(), key=lambda item: len(item[0]), reverse=True):
+            pattern = rf"(?<![{token_boundary}]){re.escape(marker)}(?![{token_boundary}])"
+            if re.search(pattern, text):
+                return marker, weekday
+        return None
 
     def _format_day_label_for_reply(self, value: str | None) -> str | None:
         if not value:
@@ -1892,6 +1913,13 @@ class BookingService:
             "today": "сьогодні",
             "tomorrow": "завтра",
             "day after tomorrow": "післязавтра",
+            "пн": "понеділок",
+            "вт": "вівторок",
+            "ср": "середу",
+            "чт": "четвер",
+            "пт": "п’ятницю",
+            "сб": "суботу",
+            "нд": "неділю",
             "monday": "понеділок",
             "tuesday": "вівторок",
             "wednesday": "середу",
@@ -1904,7 +1932,13 @@ class BookingService:
             "середа": "середу",
             "четверг": "четвер",
             "п'ятниц": "п’ятницю",
+            "п'ятниця": "п’ятницю",
+            "п'ятницю": "п’ятницю",
             "п’ятниц": "п’ятницю",
+            "п’ятниця": "п’ятницю",
+            "п’ятницю": "п’ятницю",
+            "пятниця": "п’ятницю",
+            "пятницю": "п’ятницю",
             "субота": "суботу",
             "неділя": "неділю",
         }
@@ -1953,16 +1987,17 @@ class BookingService:
         if "сьогодні" in normalized or "today" in normalized:
             return {"date": now.date(), "day_label": "сьогодні"}
 
-        for marker, weekday in self._weekday_map().items():
-            if marker in normalized:
-                days_ahead = (weekday - now.weekday()) % 7
-                if days_ahead == 0:
-                    days_ahead = 7
-                target = now.date() + timedelta(days=days_ahead)
-                return {
-                    "date": target,
-                    "day_label": self._format_day_label_for_reply(marker),
-                }
+        weekday_match = self._find_weekday_marker(normalized)
+        if weekday_match is not None:
+            marker, weekday = weekday_match
+            days_ahead = (weekday - now.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            target = now.date() + timedelta(days=days_ahead)
+            return {
+                "date": target,
+                "day_label": self._format_day_label_for_reply(marker),
+            }
 
         return None
 
@@ -2241,11 +2276,8 @@ class BookingService:
                 return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         hour_match = re.search(r"\b(\d{1,2})\b", normalized)
-        matched_weekday = None
-        for marker, weekday in self._weekday_map().items():
-            if marker in normalized:
-                matched_weekday = weekday
-                break
+        weekday_match = self._find_weekday_marker(normalized)
+        matched_weekday = weekday_match[1] if weekday_match is not None else None
 
         if hour_match and matched_weekday is not None:
             hour = int(hour_match.group(1))

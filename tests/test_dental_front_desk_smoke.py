@@ -542,6 +542,159 @@ async def test_dental_service_booking_time_window_uses_verified_slots():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text, expected_date, expected_label",
+    [
+        ("на пн", "2026-08-24", "понеділок"),
+        ("на вт", "2026-08-25", "вівторок"),
+        ("на ср", "2026-08-26", "середу"),
+        ("на чт", "2026-08-27", "четвер"),
+        ("на пт", "2026-08-28", "п’ятницю"),
+        ("на сб", "2026-08-29", "суботу"),
+        ("на нд", "2026-08-23", "неділю"),
+        ("понеділок", "2026-08-24", "понеділок"),
+        ("вівторок", "2026-08-25", "вівторок"),
+        ("середа", "2026-08-26", "середу"),
+        ("четвер", "2026-08-27", "четвер"),
+        ("п'ятниця", "2026-08-28", "п’ятницю"),
+        ("пятниця", "2026-08-28", "п’ятницю"),
+        ("п’ятниця", "2026-08-28", "п’ятницю"),
+        ("субота", "2026-08-29", "суботу"),
+        ("неділя", "2026-08-23", "неділю"),
+        ("неділя?", "2026-08-23", "неділю"),
+        ("пт.", "2026-08-28", "п’ятницю"),
+        ("пт?", "2026-08-28", "п’ятницю"),
+        ("пт, після 15", "2026-08-28", "п’ятницю"),
+    ],
+)
+async def test_dental_booking_weekday_parser_accepts_bounded_ukrainian_forms(
+    dental_processor,
+    text,
+    expected_date,
+    expected_label,
+):
+    processor, _calendar = dental_processor
+
+    parsed = processor.booking_service._extract_requested_date(text)
+
+    assert parsed["date"].isoformat() == expected_date
+    assert parsed["day_label"] == expected_label
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["аптека", "пташка", "срібло", "втрачено", "сбоку"])
+async def test_dental_booking_weekday_parser_rejects_substring_false_positives(
+    dental_processor,
+    text,
+):
+    processor, _calendar = dental_processor
+
+    assert processor.booking_service._extract_requested_date(text) is None
+    assert processor.booking_service._parse_requested_datetime(f"{text} о 14") is None
+
+
+@pytest.mark.asyncio
+async def test_dental_booking_request_accepts_friday_abbreviation_date():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу записатись на пт"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["requested_date"] == "2026-08-28"
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["requested_date"] == "2026-08-28"
+    assert pending["requested_day_label"] == "п’ятницю"
+
+
+@pytest.mark.asyncio
+async def test_dental_service_booking_preserves_service_with_friday_abbreviation():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу на чистку в пт"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["requested_date"] == "2026-08-28"
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending["requested_date"] == "2026-08-28"
+
+
+@pytest.mark.asyncio
+async def test_dental_service_time_window_uses_friday_abbreviation():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 28, 15),
+        _kyiv_dt(2026, 8, 28, 15, 30),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("чистка пт після 15"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert result["booking_result"]["requested_date"] == "2026-08-28"
+    assert result["booking_result"]["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-28T15:00:00+03:00"},
+        {"day_key": "selected_day", "start_dt": "2026-08-28T15:30:00+03:00"},
+    ]
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending["requested_date"] == "2026-08-28"
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_for_time_accepts_apostropheless_friday():
+    processor, _calendar = _build_dental_processor()
+
+    start = await processor.process(_message("хочу на чистку"))
+    result = await processor.process(_message("пятниця"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert start["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["requested_date"] == "2026-08-28"
+    assert pending["requested_date"] == "2026-08-28"
+    assert pending["requested_day_label"] == "п’ятницю"
+
+
+@pytest.mark.asyncio
+async def test_dental_exact_time_uses_friday_abbreviation_calendar_validation():
+    calendar = SelectiveConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 14)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = processor.booking_service.start_booking_flow(
+        "patient-1",
+        "в пт о 14",
+        source_channel="instagram",
+    )
+
+    assert result["status"] == "waiting_for_contact"
+    assert result["start_dt"] == "2026-08-28T14:00:00+03:00"
+    assert calendar.checked == [
+        {"start_dt": _kyiv_dt(2026, 8, 28, 14), "duration_minutes": 30}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dental_exact_time_friday_abbreviation_keeps_calendar_fail_closed():
+    calendar = FailingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = processor.booking_service.start_booking_flow(
+        "patient-1",
+        "в пт о 14",
+        source_channel="instagram",
+    )
+
+    assert result["status"] == "availability_check_failed"
+    assert calendar.checked == [
+        {"start_dt": _kyiv_dt(2026, 8, 28, 14), "duration_minutes": 30}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_dental_service_context_survives_multiturn_booking():
     processor, calendar = _build_dental_processor()
 
