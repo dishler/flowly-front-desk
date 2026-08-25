@@ -1624,7 +1624,26 @@ class BookingService:
     def _extract_selected_slot_time(self, text: str) -> time | None:
         return self._parse_time_only(text)
 
+    def _extract_natural_suggested_slot_time(self, text: str) -> time | None:
+        normalized = " ".join(text.strip().lower().split())
+        for pattern in [
+            r"(?<!\d)(\d{1,2})\s*:\s*(\d{2})(?!\d)",
+            r"(?<!\d)(\d{1,2})\s+(\d{2})(?!\d)",
+        ]:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return time(hour=hour, minute=minute)
+        return None
+
     def _extract_suggested_slot_selection_time(self, text: str) -> time | None:
+        selected = self._extract_natural_suggested_slot_time(text)
+        if selected is not None:
+            return selected
+
         selected = self._extract_selected_slot_time(text)
         if selected is not None:
             return selected
