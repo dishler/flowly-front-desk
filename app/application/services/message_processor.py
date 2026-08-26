@@ -464,14 +464,26 @@ class MessageProcessor:
         markers = [
             "скасуйте",
             "скасувати",
+            "скасуй",
+            "скасування",
             "відмінити",
             "відмініть",
+            "відміни",
+            "відміна",
             "не зможу",
+            "не прийду",
+            "не хочу записуватись",
+            "не хочу записуватися",
             "cancel",
             "cancel the call",
             "cancel my call",
         ]
-        return any(marker in normalized for marker in markers)
+        if any(marker in normalized for marker in markers):
+            return True
+        # Bounded "changed my mind" check: only the whole message, not a
+        # qualifier like "передумав щодо чистки" (service change, not cancel).
+        compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
+        return bool(re.fullmatch(r"(?:я\s+)?передумав[аи]?", compact))
 
     def _looks_like_availability_question(self, text: str) -> bool:
         normalized = text.strip().lower()
@@ -791,6 +803,8 @@ class MessageProcessor:
         )
 
     def _looks_like_product_question_during_booking(self, text: str) -> bool:
+        if self._looks_like_cancel_request(text):
+            return False
         normalized = self._normalize_for_conversation_matching(text)
         product_markers = [
             "що ви пропонуєте",

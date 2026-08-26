@@ -106,6 +106,38 @@ class FailingCalendarService(CalendarService):
         raise RuntimeError("delete failed")
 
 
+class RecordingCancelAndCreateCalendarService(CalendarService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleted_event_ids = []
+        self.created_events = []
+        self._created_count = 0
+
+    def delete_event(self, event_id: str) -> None:
+        self.deleted_event_ids.append(event_id)
+
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        return True
+
+    def create_booking_event(
+        self,
+        start_dt,
+        duration_minutes: int = 30,
+        summary: str = "",
+        description: str = "",
+        attendee_emails=None,
+    ):
+        self._created_count += 1
+        self.created_events.append({"start_dt": start_dt})
+
+        class CreatedEvent:
+            event_id = f"rebook-event-{self._created_count}"
+            html_link = f"https://calendar.example/rebook-event-{self._created_count}"
+            status = "confirmed"
+
+        return CreatedEvent()
+
+
 class DummyConfiguredCalendarClient:
     def is_configured(self) -> bool:
         return True
@@ -505,6 +537,133 @@ async def test_cancel_confirmed_booking_hands_off_when_calendar_delete_fails(pro
     assert result["booking_result"]["status"] == "cancel_handoff"
     assert result["reply_text"] == "Добре, передам команді, щоб дзвінок скасували без зайвих дій з вашого боку."
     assert booking_service.has_confirmed_booking("user-1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "скасуй запис",
+        "скасуйте запис",
+        "скасуйте мій запис",
+        "скасуй мій запис",
+        "відміни запис",
+        "відмініть запис",
+        "відмініть мій запис",
+        "хочу скасувати запис",
+        "хочу відмінити запис",
+        "не прийду",
+        "я не прийду",
+        "я передумав",
+        "передумав",
+        "відміна запису",
+        "скасування запису",
+        "скасуйте, будь ласка, запис",
+        "можете скасувати запис?",
+        "відміна",
+    ],
+)
+async def test_confirmed_booking_clear_cancellation_phrases_delete_event(processor_factory, text):
+    calendar_service = RecordingCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    result = await processor.process(_message(text=text))
+
+    assert result["intent"] == "booking_cancel"
+    assert result["booking_result"]["status"] == "cancelled"
+    assert calendar_service.deleted_event_ids == ["calendar-event-123"]
+    assert not booking_service.has_confirmed_booking("user-1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "не знаю",
+        "не впевнений",
+        "можливо",
+        "подумаю",
+        "передзвоню",
+        "не зараз",
+        "не можу зараз говорити",
+        "я передумав щодо чистки",
+    ],
+)
+async def test_confirmed_booking_ambiguous_text_does_not_cancel(processor_factory, text):
+    calendar_service = RecordingCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    result = await processor.process(_message(text=text))
+
+    assert result["intent"] != "booking_cancel"
+    assert calendar_service.deleted_event_ids == []
+    assert booking_service.has_confirmed_booking("user-1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "перенесіть запис на 16",
+        "можна перенести на п'ятницю",
+        "хочу змінити час",
+    ],
+)
+async def test_confirmed_booking_reschedule_phrases_are_not_cancellation(processor_factory, text):
+    calendar_service = RecordingCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    result = await processor.process(_message(text=text))
+
+    assert result["intent"] == "booking_reschedule"
+    assert calendar_service.deleted_event_ids == []
+    assert booking_service.has_confirmed_booking("user-1")
+
+
+async def test_confirmed_booking_cancellation_retry_does_not_delete_twice(processor_factory):
+    calendar_service = RecordingCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    first = await processor.process(_message(text="скасуй запис"))
+    second = await processor.process(_message(text="скасуй запис"))
+
+    assert first["booking_result"]["status"] == "cancelled"
+    assert second["booking_result"] is None
+    assert calendar_service.deleted_event_ids == ["calendar-event-123"]
+
+
+async def test_confirmed_booking_cancellation_does_not_affect_other_sender(processor_factory):
+    calendar_service = RecordingCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    other_message = NormalizedMessage(
+        platform="instagram",
+        sender_id="user-2",
+        recipient_id="bot-1",
+        message_mid="",
+        user_message="скасуй запис",
+    )
+    result = await processor.process(other_message)
+
+    assert result["booking_result"] is None
+    assert calendar_service.deleted_event_ids == []
+    assert booking_service.has_confirmed_booking("user-1")
+
+
+async def test_confirmed_booking_cancellation_then_new_booking_proceeds_normally(processor_factory):
+    calendar_service = RecordingCancelAndCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    cancel_result = await processor.process(_message(text="скасуй запис"))
+    rebook_result = await processor.process(_message(text="хочу записатись у пятницю о 16"))
+
+    assert cancel_result["booking_result"]["status"] == "cancelled"
+    assert not booking_service.has_confirmed_booking("user-1")
+    assert rebook_result["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar_service.deleted_event_ids == ["calendar-event-123"]
 
 
 async def test_availability_suggests_slots_and_day_followup(processor_factory):

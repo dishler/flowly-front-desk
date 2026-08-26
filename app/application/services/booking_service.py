@@ -368,6 +368,7 @@ class BookingService:
         rejection_markers = [
             "скасуйте",
             "скасувати",
+            "скасуй",
             "відмінити",
             "відмініть",
             "cancel",
@@ -378,8 +379,15 @@ class BookingService:
             "ще не знаю",
             "напишу пізніше",
             "пізніше напишу",
+            "не хочу записуватись",
+            "не хочу записуватися",
         ]
-        return normalized in rejections or any(marker in normalized for marker in rejection_markers)
+        if normalized in rejections or any(marker in normalized for marker in rejection_markers):
+            return True
+        # Bounded "changed my mind" check: only the whole message, not a
+        # qualifier like "передумав щодо чистки" (service change, not cancel).
+        compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
+        return bool(re.fullmatch(r"(?:я\s+)?передумав[аи]?", compact))
 
     def _build_unclear_time_reply(self, language: str) -> str:
         if self.front_desk_config_service is None:

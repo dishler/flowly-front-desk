@@ -3092,6 +3092,86 @@ async def test_dental_active_booking_cancel_stays_unchanged(dental_processor):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ["скасуй", "скасуй запис", "не треба", "не хочу записуватись", "я передумав"],
+)
+async def test_dental_waiting_for_contact_clear_cancellation_clears_pending(text):
+    calendar = SelectiveConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 14)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер о 14"))
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "cancelled"
+    assert pending is None
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ["скасуй", "скасуй запис", "не треба", "не хочу записуватись", "я передумав"],
+)
+async def test_dental_waiting_for_time_clear_cancellation_clears_pending(text):
+    calendar = SelectiveConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 14)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу записатись на чистку"))
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "cancelled"
+    assert pending is None
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ні 16",
+        "ні, краще о 16",
+        "краще 16",
+        "тоді 16",
+        "а 16?",
+        "ні чистку, краще консультацію",
+    ],
+)
+async def test_dental_waiting_for_contact_corrections_are_not_cancellation(text):
+    calendar = SelectiveConfiguredCalendarService(
+        [_kyiv_dt(2026, 8, 27, 14), _kyiv_dt(2026, 8, 27, 16)]
+    )
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер о 14"))
+    await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert pending is not None
+    assert pending["state"] in {"WAITING_FOR_TIME", "WAITING_FOR_CONTACT"}
+
+
+@pytest.mark.asyncio
+async def test_dental_faq_interruption_at_waiting_for_contact_then_correction():
+    calendar = SelectiveConfiguredCalendarService(
+        [_kyiv_dt(2026, 8, 27, 14), _kyiv_dt(2026, 8, 27, 16)]
+    )
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер о 14"))
+    faq = await processor.process(_message("скільки коштує відбілювання?"))
+    corrected = await processor.process(_message("тоді 16"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert faq["intent"] == "booking_grounded_question"
+    assert corrected["booking_result"]["status"] == "waiting_for_contact"
+    assert corrected["booking_result"]["start_dt"] == "2026-08-27T16:00:00+03:00"
+    assert pending["current_service_id"] == "dental_cleaning"
+
+
+@pytest.mark.asyncio
 async def test_dental_fresh_sender_exact_booking_phrase_unchanged(dental_processor):
     processor, calendar = dental_processor
 
