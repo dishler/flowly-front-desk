@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -117,6 +118,24 @@ class UnconfiguredCalendarService(RecordingCalendarService):
             return False
 
     google_calendar_client = UnconfiguredClient()
+
+
+class BusyAtSixteenCalendarService(RecordingCalendarService):
+    class ConfiguredClient:
+        def is_configured(self) -> bool:
+            return True
+
+    google_calendar_client = ConfiguredClient()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.availability_checks = []
+
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {"start_dt": start_dt, "duration_minutes": duration_minutes}
+        )
+        return start_dt.hour != 16
 
 
 class ConfiguredCreateCalendarService(RecordingCalendarService):
@@ -391,6 +410,54 @@ def test_redis_pending_booking_context_survives_invalid_exact_time(fake_redis):
     assert booking_service._get_completed_booking("user-1") is None
     assert calendar_service.availability_checks == []
     assert calendar_service.created_events == []
+
+
+def test_redis_busy_time_correction_preserves_service_context_and_stays_suggestion(fake_redis):
+    calendar_service = BusyAtSixteenCalendarService()
+    booking_service = BookingService(
+        calendar_service=calendar_service,
+        language_service=LanguageService(),
+        booking_state_service=_state_service(fake_redis),
+    )
+    kyiv = ZoneInfo("Europe/Kyiv")
+    booking_service._save_booking_state(
+        "user-1",
+        state=BookingState.WAITING_FOR_CONTACT,
+        language="uk",
+        source_channel="instagram",
+        context_summary="хочу на чистку у четвер о 14",
+        start_dt=datetime(2026, 8, 27, 14, 0, tzinfo=kyiv),
+        requested_date=date(2026, 8, 27),
+    )
+    pending = booking_service._get_pending_confirmation("user-1")
+    pending["current_service_id"] = "dental_cleaning"
+    pending["current_service_name"] = "Професійна гігієна зубів"
+    booking_service._save_pending_confirmation("user-1", pending)
+
+    result = booking_service.process_booking_message(
+        sender_id="user-1",
+        message_text="тоді 16",
+        source_channel="instagram",
+    )
+    reloaded = _booking_service(fake_redis)._get_pending_confirmation("user-1")
+
+    # 16:00 is busy, so 17:00 is only an offered suggestion: state must stay
+    # WAITING_FOR_TIME with no selected start_dt, and this must survive a
+    # fresh BookingService instance reading back from Redis.
+    assert result["status"] == "slot_suggested"
+    assert result["booking_state"] == "WAITING_FOR_TIME"
+    assert reloaded["state"] == "WAITING_FOR_TIME"
+    assert "start_dt" not in reloaded
+    assert reloaded["requested_date"] == "2026-08-27"
+    assert reloaded["current_service_id"] == "dental_cleaning"
+    assert reloaded["current_service_name"] == "Професійна гігієна зубів"
+    assert reloaded["suggested_slots"] == [
+        {"day_key": "selected_day", "start_dt": "2026-08-27T17:00:00+03:00"}
+    ]
+    assert calendar_service.availability_checks == [
+        {"start_dt": datetime(2026, 8, 27, 16, 0, tzinfo=kyiv), "duration_minutes": 30},
+        {"start_dt": datetime(2026, 8, 27, 17, 0, tzinfo=kyiv), "duration_minutes": 30},
+    ]
 
 
 async def test_status_flow_recognizes_confirmed_booking_after_restart(fake_redis):

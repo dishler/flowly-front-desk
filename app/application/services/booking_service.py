@@ -1822,7 +1822,12 @@ class BookingService:
         )
 
     def _build_day_slots_reply(self, language: str, day_key: str, slots: list[datetime]) -> str:
-        day_label_uk = "завтра" if day_key == "tomorrow" else "післязавтра"
+        if slots:
+            day_label_uk = self._format_date_label_for_reply(slots[0].date(), "uk") or (
+                "завтра" if day_key == "tomorrow" else "післязавтра"
+            )
+        else:
+            day_label_uk = "завтра" if day_key == "tomorrow" else "післязавтра"
         times = self._format_slot_times(self._display_slots(slots), language)
         if times:
             return f"Добре, {day_label_uk} можемо запропонувати {times}. Який час вам зручніший?"
@@ -1841,6 +1846,8 @@ class BookingService:
                 sender_id=sender_id,
                 message_text=message_text,
                 source_channel=source_channel or pending.get("source_channel"),
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
             )
 
         language = pending.get("language") or self._detect_language(message_text)
@@ -1897,6 +1904,30 @@ class BookingService:
 
         requested_time = self._extract_suggested_slot_selection_time(message_text)
         if requested_time is None:
+            contact_details = self._extract_contact_details(message_text)
+            if self._has_required_contact(
+                customer_name=contact_details["customer_name"] or pending.get("customer_name"),
+                email=contact_details["email"] or pending.get("contact_email"),
+                phone=contact_details["phone"] or pending.get("contact_phone"),
+            ):
+                pending["customer_name"] = contact_details["customer_name"] or pending.get("customer_name")
+                pending["contact_email"] = contact_details["email"] or pending.get("contact_email")
+                pending["contact_phone"] = contact_details["phone"] or pending.get("contact_phone")
+                self._save_pending_confirmation(sender_id, pending)
+                return {
+                    "status": "waiting_for_time",
+                    "reply_text": self._build_day_slots_reply(
+                        language,
+                        preferred_day,
+                        candidate_slots,
+                    ),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": (
+                        candidate_slots[0].date().isoformat() if candidate_slots else None
+                    ),
+                }
             return None
 
         matched_slot = next(
@@ -1932,11 +1963,29 @@ class BookingService:
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
             }
 
+        contact_message_text = message_text
+        if self._has_required_contact(
+            customer_name=pending.get("customer_name"),
+            email=pending.get("contact_email"),
+            phone=pending.get("contact_phone"),
+        ):
+            contact_message_text = " ".join(
+                part
+                for part in [
+                    pending.get("customer_name"),
+                    pending.get("contact_email"),
+                    pending.get("contact_phone"),
+                ]
+                if part
+            )
+
         return self.start_booking_flow(
             sender_id=sender_id,
-            message_text=message_text,
+            message_text=contact_message_text,
             source_channel=source_channel or pending.get("source_channel"),
             requested_dt_override=matched_slot,
+            current_service_id=pending.get("current_service_id"),
+            current_service_name=pending.get("current_service_name"),
         )
 
     def _serialize_pending_start_dt(self, value: datetime) -> str:
@@ -2140,6 +2189,16 @@ class BookingService:
         ]
         if any(marker in normalized for marker in correction_markers):
             return True
+        normalized_for_time = re.sub(
+            r"[^\w\sа-яіїєґё:]", " ", normalized, flags=re.IGNORECASE
+        )
+        normalized_for_time = " ".join(normalized_for_time.split())
+        bounded_correction_patterns = [
+            r"^(?:а|тоді|давай|давайте|можна)\s+(?:(?:о|на)\s+)?\d{1,2}(?::\d{2})?$",
+            r"^(?:а|тоді|давай|давайте|можна)\s+(?:(?:о|на)\s+)?\d{1,2}\s+\d{2}$",
+        ]
+        if any(re.fullmatch(pattern, normalized_for_time) for pattern in bounded_correction_patterns):
+            return True
         return bool(re.search(r"\bnot\s+(?:at\s+)?\d{1,2}\b", normalized))
 
     def _parse_time_candidates(self, text: str) -> list[time]:
@@ -2177,12 +2236,41 @@ class BookingService:
             return None
 
         normalized = text.strip().lower()
+        bounded_normalized = re.sub(
+            r"[^\w\sа-яіїєґё:]", " ", normalized, flags=re.IGNORECASE
+        )
+        bounded_normalized = " ".join(bounded_normalized.split())
+        bounded_match = re.fullmatch(
+            r"(?:а|тоді|давай|давайте|можна)\s+(?:(?:о|на)\s+)?(\d{1,2})(?::(\d{2}))?",
+            bounded_normalized,
+        )
+        if bounded_match:
+            hour = int(bounded_match.group(1))
+            minute = int(bounded_match.group(2) or 0)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return time(hour=hour, minute=minute)
+
+        bounded_spaced_match = re.fullmatch(
+            r"(?:а|тоді|давай|давайте|можна)\s+(?:(?:о|на)\s+)?(\d{1,2})\s+(\d{2})",
+            bounded_normalized,
+        )
+        if bounded_spaced_match:
+            hour = int(bounded_spaced_match.group(1))
+            minute = int(bounded_spaced_match.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return time(hour=hour, minute=minute)
+
         marker_positions = [
             normalized.rfind(marker)
             for marker in [
+                "а ",
                 " а ",
                 "ні",
                 "краще",
+                "тоді",
+                "давай",
+                "давайте",
+                "можна",
                 "мав на увазі",
                 "мала на увазі",
                 "маю на увазі",
@@ -2250,6 +2338,59 @@ class BookingService:
     def _combine_requested_date_and_time(self, requested_date: date, requested_time: time) -> datetime:
         return datetime.combine(requested_date, requested_time, tzinfo=self.timezone)
 
+    def _preserve_pending_date_context_after_time_rejection(
+        self,
+        sender_id: str,
+        *,
+        previous_pending: dict[str, Any] | None,
+        language: str,
+        source_channel: str | None,
+    ) -> date | None:
+        if not previous_pending:
+            return None
+
+        previous_pending_state = previous_pending.get("state")
+        if previous_pending_state not in {
+            BookingState.WAITING_FOR_TIME.value,
+            BookingState.WAITING_FOR_CONTACT.value,
+        }:
+            return None
+
+        if not previous_pending.get("requested_date") and not previous_pending.get("start_dt"):
+            return None
+
+        try:
+            if previous_pending.get("requested_date"):
+                preserved_requested_date = self._deserialize_pending_requested_date(
+                    previous_pending.get("requested_date")
+                )
+            else:
+                preserved_requested_date = self._get_pending_start_dt(previous_pending).date()
+        except Exception:
+            logger.warning(
+                "invalid pending date ignored while preserving time rejection sender_id=%s",
+                sender_id,
+            )
+            return None
+
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=previous_pending.get("language") or language,
+            source_channel=source_channel or previous_pending.get("source_channel"),
+            context_summary=previous_pending.get("context_summary"),
+            requested_date=preserved_requested_date,
+            requested_day_label=previous_pending.get("requested_day_label"),
+        )
+        preserved_pending = self._get_pending_confirmation(sender_id) or {}
+        if previous_pending.get("current_service_id"):
+            preserved_pending["current_service_id"] = previous_pending.get("current_service_id")
+        if previous_pending.get("current_service_name"):
+            preserved_pending["current_service_name"] = previous_pending.get("current_service_name")
+        self._save_pending_confirmation(sender_id, preserved_pending)
+
+        return preserved_requested_date
+
     def _get_pending_start_dt(self, pending: dict[str, Any]) -> datetime | None:
         raw_start_dt = pending.get("start_dt")
         if not raw_start_dt:
@@ -2266,11 +2407,17 @@ class BookingService:
         state: BookingState,
         source_channel: str | None,
     ) -> Dict[str, Any] | None:
-        if not self._looks_like_booking_correction(message_text):
+        if state == BookingState.WAITING_FOR_TIME and pending.get("availability_context"):
+            return None
+
+        looks_like_correction = self._looks_like_booking_correction(message_text)
+        corrected_time = self._extract_corrected_time(message_text) if looks_like_correction else None
+        if corrected_time is None and state == BookingState.WAITING_FOR_CONTACT:
+            corrected_time = self._parse_time_only(message_text)
+        if not looks_like_correction and corrected_time is None:
             return None
 
         partial_date = self._extract_requested_date(message_text)
-        corrected_time = self._extract_corrected_time(message_text)
         if partial_date is None and corrected_time is None:
             return None
 
@@ -2321,6 +2468,8 @@ class BookingService:
                 message_text=message_text,
                 source_channel=source_channel or pending.get("source_channel"),
                 requested_dt_override=requested_dt,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
             )
 
         self._save_pending_confirmation(sender_id, pending)
@@ -2495,13 +2644,17 @@ class BookingService:
         duration_minutes = self._booking_duration_minutes()
 
         if not self._is_within_business_hours(requested_dt, duration_minutes):
-            preserves_active_time_context = (
-                requested_dt_override is not None
-                and previous_pending
-                and previous_pending.get("state") == BookingState.WAITING_FOR_TIME.value
-                and previous_pending.get("requested_date")
-            )
-            if not preserves_active_time_context:
+            preserved_requested_date = None
+            if requested_dt_override is not None:
+                preserved_requested_date = self._preserve_pending_date_context_after_time_rejection(
+                    sender_id,
+                    previous_pending=previous_pending,
+                    language=language,
+                    source_channel=source_channel or (
+                        previous_pending.get("source_channel") if previous_pending else None
+                    ),
+                )
+            if preserved_requested_date is None:
                 self._clear_pending_confirmation(sender_id)
             return {
                 "status": "outside_business_hours",
@@ -2509,13 +2662,13 @@ class BookingService:
                 "requires_confirmation": False,
                 "booking_state": (
                     BookingState.WAITING_FOR_TIME.value
-                    if preserves_active_time_context
+                    if preserved_requested_date is not None
                     else BookingState.NONE.value
                 ),
                 "start_dt": requested_dt.isoformat(),
                 "requested_date": (
-                    previous_pending.get("requested_date")
-                    if preserves_active_time_context
+                    preserved_requested_date.isoformat()
+                    if preserved_requested_date is not None
                     else None
                 ),
             }
@@ -2556,17 +2709,34 @@ class BookingService:
                 sender_id,
                 requested_dt.isoformat(),
             )
+            preserved_requested_date = None
+            if requested_dt_override is not None:
+                preserved_requested_date = self._preserve_pending_date_context_after_time_rejection(
+                    sender_id,
+                    previous_pending=previous_pending,
+                    language=language,
+                    source_channel=source_channel or (
+                        previous_pending.get("source_channel") if previous_pending else None
+                    ),
+                )
             return {
                 "status": "availability_check_failed",
                 "reply_text": self._build_availability_check_failed_reply(language),
                 "requires_confirmation": False,
                 "event_created": False,
                 "booking_state": (
-                    previous_pending.get("state")
+                    BookingState.WAITING_FOR_TIME.value
+                    if preserved_requested_date is not None
+                    else previous_pending.get("state")
                     if previous_pending
                     else BookingState.NONE.value
                 ),
                 "start_dt": requested_dt.isoformat(),
+                "requested_date": (
+                    preserved_requested_date.isoformat()
+                    if preserved_requested_date is not None
+                    else None
+                ),
             }
 
         logger.info(
@@ -2599,31 +2769,65 @@ class BookingService:
                 }
             self._clear_pending_confirmation(sender_id)
             if next_slot:
-                self._save_booking_state(
-                    sender_id,
-                    state=BookingState.WAITING_FOR_CONTACT,
-                    language=language,
-                    start_dt=next_slot,
-                    source_channel=source_channel,
-                    context_summary=message_text[:280],
+                previous_pending_state = previous_pending.get("state") if previous_pending else None
+                is_selected_time_correction = (
+                    requested_dt_override is not None
+                    and previous_pending_state == BookingState.WAITING_FOR_CONTACT.value
                 )
+                if is_selected_time_correction:
+                    preserved_requested_date = self._preserve_pending_date_context_after_time_rejection(
+                        sender_id,
+                        previous_pending=previous_pending,
+                        language=language,
+                        source_channel=source_channel or (
+                            previous_pending.get("source_channel") if previous_pending else None
+                        ),
+                    )
+                    pending = self._get_pending_confirmation(sender_id) or {}
+                    if preserved_requested_date is None:
+                        self._save_booking_state(
+                            sender_id,
+                            state=BookingState.WAITING_FOR_TIME,
+                            language=language,
+                            source_channel=source_channel,
+                            context_summary=message_text[:280],
+                            requested_date=requested_dt.date(),
+                        )
+                        pending = self._get_pending_confirmation(sender_id) or {}
+                else:
+                    self._save_booking_state(
+                        sender_id,
+                        state=BookingState.WAITING_FOR_CONTACT,
+                        language=language,
+                        start_dt=next_slot,
+                        source_channel=source_channel,
+                        context_summary=message_text[:280],
+                    )
+                    pending = self._get_pending_confirmation(sender_id) or {}
 
-                pending = self._get_pending_confirmation(sender_id) or {}
                 pending["availability_context"] = True
                 pending["suggested_slots"] = [
                     {
-                        "day_key": "tomorrow",
+                        "day_key": (
+                            "selected_day" if is_selected_time_correction else "tomorrow"
+                        ),
                         "start_dt": self._serialize_pending_start_dt(next_slot),
                     }
                 ]
-                pending["last_suggested_day"] = "tomorrow"
+                pending["last_suggested_day"] = (
+                    "selected_day" if is_selected_time_correction else "tomorrow"
+                )
                 self._save_pending_confirmation(sender_id, pending)
 
                 return {
                     "status": "slot_suggested",
                     "reply_text": f"На жаль, {self._format_scheduled_time_for_reply(requested_dt, language)} зайнятий. Як щодо {self._format_scheduled_time_for_reply(next_slot, language)}?",
-                    "booking_state": BookingState.WAITING_FOR_CONTACT.value,
-                    "requires_contact": True,
+                    "booking_state": (
+                        BookingState.WAITING_FOR_TIME.value
+                        if is_selected_time_correction
+                        else BookingState.WAITING_FOR_CONTACT.value
+                    ),
+                    "requires_contact": not is_selected_time_correction,
                     "suggested_slots": pending["suggested_slots"],
                     "start_dt": next_slot.isoformat(),
                 }
@@ -2888,6 +3092,8 @@ class BookingService:
                     message_text=message_text,
                     source_channel=source_channel or pending.get("source_channel"),
                     requested_dt_override=requested_dt,
+                    current_service_id=pending.get("current_service_id"),
+                    current_service_name=pending.get("current_service_name"),
                 )
 
             if partial_date:
@@ -2928,6 +3134,8 @@ class BookingService:
                 sender_id=sender_id,
                 message_text=message_text,
                 source_channel=source_channel or pending.get("source_channel"),
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
             )
 
         if state == BookingState.WAITING_FOR_CONTACT:
