@@ -2198,9 +2198,17 @@ class BookingService:
 
     def _looks_like_booking_correction(self, text: str) -> bool:
         normalized = " ".join(text.strip().lower().split())
-        correction_markers = [
+        # Standalone-word markers: matched only as a whole token, so they
+        # never fire inside an unrelated word that merely contains them as a
+        # substring (e.g. "ні" inside "мені"/"гривні"/"днів", "краще" inside
+        # "покращення").
+        standalone_correction_markers = [
             "краще",
             "ні",
+        ]
+        # Phrase markers: multi-word or already-specific enough that raw
+        # substring matching doesn't collide with unrelated text.
+        phrase_correction_markers = [
             "не хочу",
             "мав на увазі",
             "мала на увазі",
@@ -2215,7 +2223,12 @@ class BookingService:
             "i mean",
             "meant",
         ]
-        if any(marker in normalized for marker in correction_markers):
+        if any(
+            re.search(rf"\b{re.escape(marker)}\b", normalized)
+            for marker in standalone_correction_markers
+        ):
+            return True
+        if any(marker in normalized for marker in phrase_correction_markers):
             return True
         normalized_for_time = re.sub(
             r"[^\w\sа-яіїєґё:]", " ", normalized, flags=re.IGNORECASE
