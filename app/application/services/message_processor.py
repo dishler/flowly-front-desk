@@ -196,6 +196,32 @@ class MessageProcessor:
         pending = self.booking_service._get_pending_confirmation(sender_id) or {}
         return pending.get("current_service_id"), pending.get("current_service_name")
 
+    def _service_context_for_booking(
+        self,
+        sender_id: str,
+        text: str,
+        fallback_service_id: str | None = None,
+        fallback_service_name: str | None = None,
+    ) -> tuple[str | None, str | None]:
+        if not self._is_configured_front_desk_mode():
+            return None, None
+
+        service = self._find_configured_front_desk_service(text)
+        if service and service.get("id"):
+            return str(service["id"]), str(service.get("name") or "")
+
+        if fallback_service_id:
+            return fallback_service_id, fallback_service_name
+
+        if self.memory_service is None:
+            return None, None
+
+        context = self.memory_service.get_context(sender_id)
+        service_id = context.get("current_service_id")
+        if not service_id:
+            return None, None
+        return str(service_id), context.get("current_service_name")
+
     def _remember_front_desk_booking_service_context(
         self,
         sender_id: str,
@@ -2274,10 +2300,18 @@ class MessageProcessor:
                 return self._build_capability_question_result(message)
 
             if self._looks_like_explicit_fresh_booking_request(message.user_message):
+                booking_service_id, booking_service_name = self._service_context_for_booking(
+                    message.sender_id,
+                    message.user_message,
+                    fallback_service_id=active_service_id,
+                    fallback_service_name=active_service_name,
+                )
                 booking_result = self.booking_service.start_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
+                    current_service_id=booking_service_id,
+                    current_service_name=booking_service_name,
                 )
                 return self._build_booking_reply_result(
                     message=message,
@@ -2513,10 +2547,16 @@ class MessageProcessor:
             and self.booking_service.has_confirmed_booking(message.sender_id)
         ):
             if self._looks_like_fresh_booking_request(message.user_message):
+                booking_service_id, booking_service_name = self._service_context_for_booking(
+                    message.sender_id,
+                    message.user_message,
+                )
                 booking_result = self.booking_service.start_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
+                    current_service_id=booking_service_id,
+                    current_service_name=booking_service_name,
                 )
                 return self._build_booking_reply_result(
                     message=message,
@@ -2619,10 +2659,16 @@ class MessageProcessor:
                 or self._looks_like_booking_message(message.user_message)
                 or self._looks_like_datetime_only_message(message.user_message)
             ):
+                booking_service_id, booking_service_name = self._service_context_for_booking(
+                    message.sender_id,
+                    message.user_message,
+                )
                 booking_result = self.booking_service.start_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
+                    current_service_id=booking_service_id,
+                    current_service_name=booking_service_name,
                 )
                 return self._build_booking_reply_result(
                     message=message,
@@ -3021,10 +3067,16 @@ class MessageProcessor:
         if intent == IntentType.BOOKING_REQUEST:
             logger.info("Detected booking intent: %s", intent.value)
             logger.info("Calling start_booking_flow for sender_id=%s", message.sender_id)
+            booking_service_id, booking_service_name = self._service_context_for_booking(
+                message.sender_id,
+                message.user_message,
+            )
             booking_result = self.booking_service.start_booking_flow(
                 sender_id=message.sender_id,
                 message_text=message.user_message,
                 source_channel=message.platform,
+                current_service_id=booking_service_id,
+                current_service_name=booking_service_name,
             )
             logger.info("Booking result used")
             reply_text = booking_result["reply_text"]

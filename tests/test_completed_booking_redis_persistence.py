@@ -117,6 +117,50 @@ class UnconfiguredCalendarService(RecordingCalendarService):
     google_calendar_client = UnconfiguredClient()
 
 
+class ConfiguredCreateCalendarService(RecordingCalendarService):
+    class ConfiguredClient:
+        def is_configured(self) -> bool:
+            return True
+
+    google_calendar_client = ConfiguredClient()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.availability_checks = []
+        self.created_events = []
+
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.availability_checks.append(
+            {"start_dt": start_dt, "duration_minutes": duration_minutes}
+        )
+        return True
+
+    def create_booking_event(
+        self,
+        start_dt,
+        duration_minutes: int = 30,
+        summary: str = "",
+        description: str = "",
+        attendee_emails=None,
+    ):
+        self.created_events.append(
+            {
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+                "summary": summary,
+                "description": description,
+                "attendee_emails": attendee_emails or [],
+            }
+        )
+
+        class CreatedEvent:
+            event_id = "new-calendar-event"
+            html_link = "https://calendar.example/new-calendar-event"
+            status = "confirmed"
+
+        return CreatedEvent()
+
+
 @pytest.fixture
 def fake_redis() -> FakeRedis:
     return FakeRedis()
@@ -172,6 +216,8 @@ def _mark_completed(
     booking_service: BookingService,
     *,
     event_id: str = "calendar-event-123",
+    current_service_id: str | None = None,
+    current_service_name: str | None = None,
 ) -> None:
     booking_service._mark_booking_completed(
         "user-1",
@@ -180,6 +226,8 @@ def _mark_completed(
         email="client@example.com",
         phone="0987121328",
         calendar_event_id=event_id,
+        current_service_id=current_service_id,
+        current_service_name=current_service_name,
     )
 
 
@@ -219,6 +267,85 @@ def test_completed_booking_metadata_is_retrievable_after_restart(fake_redis):
         "phone": "0987121328",
         "calendar_event_id": "calendar-event-123",
     }
+
+
+def test_redis_completed_booking_prevents_duplicate_calendar_create(fake_redis):
+    _mark_completed(
+        _booking_service(fake_redis),
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
+    calendar_service = ConfiguredCreateCalendarService()
+    restarted = _booking_service(fake_redis, calendar_service=calendar_service)
+
+    result = restarted.start_booking_flow(
+        sender_id="user-1",
+        message_text="Іван client@example.com 27.04 12:00",
+        source_channel="instagram",
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["event_created"] is False
+    assert result["idempotent"] is True
+    assert result["event_id"] == "calendar-event-123"
+    assert calendar_service.availability_checks == []
+    assert calendar_service.created_events == []
+    assert restarted._get_completed_booking("user-1") == {
+        "start_dt": "2026-04-27T12:00:00+03:00",
+        "customer_name": "Іван",
+        "email": "client@example.com",
+        "phone": "0987121328",
+        "calendar_event_id": "calendar-event-123",
+        "current_service_id": "dental_cleaning",
+        "current_service_name": "Професійна чистка зубів",
+    }
+
+
+def test_redis_completed_booking_preserves_service_id_after_restart(fake_redis):
+    _mark_completed(
+        _booking_service(fake_redis),
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
+
+    restarted = _booking_service(fake_redis)
+
+    assert restarted._get_completed_booking("user-1") == {
+        "start_dt": "2026-04-27T12:00:00+03:00",
+        "customer_name": "Іван",
+        "email": "client@example.com",
+        "phone": "0987121328",
+        "calendar_event_id": "calendar-event-123",
+        "current_service_id": "dental_cleaning",
+        "current_service_name": "Професійна чистка зубів",
+    }
+
+
+def test_redis_completed_booking_dedupes_equivalent_ukrainian_phone(fake_redis):
+    _mark_completed(
+        _booking_service(fake_redis),
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
+    calendar_service = ConfiguredCreateCalendarService()
+    restarted = _booking_service(fake_redis, calendar_service=calendar_service)
+
+    result = restarted.start_booking_flow(
+        sender_id="user-1",
+        message_text="Іван 27.04 12:00 +380987121328",
+        source_channel="instagram",
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["event_created"] is False
+    assert result["idempotent"] is True
+    assert result["event_id"] == "calendar-event-123"
+    assert calendar_service.availability_checks == []
+    assert calendar_service.created_events == []
 
 
 async def test_status_flow_recognizes_confirmed_booking_after_restart(fake_redis):

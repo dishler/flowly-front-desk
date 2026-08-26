@@ -8,6 +8,7 @@ import pytest
 from app.application.dto.normalized_message import NormalizedMessage
 from app.application.services import booking_service as booking_service_module
 from app.application.services.booking_service import BookingService
+from app.application.services.dedup_service import DedupService
 from app.application.services.front_desk_config_service import FrontDeskConfigService
 from app.application.services.intent_service import IntentService
 from app.application.services.knowledge_service import KnowledgeService
@@ -159,6 +160,47 @@ class SelectiveConfiguredCalendarService(RecordingConfiguredCalendarService):
         return (start_dt.date().isoformat(), start_dt.hour, start_dt.minute) in self.available_slots
 
 
+class UniqueEventConfiguredCalendarService(SelectiveConfiguredCalendarService):
+    def __init__(self, available_slots, *, created_slots_become_busy: bool = False) -> None:
+        super().__init__(available_slots)
+        self.created_slots_become_busy = created_slots_become_busy
+
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append({"start_dt": start_dt, "duration_minutes": duration_minutes})
+        if self.created_slots_become_busy and any(
+            created["start_dt"] == start_dt for created in self.created
+        ):
+            return False
+        return (start_dt.date().isoformat(), start_dt.hour, start_dt.minute) in self.available_slots
+
+    def create_booking_event(
+        self,
+        start_dt,
+        duration_minutes: int = 30,
+        summary: str = "",
+        description: str = "",
+        attendee_emails=None,
+    ):
+        event_id = f"dental-event-{len(self.created) + 1}"
+        self.created.append(
+            {
+                "event_id": event_id,
+                "start_dt": start_dt,
+                "duration_minutes": duration_minutes,
+                "summary": summary,
+                "description": description,
+                "attendee_emails": attendee_emails or [],
+            }
+        )
+
+        class CreatedEvent:
+            status = "confirmed"
+
+        CreatedEvent.event_id = event_id
+        CreatedEvent.html_link = f"https://calendar.example/{event_id}"
+        return CreatedEvent()
+
+
 class FailingConfiguredCalendarService(RecordingConfiguredCalendarService):
     def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
         self.checked.append({"start_dt": start_dt, "duration_minutes": duration_minutes})
@@ -170,7 +212,7 @@ def dental_processor():
     return _build_dental_processor()
 
 
-def _build_dental_processor(ai_service=None, calendar_service=None):
+def _build_dental_processor(ai_service=None, calendar_service=None, dedup_service=None):
     memory_service = MemoryService()
     calendar_service = calendar_service or RecordingConfiguredCalendarService()
     config_service = FrontDeskConfigService("app/data/front_desk_config.json")
@@ -189,7 +231,7 @@ def _build_dental_processor(ai_service=None, calendar_service=None):
         memory_service=memory_service,
         reply_service=reply_service,
         outbound_service=DummyOutboundService(),
-        dedup_service=DummyDedupService(),
+        dedup_service=dedup_service or DummyDedupService(),
         intent_service=IntentService(),
         booking_service=booking_service,
         speech_service=DummySpeechService(),
@@ -203,6 +245,16 @@ def _message(text: str, sender_id: str = "patient-1") -> NormalizedMessage:
         sender_id=sender_id,
         recipient_id="clinic",
         message_mid="",
+        user_message=text,
+    )
+
+
+def _message_with_mid(text: str, message_mid: str, sender_id: str = "patient-1") -> NormalizedMessage:
+    return NormalizedMessage(
+        platform="instagram",
+        sender_id=sender_id,
+        recipient_id="clinic",
+        message_mid=message_mid,
         user_message=text,
     )
 
@@ -1746,6 +1798,355 @@ async def test_dental_fresh_exact_time_booking_does_not_parse_spaced_time_global
     assert result["booking_result"]["status"] == "unavailable"
     assert result["booking_result"]["start_dt"] == "2026-08-25T15:00:00+03:00"
     assert calendar.checked[0] == {"start_dt": _kyiv_dt(2026, 8, 25, 15), "duration_minutes": 30}
+
+
+@pytest.mark.asyncio
+async def test_dental_semantic_retry_with_different_mid_does_not_create_duplicate_event():
+    calendar = UniqueEventConfiguredCalendarService(
+        [_kyiv_dt(2026, 8, 28, 15), _kyiv_dt(2026, 8, 28, 16)],
+        created_slots_become_busy=True,
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    first = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    completed_before_retry = dict(
+        processor.booking_service._get_completed_booking("patient-1")
+    )
+    retry = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-2")
+    )
+    completed_after_retry = processor.booking_service._get_completed_booking("patient-1")
+
+    assert first["booking_result"]["status"] == "confirmed"
+    assert first["booking_result"]["event_id"] == "dental-event-1"
+    assert retry["booking_result"]["status"] == "confirmed"
+    assert retry["booking_result"]["event_created"] is False
+    assert retry["booking_result"]["idempotent"] is True
+    assert retry["booking_result"]["event_id"] == "dental-event-1"
+    assert len(calendar.created) == 1
+    assert completed_after_retry == completed_before_retry
+    assert completed_after_retry["calendar_event_id"] == "dental-event-1"
+    assert completed_after_retry["current_service_id"] == "dental_cleaning"
+    assert calendar.checked == [
+        {"start_dt": _kyiv_dt(2026, 8, 28, 15), "duration_minutes": 30}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dental_same_mid_retry_still_uses_provider_dedup():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    first = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    retry = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+
+    assert first["booking_result"]["status"] == "confirmed"
+    assert retry["intent"] == "duplicate_skipped"
+    assert len(calendar.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_dental_same_sender_different_time_or_date_creates_distinct_events():
+    calendar = UniqueEventConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 28, 15),
+        _kyiv_dt(2026, 8, 28, 16),
+        _kyiv_dt(2026, 8, 24, 15),
+    ])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    first = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    different_time = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 16", "mid-2")
+    )
+    different_date = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пн о 15", "mid-3")
+    )
+
+    assert first["booking_result"]["event_id"] == "dental-event-1"
+    assert different_time["booking_result"]["event_id"] == "dental-event-2"
+    assert different_date["booking_result"]["event_id"] == "dental-event-3"
+    assert [event["start_dt"] for event in calendar.created] == [
+        _kyiv_dt(2026, 8, 28, 15),
+        _kyiv_dt(2026, 8, 28, 16),
+        _kyiv_dt(2026, 8, 24, 15),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dental_different_sender_same_booking_creates_independent_event():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    first = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1", sender_id="patient-1")
+    )
+    second = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-2", sender_id="patient-2")
+    )
+
+    assert first["booking_result"]["event_id"] == "dental-event-1"
+    assert second["booking_result"]["event_id"] == "dental-event-2"
+    assert len(calendar.created) == 2
+
+
+@pytest.mark.asyncio
+async def test_dental_same_contact_different_service_at_new_time_is_allowed():
+    calendar = UniqueEventConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 28, 15),
+        _kyiv_dt(2026, 8, 28, 16),
+    ])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    consultation = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на консультацію в пт о 15", "mid-1")
+    )
+    cleaning = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 16", "mid-2")
+    )
+
+    assert consultation["booking_result"]["status"] == "confirmed"
+    assert cleaning["booking_result"]["status"] == "confirmed"
+    assert len(calendar.created) == 2
+    assert processor.booking_service._get_completed_booking("patient-1")["calendar_event_id"] == "dental-event-2"
+
+
+@pytest.mark.asyncio
+async def test_dental_same_contact_different_service_same_time_creates_distinct_event():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    cleaning = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    filling = await processor.process(
+        _message_with_mid("Дмитро 0987121328 хочу поставити пломбу в пт о 15", "mid-2")
+    )
+
+    assert cleaning["booking_result"]["status"] == "confirmed"
+    assert cleaning["booking_result"]["event_id"] == "dental-event-1"
+    assert filling["booking_result"]["status"] == "confirmed"
+    assert filling["booking_result"]["event_created"] is True
+    assert filling["booking_result"]["event_id"] == "dental-event-2"
+    assert len(calendar.created) == 2
+    assert processor.booking_service._get_completed_booking("patient-1")["current_service_id"] == "caries_treatment"
+
+
+@pytest.mark.asyncio
+async def test_dental_same_contact_whitening_same_time_after_cleaning_creates_distinct_event():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    cleaning = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    whitening = await processor.process(
+        _message_with_mid("Дмитро 0987121328 запишіть на відбілювання в пт о 15", "mid-2")
+    )
+
+    assert cleaning["booking_result"]["event_id"] == "dental-event-1"
+    assert whitening["booking_result"]["status"] == "confirmed"
+    assert whitening["booking_result"]["event_created"] is True
+    assert whitening["booking_result"]["event_id"] == "dental-event-2"
+    assert len(calendar.created) == 2
+    assert processor.booking_service._get_completed_booking("patient-1")["current_service_id"] == "teeth_whitening"
+
+
+@pytest.mark.asyncio
+async def test_dental_explicit_service_does_not_dedupe_against_no_service_completed_booking():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+    processor.booking_service._mark_booking_completed(
+        "patient-1",
+        start_dt=_kyiv_dt(2026, 8, 28, 15),
+        customer_name="Дмитро",
+        email=None,
+        phone="0987121328",
+        calendar_event_id="legacy-event",
+    )
+
+    result = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+
+    assert result["booking_result"]["status"] == "confirmed"
+    assert result["booking_result"]["event_created"] is True
+    assert result["booking_result"]["event_id"] == "dental-event-1"
+    assert len(calendar.created) == 1
+    assert processor.booking_service._get_completed_booking("patient-1")["current_service_id"] == "dental_cleaning"
+
+
+@pytest.mark.asyncio
+async def test_dental_completed_service_still_dedupes_when_retry_loses_service_context():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+    processor.booking_service._mark_booking_completed(
+        "patient-1",
+        start_dt=_kyiv_dt(2026, 8, 28, 15),
+        customer_name="Дмитро",
+        email=None,
+        phone="0987121328",
+        calendar_event_id="dental-event-1",
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
+
+    result = processor.booking_service.start_booking_flow(
+        sender_id="patient-1",
+        message_text="Дмитро 0987121328 в пт о 15",
+        source_channel="instagram",
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["event_created"] is False
+    assert result["idempotent"] is True
+    assert result["event_id"] == "dental-event-1"
+    assert len(calendar.created) == 0
+
+
+@pytest.mark.asyncio
+async def test_dental_one_turn_booking_persists_service_id():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, _calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    result = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    completed = processor.booking_service._get_completed_booking("patient-1")
+
+    assert result["booking_result"]["status"] == "confirmed"
+    assert completed["calendar_event_id"] == "dental-event-1"
+    assert completed["current_service_id"] == "dental_cleaning"
+    assert completed["current_service_name"]
+
+
+@pytest.mark.asyncio
+async def test_dental_multi_turn_booking_persists_service_id():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, _calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    await processor.process(_message_with_mid("хочу на чистку в пт о 15", "mid-1"))
+    contact = await processor.process(_message_with_mid("Дмитро 0987121328", "mid-2"))
+    completed = processor.booking_service._get_completed_booking("patient-1")
+
+    assert contact["booking_result"]["status"] == "confirmed"
+    assert completed["calendar_event_id"] == "dental-event-1"
+    assert completed["current_service_id"] == "dental_cleaning"
+    assert completed["current_service_name"]
+
+
+@pytest.mark.asyncio
+async def test_dental_semantic_retry_dedupes_equivalent_ukrainian_phone_formats():
+    calendar = UniqueEventConfiguredCalendarService(
+        [_kyiv_dt(2026, 8, 28, 15)],
+        created_slots_become_busy=True,
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    first = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    retry = await processor.process(
+        _message_with_mid("Дмитро +380987121328 на чистку в пт о 15", "mid-2")
+    )
+
+    assert first["booking_result"]["event_id"] == "dental-event-1"
+    assert retry["booking_result"]["status"] == "confirmed"
+    assert retry["booking_result"]["event_created"] is False
+    assert retry["booking_result"]["idempotent"] is True
+    assert retry["booking_result"]["event_id"] == "dental-event-1"
+    assert len(calendar.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_dental_semantic_retry_dedupes_spaced_ukrainian_phone_format():
+    calendar = UniqueEventConfiguredCalendarService(
+        [_kyiv_dt(2026, 8, 28, 15)],
+        created_slots_become_busy=True,
+    )
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    first = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    retry = await processor.process(
+        _message_with_mid("Дмитро на чистку в пт о 15 +38 098 712 13 28", "mid-2")
+    )
+
+    assert first["booking_result"]["event_id"] == "dental-event-1"
+    assert retry["booking_result"]["status"] == "confirmed"
+    assert retry["booking_result"]["event_created"] is False
+    assert retry["booking_result"]["idempotent"] is True
+    assert retry["booking_result"]["event_id"] == "dental-event-1"
+    assert len(calendar.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_dental_different_phone_same_service_start_creates_distinct_event():
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 28, 15)])
+    processor, calendar = _build_dental_processor(
+        calendar_service=calendar,
+        dedup_service=DedupService(),
+    )
+
+    first = await processor.process(
+        _message_with_mid("Дмитро 0987121328 на чистку в пт о 15", "mid-1")
+    )
+    second = await processor.process(
+        _message_with_mid("Дмитро 0987121329 на чистку в пт о 15", "mid-2")
+    )
+
+    assert first["booking_result"]["event_id"] == "dental-event-1"
+    assert second["booking_result"]["status"] == "confirmed"
+    assert second["booking_result"]["event_created"] is True
+    assert second["booking_result"]["event_id"] == "dental-event-2"
+    assert len(calendar.created) == 2
 
 
 @pytest.mark.asyncio

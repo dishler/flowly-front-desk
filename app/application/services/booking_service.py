@@ -1404,14 +1404,112 @@ class BookingService:
         phone: str | None,
         customer_name: str | None = None,
         calendar_event_id: str | None = None,
+        current_service_id: str | None = None,
+        current_service_name: str | None = None,
     ) -> None:
-        self._save_completed_booking(sender_id, {
+        payload = {
             "start_dt": self._serialize_pending_start_dt(start_dt) if start_dt else None,
             "customer_name": customer_name,
             "email": email,
             "phone": phone,
             "calendar_event_id": calendar_event_id,
-        })
+        }
+        if current_service_id:
+            payload["current_service_id"] = current_service_id
+        if current_service_name:
+            payload["current_service_name"] = current_service_name
+        self._save_completed_booking(sender_id, payload)
+
+    def _normalize_idempotency_contact(self, value: Any) -> str | None:
+        if not value:
+            return None
+        return str(value).strip().lower()
+
+    def _normalize_idempotency_phone(self, value: Any) -> str | None:
+        if not value:
+            return None
+        digits = re.sub(r"\D", "", str(value))
+        if len(digits) == 10 and digits.startswith("0"):
+            return f"380{digits[1:]}"
+        if len(digits) == 12 and digits.startswith("380"):
+            return digits
+        if len(digits) == 13 and digits.startswith("0380"):
+            return digits[1:]
+        return self._normalize_phone(str(value))
+
+    def _completed_booking_matches_candidate(
+        self,
+        sender_id: str,
+        *,
+        start_dt: datetime,
+        email: str | None,
+        phone: str | None,
+        current_service_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        completed = self._get_completed_booking(sender_id)
+        if not completed or not completed.get("start_dt"):
+            return None
+
+        try:
+            completed_start = self._deserialize_pending_start_dt(completed["start_dt"])
+        except Exception:
+            logger.warning(
+                "invalid completed booking start_dt ignored during idempotency check sender_id=%s raw_start_dt=%r",
+                sender_id,
+                completed.get("start_dt"),
+            )
+            return None
+
+        if completed_start != start_dt.astimezone(self.timezone):
+            return None
+
+        completed_service_id = completed.get("current_service_id")
+        if current_service_id and not completed_service_id:
+            return None
+        if current_service_id and completed_service_id and current_service_id != completed_service_id:
+            return None
+
+        candidate_email = self._normalize_idempotency_contact(email)
+        completed_email = self._normalize_idempotency_contact(completed.get("email"))
+        candidate_phone = self._normalize_idempotency_phone(phone)
+        completed_phone = self._normalize_idempotency_phone(completed.get("phone"))
+
+        contact_matched = False
+        if candidate_email:
+            if candidate_email != completed_email:
+                return None
+            contact_matched = True
+        if candidate_phone:
+            if candidate_phone != completed_phone:
+                return None
+            contact_matched = True
+
+        if not contact_matched:
+            return None
+
+        return completed
+
+    def _build_idempotent_confirmed_result(
+        self,
+        *,
+        language: str,
+        completed: dict[str, Any],
+    ) -> Dict[str, Any]:
+        start_dt = self._deserialize_pending_start_dt(completed["start_dt"])
+        customer_name = completed.get("customer_name")
+        event_id = completed.get("calendar_event_id") or completed.get("event_id")
+        return {
+            "status": "confirmed",
+            "reply_text": self._build_both_contacts_confirmed_reply(language, start_dt, customer_name),
+            "event_created": False,
+            "booking_state": BookingState.NONE.value,
+            "event_id": event_id,
+            "event_link": completed.get("event_link"),
+            "customer_name": customer_name,
+            "contact_email": completed.get("email"),
+            "contact_phone": completed.get("phone"),
+            "idempotent": True,
+        }
 
     def get_reschedule_reply(self, language: str) -> str:
         return f"У вас уже є підтверджений {self._appointment_label()}. Якщо хочете, можу допомогти перенести його на інший час."
@@ -2322,6 +2420,8 @@ class BookingService:
         message_text: str,
         source_channel: str | None = None,
         requested_dt_override: datetime | None = None,
+        current_service_id: str | None = None,
+        current_service_name: str | None = None,
     ) -> Dict[str, Any]:
         language = self._detect_language(message_text)
         time_window = self._extract_time_window(message_text)
@@ -2403,6 +2503,31 @@ class BookingService:
                 "booking_state": BookingState.NONE.value,
                 "start_dt": requested_dt.isoformat(),
             }
+
+        early_contact_details = self._extract_contact_details(message_text)
+        if self._has_required_contact(
+            customer_name=early_contact_details["customer_name"],
+            email=early_contact_details["email"],
+            phone=early_contact_details["phone"],
+        ):
+            completed_match = self._completed_booking_matches_candidate(
+                sender_id,
+                start_dt=requested_dt,
+                email=early_contact_details["email"],
+                phone=early_contact_details["phone"],
+                current_service_id=current_service_id,
+            )
+            if completed_match is not None:
+                logger.info(
+                    "Booking semantic retry skipped before availability check sender_id=%s start_dt=%s",
+                    sender_id,
+                    requested_dt.isoformat(),
+                )
+                self._clear_pending_confirmation(sender_id)
+                return self._build_idempotent_confirmed_result(
+                    language=language,
+                    completed=completed_match,
+                )
 
         try:
             is_available = self.calendar_service.check_specific_time_availability(
@@ -2495,7 +2620,7 @@ class BookingService:
             }
 
         self._clear_pending_confirmation(sender_id)
-        contact_details = self._extract_contact_details(message_text)
+        contact_details = early_contact_details
 
         if self._has_required_contact(
             customer_name=contact_details["customer_name"],
@@ -2520,6 +2645,24 @@ class BookingService:
                     description_parts.append("Contact: " + " | ".join(contact_parts))
 
                 description = "\n".join(description_parts)
+
+                completed_match = self._completed_booking_matches_candidate(
+                    sender_id,
+                    start_dt=requested_dt,
+                    email=contact_details["email"],
+                    phone=contact_details["phone"],
+                    current_service_id=current_service_id,
+                )
+                if completed_match is not None:
+                    logger.info(
+                        "Immediate booking semantic retry skipped sender_id=%s start_dt=%s",
+                        sender_id,
+                        requested_dt.isoformat(),
+                    )
+                    return self._build_idempotent_confirmed_result(
+                        language=language,
+                        completed=completed_match,
+                    )
 
                 calendar_configured = bool(
                     self.calendar_service.google_calendar_client
@@ -2549,6 +2692,8 @@ class BookingService:
                         email=contact_details["email"],
                         phone=contact_details["phone"],
                         calendar_event_id=created.event_id,
+                        current_service_id=current_service_id,
+                        current_service_name=current_service_name,
                     )
                     logger.info(
                         "Calendar event created for immediate booking sender_id=%s event_id=%s",
@@ -3005,6 +3150,25 @@ class BookingService:
 
             description = "\n".join(description_parts)
 
+            completed_match = self._completed_booking_matches_candidate(
+                sender_id,
+                start_dt=start_dt,
+                email=pending.get("contact_email"),
+                phone=pending.get("contact_phone"),
+                current_service_id=pending.get("current_service_id"),
+            )
+            if completed_match is not None:
+                logger.info(
+                    "Booking semantic retry skipped sender_id=%s start_dt=%s",
+                    sender_id,
+                    start_dt.isoformat(),
+                )
+                self._clear_pending_confirmation(sender_id)
+                return self._build_idempotent_confirmed_result(
+                    language=language,
+                    completed=completed_match,
+                )
+
             created = self.calendar_service.create_booking_event(
                 start_dt=start_dt,
                 duration_minutes=pending["duration_minutes"],
@@ -3051,6 +3215,8 @@ class BookingService:
             email=pending.get("contact_email"),
             phone=pending.get("contact_phone"),
             calendar_event_id=created.event_id,
+            current_service_id=pending.get("current_service_id"),
+            current_service_name=pending.get("current_service_name"),
         )
         self._clear_pending_confirmation(sender_id)
 

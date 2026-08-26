@@ -68,6 +68,10 @@ class RedisBookingStateService:
             "phone": data.get("phone"),
             "calendar_event_id": data.get("calendar_event_id"),
         }
+        if data.get("current_service_id"):
+            payload["current_service_id"] = data.get("current_service_id")
+        if data.get("current_service_name"):
+            payload["current_service_name"] = data.get("current_service_name")
 
         start_dt = payload.get("start_dt")
         if isinstance(start_dt, datetime):
@@ -97,6 +101,16 @@ class RedisBookingStateService:
             "email": payload.get("email"),
             "phone": payload.get("phone"),
             "calendar_event_id": payload.get("calendar_event_id"),
+            **(
+                {"current_service_id": payload.get("current_service_id")}
+                if payload.get("current_service_id")
+                else {}
+            ),
+            **(
+                {"current_service_name": payload.get("current_service_name")}
+                if payload.get("current_service_name")
+                else {}
+            ),
         }
 
     def clear_completed_booking(self, sender_id: str) -> None:
