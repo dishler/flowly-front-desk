@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
 from app.application.dto.normalized_message import NormalizedMessage
 from app.application.services.booking_service import BookingService
+from app.application.services.front_desk_config_service import FrontDeskConfigService
 from app.application.services.intent_service import IntentService
 from app.application.services.language_service import LanguageService
 from app.application.services.memory_service import MemoryService
@@ -15,6 +16,7 @@ from app.application.services.outbound_service import OutboundService
 from app.application.services.redis_booking_state_service import RedisBookingStateService
 from app.application.services.redis_memory_service import RedisMemoryService
 from app.application.services.reply_service import ReplyService
+from app.domain.enums import BookingState
 
 
 class FakeRedis:
@@ -344,6 +346,49 @@ def test_redis_completed_booking_dedupes_equivalent_ukrainian_phone(fake_redis):
     assert result["event_created"] is False
     assert result["idempotent"] is True
     assert result["event_id"] == "calendar-event-123"
+    assert calendar_service.availability_checks == []
+    assert calendar_service.created_events == []
+
+
+def test_redis_pending_booking_context_survives_invalid_exact_time(fake_redis):
+    calendar_service = ConfiguredCreateCalendarService()
+    booking_service = BookingService(
+        calendar_service=calendar_service,
+        language_service=LanguageService(),
+        booking_state_service=_state_service(fake_redis),
+        front_desk_config_service=FrontDeskConfigService("app/data/front_desk_config.json"),
+    )
+    booking_service._save_booking_state(
+        "user-1",
+        state=BookingState.WAITING_FOR_TIME,
+        language="uk",
+        source_channel="instagram",
+        context_summary="хочу на чистку у четвер",
+        requested_date=date(2026, 8, 27),
+        requested_day_label="четвер",
+    )
+    pending = booking_service._get_pending_confirmation("user-1")
+    pending["current_service_id"] = "dental_cleaning"
+    pending["current_service_name"] = "Професійна гігієна зубів"
+    booking_service._save_pending_confirmation("user-1", pending)
+
+    result = booking_service.process_booking_message(
+        sender_id="user-1",
+        message_text="о 22",
+        source_channel="instagram",
+    )
+    reloaded = _booking_service(fake_redis)._get_pending_confirmation("user-1")
+
+    assert result["status"] == "outside_business_hours"
+    assert result["booking_state"] == "WAITING_FOR_TIME"
+    assert result["requested_date"] == "2026-08-27"
+    assert reloaded["state"] == "WAITING_FOR_TIME"
+    assert reloaded["requested_date"] == "2026-08-27"
+    assert reloaded["current_service_id"] == "dental_cleaning"
+    assert reloaded["current_service_name"] == "Професійна гігієна зубів"
+    assert "start_dt" not in reloaded
+    assert "suggested_slots" not in reloaded
+    assert booking_service._get_completed_booking("user-1") is None
     assert calendar_service.availability_checks == []
     assert calendar_service.created_events == []
 

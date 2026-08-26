@@ -2495,13 +2495,29 @@ class BookingService:
         duration_minutes = self._booking_duration_minutes()
 
         if not self._is_within_business_hours(requested_dt, duration_minutes):
-            self._clear_pending_confirmation(sender_id)
+            preserves_active_time_context = (
+                requested_dt_override is not None
+                and previous_pending
+                and previous_pending.get("state") == BookingState.WAITING_FOR_TIME.value
+                and previous_pending.get("requested_date")
+            )
+            if not preserves_active_time_context:
+                self._clear_pending_confirmation(sender_id)
             return {
                 "status": "outside_business_hours",
                 "reply_text": self._build_outside_business_hours_reply(language),
                 "requires_confirmation": False,
-                "booking_state": BookingState.NONE.value,
+                "booking_state": (
+                    BookingState.WAITING_FOR_TIME.value
+                    if preserves_active_time_context
+                    else BookingState.NONE.value
+                ),
                 "start_dt": requested_dt.isoformat(),
+                "requested_date": (
+                    previous_pending.get("requested_date")
+                    if preserves_active_time_context
+                    else None
+                ),
             }
 
         early_contact_details = self._extract_contact_details(message_text)
