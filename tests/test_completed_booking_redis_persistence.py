@@ -301,7 +301,7 @@ def test_redis_completed_booking_prevents_duplicate_calendar_create(fake_redis):
 
     result = restarted.start_booking_flow(
         sender_id="user-1",
-        message_text="Іван client@example.com 27.04 12:00",
+        message_text="Іван client@example.com 27.04.2026 12:00",
         source_channel="instagram",
         current_service_id="dental_cleaning",
         current_service_name="Професійна чистка зубів",
@@ -355,7 +355,7 @@ def test_redis_completed_booking_dedupes_equivalent_ukrainian_phone(fake_redis):
 
     result = restarted.start_booking_flow(
         sender_id="user-1",
-        message_text="Іван 27.04 12:00 +380987121328",
+        message_text="Іван 27.04.2026 12:00 +380987121328",
         source_channel="instagram",
         current_service_id="dental_cleaning",
         current_service_name="Професійна чистка зубів",

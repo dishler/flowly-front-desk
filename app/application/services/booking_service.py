@@ -2012,9 +2012,12 @@ class BookingService:
         normalized = " ".join(text.strip().lower().split())
         normalized = re.sub(r"[^\w\sа-яіїєґё:]", " ", normalized, flags=re.IGNORECASE)
         normalized = " ".join(normalized.split())
+        acceptance_markers = r"(?:а|давайте|давай|тоді|можна|на|о|так|да|ок|окей|добре)"
+        acceptance_suffixes = r"(?:підійде|підходить|норм|нормально|добре|ок|окей)"
         patterns = [
-            r"^(?:давайте|давай|тоді|на|о)\s+(\d{1,2})$",
-            r"^(\d{1,2})\s+(?:підійде|підходить|норм|нормально|добре|ок|окей)$",
+            rf"^{acceptance_markers}\s+(\d{{1,2}})$",
+            rf"^(\d{{1,2}})\s+{acceptance_suffixes}$",
+            rf"^{acceptance_markers}\s+(\d{{1,2}})\s+{acceptance_suffixes}$",
         ]
         for pattern in patterns:
             match = re.fullmatch(pattern, normalized)
@@ -2210,6 +2213,12 @@ class BookingService:
                 source_channel=source_channel or pending.get("source_channel"),
                 context_summary=pending.get("context_summary"),
             )
+            accepted_pending = self._get_pending_confirmation(sender_id) or {}
+            if pending.get("current_service_id"):
+                accepted_pending["current_service_id"] = pending.get("current_service_id")
+            if pending.get("current_service_name"):
+                accepted_pending["current_service_name"] = pending.get("current_service_name")
+            self._save_pending_confirmation(sender_id, accepted_pending)
             return {
                 "status": "waiting_for_contact",
                 "reply_text": self._build_suggested_slot_accepted_reply(language, matched_slot),
@@ -2285,6 +2294,23 @@ class BookingService:
                     break
 
         if matched_slot is None:
+            # A busy-alternative suggestion (as opposed to a multi-slot
+            # day/window list) isn't a fixed menu -- naming a different
+            # explicit time here is a correction, so it must get a fresh
+            # availability check rather than being rejected outright.
+            if pending.get("busy_alternative") and requested_date is not None:
+                corrected_dt = self._combine_requested_date_and_time(
+                    requested_date,
+                    requested_time,
+                )
+                return self.start_booking_flow(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    requested_dt_override=corrected_dt,
+                    current_service_id=pending.get("current_service_id"),
+                    current_service_name=pending.get("current_service_name"),
+                )
             return {
                 "status": "availability_time_not_offered",
                 "reply_text": self._build_day_slots_reply(
@@ -2385,6 +2411,92 @@ class BookingService:
                 return marker, weekday
         return None
 
+    def _ukrainian_month_map(self) -> dict[str, tuple[int, str]]:
+        return {
+            "січень": (1, "січня"),
+            "січня": (1, "січня"),
+            "сiчень": (1, "січня"),
+            "сiчня": (1, "січня"),
+            "лютий": (2, "лютого"),
+            "лютого": (2, "лютого"),
+            "березень": (3, "березня"),
+            "березня": (3, "березня"),
+            "квітень": (4, "квітня"),
+            "квітня": (4, "квітня"),
+            "квiтень": (4, "квітня"),
+            "квiтня": (4, "квітня"),
+            "травень": (5, "травня"),
+            "травня": (5, "травня"),
+            "червень": (6, "червня"),
+            "червня": (6, "червня"),
+            "липень": (7, "липня"),
+            "липня": (7, "липня"),
+            "серпень": (8, "серпня"),
+            "серпня": (8, "серпня"),
+            "вересень": (9, "вересня"),
+            "вересня": (9, "вересня"),
+            "жовтень": (10, "жовтня"),
+            "жовтня": (10, "жовтня"),
+            "листопад": (11, "листопада"),
+            "листопада": (11, "листопада"),
+            "грудень": (12, "грудня"),
+            "грудня": (12, "грудня"),
+        }
+
+    def _month_name_pattern(self) -> str:
+        month_names = self._ukrainian_month_map()
+        return "|".join(re.escape(name) for name in sorted(month_names, key=len, reverse=True))
+
+    def _next_calendar_date(self, *, day: int, month: int, explicit_year: int | None = None) -> date | None:
+        now = datetime.now(self.timezone).date()
+        year = explicit_year or now.year
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if explicit_year is None and candidate < now:
+            try:
+                candidate = date(year + 1, month, day)
+            except ValueError:
+                return None
+        return candidate
+
+    def _extract_absolute_calendar_date(self, text: str) -> dict[str, Any] | None:
+        normalized = self._normalize_booking_text(text)
+        month_names = self._ukrainian_month_map()
+        month_pattern = self._month_name_pattern()
+
+        month_match = re.search(
+            rf"(?<![\dA-Za-zА-Яа-яІіЇїЄєҐґЁё])"
+            rf"(\d{{1,2}})(?:\s*(?:-?\s*(?:го|ого)))?\s+({month_pattern})"
+            rf"(?:\s+(\d{{4}}))?"
+            rf"(?![A-Za-zА-Яа-яІіЇїЄєҐґЁё])",
+            normalized,
+        )
+        if month_match:
+            day = int(month_match.group(1))
+            month, month_label = month_names[month_match.group(2)]
+            explicit_year = int(month_match.group(3)) if month_match.group(3) else None
+            target = self._next_calendar_date(day=day, month=month, explicit_year=explicit_year)
+            if target is None:
+                return None
+            return {"date": target, "day_label": f"{day} {month_label}"}
+
+        numeric_match = re.search(
+            r"(?<!\d)(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?!\d)",
+            normalized,
+        )
+        if numeric_match:
+            day = int(numeric_match.group(1))
+            month = int(numeric_match.group(2))
+            explicit_year = int(numeric_match.group(3)) if numeric_match.group(3) else None
+            target = self._next_calendar_date(day=day, month=month, explicit_year=explicit_year)
+            if target is None:
+                return None
+            return {"date": target, "day_label": f"{day:02d}.{month:02d}"}
+
+        return None
+
     def _format_day_label_for_reply(self, value: str | None) -> str | None:
         if not value:
             return None
@@ -2466,6 +2578,10 @@ class BookingService:
         if "сьогодні" in normalized or "today" in normalized:
             return {"date": now.date(), "day_label": "сьогодні"}
 
+        absolute_date = self._extract_absolute_calendar_date(normalized)
+        if absolute_date is not None:
+            return absolute_date
+
         weekday_match = self._find_weekday_marker(normalized)
         if weekday_match is not None:
             marker, weekday = weekday_match
@@ -2505,11 +2621,16 @@ class BookingService:
             return self._resolve_hour_minute(colon_match.group(1), colon_match.group(2))
 
         # о/на/at HH [MM] -- marker-anchored, space-separated minutes optional.
-        marker_match = re.search(
+        # Skip matches that are actually "<day> <month name>" date phrases
+        # (e.g. "на 3 вересня"), so the day number isn't mistaken for an hour.
+        month_pattern = self._month_name_pattern()
+        for marker_match in re.finditer(
             r"\b(?:о|об|на|at)\s*(\d{1,2})(?:\s+(\d{1,3}))?\b",
             normalized,
-        )
-        if marker_match:
+        ):
+            tail = normalized[marker_match.end():].lstrip(" ,.-")
+            if re.match(rf"(?:го|ого)?\s*(?:{month_pattern})\b", tail):
+                continue
             return self._resolve_hour_minute(marker_match.group(1), marker_match.group(2))
 
         # Bare "HH" or "HH MM" -- only when it is the entire message, so an
@@ -3109,10 +3230,16 @@ class BookingService:
         if match:
             day = int(match.group(1))
             month = int(match.group(2))
-            year = int(match.group(3)) if match.group(3) else now.year
+            parsed_date = self._next_calendar_date(
+                day=day,
+                month=month,
+                explicit_year=int(match.group(3)) if match.group(3) else None,
+            )
+            if parsed_date is None:
+                return None
             hour = int(match.group(4))
             minute = int(match.group(5))
-            return datetime(year, month, day, hour, minute, tzinfo=self.timezone)
+            return datetime.combine(parsed_date, time(hour, minute), tzinfo=self.timezone)
 
         time_match = re.search(r"(\d{1,2}):(\d{2})", normalized)
         if time_match:
@@ -3161,6 +3288,14 @@ class BookingService:
                 minute=requested_time.minute,
                 second=0,
                 microsecond=0,
+            )
+
+        absolute_date = self._extract_absolute_calendar_date(normalized)
+        if requested_time is not None and absolute_date is not None:
+            return datetime.combine(
+                absolute_date["date"],
+                requested_time,
+                tzinfo=self.timezone,
             )
 
         if requested_time is not None and (
@@ -3609,11 +3744,15 @@ class BookingService:
                 else:
                     self._save_booking_state(
                         sender_id,
-                        state=BookingState.WAITING_FOR_CONTACT,
+                        state=BookingState.WAITING_FOR_TIME,
                         language=language,
-                        start_dt=next_slot,
                         source_channel=source_channel,
                         context_summary=message_text[:280],
+                        requested_date=requested_dt.date(),
+                        requested_day_label=self._format_date_label_for_reply(
+                            requested_dt.date(),
+                            language,
+                        ),
                         customer_name=(
                             early_contact_details["customer_name"] if previous_pending else None
                         ),
@@ -3623,30 +3762,29 @@ class BookingService:
                     pending = self._get_pending_confirmation(sender_id) or {}
 
                 pending["availability_context"] = True
+                pending["busy_alternative"] = True
                 pending["suggested_slots"] = [
                     {
                         "day_key": (
-                            "selected_day" if is_selected_time_correction else "tomorrow"
+                            "selected_day"
+                            if (is_selected_time_correction or not is_pending_time_selection)
+                            else "tomorrow"
                         ),
                         "start_dt": self._serialize_pending_start_dt(next_slot),
                     }
                 ]
                 pending["last_suggested_day"] = (
-                    "selected_day" if is_selected_time_correction else "tomorrow"
+                    "selected_day"
+                    if (is_selected_time_correction or not is_pending_time_selection)
+                    else "tomorrow"
                 )
                 self._save_pending_confirmation(sender_id, pending)
 
                 return {
                     "status": "slot_suggested",
                     "reply_text": f"На жаль, {self._format_scheduled_time_for_reply(requested_dt, language)} зайнятий. Як щодо {self._format_scheduled_time_for_reply(next_slot, language)}?",
-                    "booking_state": (
-                        BookingState.WAITING_FOR_TIME.value
-                        if is_selected_time_correction or is_pending_time_selection
-                        else BookingState.WAITING_FOR_CONTACT.value
-                    ),
-                    "requires_contact": not (
-                        is_selected_time_correction or is_pending_time_selection
-                    ),
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requires_contact": False,
                     "suggested_slots": pending["suggested_slots"],
                     "start_dt": next_slot.isoformat(),
                 }
