@@ -78,6 +78,15 @@ class MessageProcessor:
             )
         return word in normalized
 
+    def _looks_like_book_me_request(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:можна|можете|можеш|прошу|хочу\s+щоб|хотів\s+би\s+щоб|хотіла\s+б\s+щоб)"
+                r"\s+(?:будь\s+ласка\s+)?мене\s+записа(?:ти|ли)\b",
+                normalized,
+            )
+        )
+
     def _find_configured_front_desk_service(self, text: str) -> dict[str, Any] | None:
         if not self._is_configured_front_desk_mode():
             return None
@@ -435,6 +444,8 @@ class MessageProcessor:
         ]
         if any(marker in normalized for marker in explicit_booking_markers):
             return True
+        if self._looks_like_book_me_request(normalized):
+            return True
 
         return self._looks_like_booking_message(text)
 
@@ -457,7 +468,10 @@ class MessageProcessor:
             "new booking",
             "book a new",
         ]
-        return any(marker in normalized for marker in explicit_booking_markers)
+        return (
+            any(marker in normalized for marker in explicit_booking_markers)
+            or self._looks_like_book_me_request(normalized)
+        )
 
     def _looks_like_cancel_request(self, text: str) -> bool:
         normalized = text.strip().lower()

@@ -515,6 +515,29 @@ async def test_dental_booking_intent_still_enters_booking(dental_processor):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "можна мене записати",
+        "можете мене записати",
+        "запишіть мене",
+        "запиши мене",
+        "хочу щоб мене записали",
+    ],
+)
+async def test_dental_book_me_intent_forms_enter_booking(text):
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["booking_result"]["booking_state"] == "WAITING_FOR_TIME"
+    assert processor.booking_service.get_booking_state("patient-1").value == "WAITING_FOR_TIME"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_service_booking_want_cleaning_enters_booking():
     processor, _calendar = _build_dental_processor()
 
