@@ -844,6 +844,7 @@ class BookingService:
                 "requested_date": requested_date.isoformat(),
             }
 
+        early_contact_details = self._extract_trailing_contact_details(message_text)
         self._save_booking_state(
             sender_id,
             state=BookingState.WAITING_FOR_TIME,
@@ -852,6 +853,9 @@ class BookingService:
             context_summary=message_text[:280],
             requested_date=requested_date,
             requested_day_label=requested_day_label,
+            customer_name=early_contact_details["customer_name"],
+            contact_email=early_contact_details["email"],
+            contact_phone=early_contact_details["phone"],
         )
         pending = self._get_pending_confirmation(sender_id) or {}
         day_key = "selected_day"
@@ -907,6 +911,7 @@ class BookingService:
                 "requested_date": requested_date.isoformat(),
             }
 
+        early_contact_details = self._extract_trailing_contact_details(message_text)
         self._save_booking_state(
             sender_id,
             state=BookingState.WAITING_FOR_TIME,
@@ -915,6 +920,9 @@ class BookingService:
             context_summary=message_text[:280],
             requested_date=requested_date,
             requested_day_label=requested_day_label,
+            customer_name=early_contact_details["customer_name"],
+            contact_email=early_contact_details["email"],
+            contact_phone=early_contact_details["phone"],
         )
         pending = self._get_pending_confirmation(sender_id) or {}
         day_key = "selected_day"
@@ -990,6 +998,55 @@ class BookingService:
 
     def extract_contact_details(self, text: str) -> Dict[str, Any]:
         return self._extract_contact_details(text)
+
+    def _empty_contact_details(self) -> Dict[str, Any]:
+        return {
+            "email": None,
+            "phone": None,
+            "customer_name": None,
+            "emails": [],
+            "phones": [],
+            "has_email": False,
+            "has_phone": False,
+            "has_name": False,
+        }
+
+    def _extract_trailing_contact_details(self, text: str) -> Dict[str, Any]:
+        parts = [part.strip() for part in re.split(r"[,;\n\r]+", text) if part.strip()]
+        if len(parts) < 2:
+            return self._empty_contact_details()
+        contact_details = self._extract_contact_details(" ".join(parts[1:]))
+        if not contact_details["has_phone"] and not contact_details["has_email"]:
+            return self._empty_contact_details()
+        return contact_details
+
+    def _merge_contact_details_with_pending(
+        self,
+        contact_details: Dict[str, Any],
+        pending: dict[str, Any] | None,
+        message_text: str,
+    ) -> Dict[str, Any]:
+        if not pending:
+            return contact_details
+
+        merged = dict(contact_details)
+        if (
+            not contact_details["email"]
+            and not contact_details["phone"]
+            and (
+                self._parse_time_only(message_text) is not None
+                or self._extract_suggested_slot_selection_time(message_text) is not None
+                or self._extract_hour_only(message_text) is not None
+            )
+        ):
+            merged["customer_name"] = None
+        merged["customer_name"] = merged["customer_name"] or pending.get("customer_name")
+        merged["email"] = contact_details["email"] or pending.get("contact_email")
+        merged["phone"] = contact_details["phone"] or pending.get("contact_phone")
+        merged["has_name"] = bool(merged["customer_name"])
+        merged["has_email"] = bool(merged["email"])
+        merged["has_phone"] = bool(merged["phone"])
+        return merged
 
     def _is_non_customer_name_text(self, text: str) -> bool:
         normalized = " ".join(text.strip().lower().split())
@@ -1871,6 +1928,33 @@ class BookingService:
         language = pending.get("language") or self._detect_language(message_text)
         normalized = message_text.strip().lower()
 
+        slots_by_day = self._suggested_slots_from_pending(pending)
+        preferred_day = pending.get("last_suggested_day") or "tomorrow"
+        candidate_slots = slots_by_day.get(preferred_day, [])
+        if self._looks_like_another_time_request(message_text) and not pending.get("time_window"):
+            requested_date = candidate_slots[0].date() if candidate_slots else None
+            requested_day_label = pending.get("requested_day_label")
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_TIME,
+                language=language,
+                source_channel=source_channel or pending.get("source_channel"),
+                context_summary=pending.get("context_summary"),
+                requested_date=requested_date,
+                requested_day_label=requested_day_label,
+                customer_name=pending.get("customer_name"),
+                contact_email=pending.get("contact_email"),
+                contact_phone=pending.get("contact_phone"),
+            )
+            return {
+                "status": "waiting_for_time",
+                "reply_text": self._build_another_time_reply(language, requested_day_label),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+            }
+
         relative_window = self._extract_relative_time_window(message_text, pending)
         if relative_window is not None:
             requested_date, requested_day_label, time_window = relative_window
@@ -1884,9 +1968,6 @@ class BookingService:
                 time_window=time_window,
             )
 
-        slots_by_day = self._suggested_slots_from_pending(pending)
-        preferred_day = pending.get("last_suggested_day") or "tomorrow"
-        candidate_slots = slots_by_day.get(preferred_day, [])
         if self._is_confirmation_text(normalized) and len(candidate_slots) == 1:
             matched_slot = candidate_slots[0]
             self._save_booking_state(
@@ -2551,6 +2632,9 @@ class BookingService:
             context_summary=previous_pending.get("context_summary"),
             requested_date=preserved_requested_date,
             requested_day_label=previous_pending.get("requested_day_label"),
+            customer_name=previous_pending.get("customer_name"),
+            contact_email=previous_pending.get("contact_email"),
+            contact_phone=previous_pending.get("contact_phone"),
         )
         preserved_pending = self._get_pending_confirmation(sender_id) or {}
         if previous_pending.get("current_service_id"):
@@ -2626,6 +2710,9 @@ class BookingService:
             context_summary=pending.get("context_summary"),
             requested_date=target_date,
             requested_day_label=pending.get("requested_day_label"),
+            customer_name=pending.get("customer_name"),
+            contact_email=pending.get("contact_email"),
+            contact_phone=pending.get("contact_phone"),
         )
         refreshed_pending = self._get_pending_confirmation(sender_id) or {}
         if pending.get("current_service_id"):
@@ -2863,6 +2950,12 @@ class BookingService:
         requested_dt = requested_dt_override or (None if time_window else self._parse_requested_datetime(message_text))
         partial_date = self._extract_requested_date(message_text)
         daypart = self._extract_daypart(message_text)
+        if requested_dt_override is None and requested_dt is not None:
+            rejected_time, negation_replacement_time, _wants_alternative = (
+                self._extract_negated_time_context(message_text)
+            )
+            if rejected_time is not None and negation_replacement_time is None:
+                requested_dt = None
 
         if not self._booking_enabled():
             return {
@@ -2884,6 +2977,7 @@ class BookingService:
         if requested_dt is None:
             requested_date = partial_date.get("date") if partial_date else None
             requested_day_label = partial_date.get("day_label") if partial_date else None
+            early_contact_details = self._extract_trailing_contact_details(message_text)
             if requested_date is not None and time_window is not None:
                 return self._suggest_time_window_slots(
                     sender_id,
@@ -2912,6 +3006,9 @@ class BookingService:
                 context_summary=message_text[:280],
                 requested_date=requested_date,
                 requested_day_label=requested_day_label,
+                customer_name=early_contact_details["customer_name"],
+                contact_email=early_contact_details["email"],
+                contact_phone=early_contact_details["phone"],
             )
             return {
                 "status": "waiting_for_time",
@@ -2959,7 +3056,11 @@ class BookingService:
                 ),
             }
 
-        early_contact_details = self._extract_contact_details(message_text)
+        early_contact_details = self._merge_contact_details_with_pending(
+            self._extract_contact_details(message_text),
+            previous_pending,
+            message_text,
+        )
         if self._has_required_contact(
             customer_name=early_contact_details["customer_name"],
             email=early_contact_details["email"],
@@ -3056,6 +3157,10 @@ class BookingService:
             self._clear_pending_confirmation(sender_id)
             if next_slot:
                 previous_pending_state = previous_pending.get("state") if previous_pending else None
+                is_pending_time_selection = (
+                    requested_dt_override is not None
+                    and previous_pending_state == BookingState.WAITING_FOR_TIME.value
+                )
                 is_selected_time_correction = (
                     requested_dt_override is not None
                     and previous_pending_state == BookingState.WAITING_FOR_CONTACT.value
@@ -3078,8 +3183,51 @@ class BookingService:
                             source_channel=source_channel,
                             context_summary=message_text[:280],
                             requested_date=requested_dt.date(),
+                            customer_name=(
+                                previous_pending.get("customer_name") if previous_pending else None
+                            ),
+                            contact_email=(
+                                previous_pending.get("contact_email") if previous_pending else None
+                            ),
+                            contact_phone=(
+                                previous_pending.get("contact_phone") if previous_pending else None
+                            ),
                         )
                         pending = self._get_pending_confirmation(sender_id) or {}
+                elif is_pending_time_selection:
+                    self._save_booking_state(
+                        sender_id,
+                        state=BookingState.WAITING_FOR_TIME,
+                        language=language,
+                        source_channel=source_channel or (
+                            previous_pending.get("source_channel") if previous_pending else None
+                        ),
+                        context_summary=(
+                            previous_pending.get("context_summary")
+                            if previous_pending
+                            else message_text[:280]
+                        ),
+                        requested_date=(
+                            previous_pending.get("requested_date")
+                            if previous_pending
+                            else requested_dt.date()
+                        ),
+                        requested_day_label=(
+                            previous_pending.get("requested_day_label")
+                            if previous_pending
+                            else None
+                        ),
+                        customer_name=(
+                            previous_pending.get("customer_name") if previous_pending else None
+                        ),
+                        contact_email=(
+                            previous_pending.get("contact_email") if previous_pending else None
+                        ),
+                        contact_phone=(
+                            previous_pending.get("contact_phone") if previous_pending else None
+                        ),
+                    )
+                    pending = self._get_pending_confirmation(sender_id) or {}
                 else:
                     self._save_booking_state(
                         sender_id,
@@ -3088,6 +3236,11 @@ class BookingService:
                         start_dt=next_slot,
                         source_channel=source_channel,
                         context_summary=message_text[:280],
+                        customer_name=(
+                            early_contact_details["customer_name"] if previous_pending else None
+                        ),
+                        contact_email=early_contact_details["email"] if previous_pending else None,
+                        contact_phone=early_contact_details["phone"] if previous_pending else None,
                     )
                     pending = self._get_pending_confirmation(sender_id) or {}
 
@@ -3110,10 +3263,12 @@ class BookingService:
                     "reply_text": f"На жаль, {self._format_scheduled_time_for_reply(requested_dt, language)} зайнятий. Як щодо {self._format_scheduled_time_for_reply(next_slot, language)}?",
                     "booking_state": (
                         BookingState.WAITING_FOR_TIME.value
-                        if is_selected_time_correction
+                        if is_selected_time_correction or is_pending_time_selection
                         else BookingState.WAITING_FOR_CONTACT.value
                     ),
-                    "requires_contact": not is_selected_time_correction,
+                    "requires_contact": not (
+                        is_selected_time_correction or is_pending_time_selection
+                    ),
                     "suggested_slots": pending["suggested_slots"],
                     "start_dt": next_slot.isoformat(),
                 }
@@ -3252,7 +3407,11 @@ class BookingService:
             context_summary=message_text[:280],
             customer_name=(
                 contact_details["customer_name"]
-                if contact_details["has_phone"] or contact_details["has_email"]
+                if (
+                    contact_details["has_phone"]
+                    or contact_details["has_email"]
+                    or (previous_pending and previous_pending.get("customer_name"))
+                )
                 else None
             ),
             contact_email=contact_details["email"],

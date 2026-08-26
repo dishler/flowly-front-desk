@@ -385,6 +385,8 @@ def test_redis_pending_booking_context_survives_invalid_exact_time(fake_redis):
         context_summary="хочу на чистку у четвер",
         requested_date=date(2026, 8, 27),
         requested_day_label="четвер",
+        customer_name="Дмитро",
+        contact_phone="0987121328",
     )
     pending = booking_service._get_pending_confirmation("user-1")
     pending["current_service_id"] = "dental_cleaning"
@@ -405,6 +407,8 @@ def test_redis_pending_booking_context_survives_invalid_exact_time(fake_redis):
     assert reloaded["requested_date"] == "2026-08-27"
     assert reloaded["current_service_id"] == "dental_cleaning"
     assert reloaded["current_service_name"] == "Професійна гігієна зубів"
+    assert reloaded["customer_name"] == "Дмитро"
+    assert reloaded["contact_phone"] == "0987121328"
     assert "start_dt" not in reloaded
     assert "suggested_slots" not in reloaded
     assert booking_service._get_completed_booking("user-1") is None
@@ -428,6 +432,8 @@ def test_redis_busy_time_correction_preserves_service_context_and_stays_suggesti
         context_summary="хочу на чистку у четвер о 14",
         start_dt=datetime(2026, 8, 27, 14, 0, tzinfo=kyiv),
         requested_date=date(2026, 8, 27),
+        customer_name="Дмитро",
+        contact_phone="0987121328",
     )
     pending = booking_service._get_pending_confirmation("user-1")
     pending["current_service_id"] = "dental_cleaning"
@@ -451,6 +457,8 @@ def test_redis_busy_time_correction_preserves_service_context_and_stays_suggesti
     assert reloaded["requested_date"] == "2026-08-27"
     assert reloaded["current_service_id"] == "dental_cleaning"
     assert reloaded["current_service_name"] == "Професійна гігієна зубів"
+    assert reloaded["customer_name"] == "Дмитро"
+    assert reloaded["contact_phone"] == "0987121328"
     assert reloaded["suggested_slots"] == [
         {"day_key": "selected_day", "start_dt": "2026-08-27T17:00:00+03:00"}
     ]
