@@ -56,7 +56,12 @@ class MessageProcessor:
 
     def _normalize_for_booking_keywords(self, text: str) -> str:
         normalized = " ".join(text.strip().lower().split())
-        return re.sub(r"([а-яіїєґ])\1+", r"\1", normalized)
+        normalized = re.sub(r"([а-яіїєґ])\1+", r"\1", normalized)
+        if hasattr(self, "booking_service") and self.booking_service is not None:
+            normalize_booking_text = getattr(self.booking_service, "_normalize_booking_text", None)
+            if callable(normalize_booking_text):
+                normalized = normalize_booking_text(normalized)
+        return normalized
 
     def _contains_booking_keyword(self, normalized: str, keyword: str) -> bool:
         if keyword == "кол":
@@ -303,6 +308,7 @@ class MessageProcessor:
             "записатись",
             "запис на",
             "запис до",
+            "записуй",
             "візит",
             "прийом",
             "кол",
@@ -319,6 +325,7 @@ class MessageProcessor:
             "потрібен",
             "потрібно",
             "запишіть",
+            "записуй",
             "записати",
             "забронювати",
             "брон",
@@ -429,7 +436,7 @@ class MessageProcessor:
         return self.booking_service._parse_requested_datetime(text) is not None
 
     def _looks_like_reschedule_request(self, text: str) -> bool:
-        normalized = text.strip().lower()
+        normalized = self._normalize_for_booking_keywords(text)
         markers = [
             "перенести",
             "перенес",
@@ -458,6 +465,7 @@ class MessageProcessor:
             "хочу ще один запис",
             "запишіть мене",
             "запиши мене",
+            "записуй",
             "записати мене",
             "можна записатися",
             "можна записатись",
@@ -484,6 +492,7 @@ class MessageProcessor:
             "хочу ще один запис",
             "запишіть мене",
             "запиши мене",
+            "записуй",
             "записати мене",
             "можна записатися",
             "можна записатись",
@@ -579,6 +588,10 @@ class MessageProcessor:
             "available slots",
         ]
         if any(marker in normalized for marker in appointment_markers):
+            return True
+
+        compact = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        if compact == "коли":
             return True
 
         has_date = self.booking_service._extract_requested_date(text) is not None
@@ -1407,7 +1420,7 @@ class MessageProcessor:
         return "Супер. Для якого бізнесу розглядаєте бота і що хочете автоматизувати в першу чергу?"
 
     def _looks_like_booking_pause_or_postpone(self, text: str) -> bool:
-        normalized = self._normalize_for_conversation_matching(text)
+        normalized = self._normalize_for_booking_keywords(text)
         markers = [
             "пізніше",
             "потім",
@@ -1417,6 +1430,25 @@ class MessageProcessor:
             "пізніше напишу",
             "я подумаю",
             "давайте пізніше",
+        ]
+        return any(marker in normalized for marker in markers)
+
+    def _looks_like_active_booking_continuation(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        if self.booking_service._is_confirmation_text(normalized):
+            return True
+        markers = [
+            "підходить",
+            "підійде",
+            "записуй",
+            "запишіть",
+            "давайте",
+            "давай",
+            "коли",
+            "який час",
+            "які є години",
+            "є час",
+            "вільний час",
         ]
         return any(marker in normalized for marker in markers)
 
@@ -2222,6 +2254,33 @@ class MessageProcessor:
         ]
         return any(marker in normalized for marker in greeting_markers)
 
+    def _has_substantive_after_greeting(self, user_text: str) -> bool:
+        normalized = " ".join(user_text.strip().lower().split())
+        greeting_prefix = (
+            r"^(?:привіт|вітаю|доброго дня|доброго|добрий день|добрий вечір|"
+            r"hello|hi|hey)[\s,!.-]*"
+        )
+        remainder = re.sub(greeting_prefix, "", normalized, count=1).strip()
+        if not remainder:
+            return False
+        substantive_markers = [
+            "?",
+            "скільки",
+            "коштує",
+            "ціна",
+            "хочу",
+            "запис",
+            "працює",
+            "робите",
+            "вставляєте",
+            "є у вас",
+            "де",
+            "адрес",
+            "як до",
+            "коли",
+        ]
+        return len(remainder.split()) >= 2 or any(marker in remainder for marker in substantive_markers)
+
     def _prepend_first_greeting_if_needed(
         self,
         sender_id: str,
@@ -2473,6 +2532,12 @@ class MessageProcessor:
                     message_text=message.user_message,
                     source_channel=message.platform,
                 )
+                if booking_result is None:
+                    booking_result = self.booking_service.handle_availability_question(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        source_channel=message.platform,
+                    )
                 if booking_result is not None:
                     return self._build_booking_reply_result(
                         message=message,
@@ -2764,6 +2829,29 @@ class MessageProcessor:
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
 
+        if (
+            self._is_configured_front_desk_mode()
+            and self._looks_like_active_booking_continuation(message.user_message)
+        ):
+            context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
+            service_id = context.get("current_service_id")
+            if service_id:
+                booking_result = self.booking_service.start_booking_flow(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                    current_service_id=str(service_id),
+                    current_service_name=context.get("current_service_name"),
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_request",
+                    booking_result=booking_result,
+                    fallback_service_id=str(service_id),
+                    fallback_service_name=context.get("current_service_name"),
+                )
+
         if not (
             self._looks_like_booking_message(message.user_message)
             or self._looks_like_datetime_only_message(message.user_message)
@@ -2805,6 +2893,7 @@ class MessageProcessor:
 
             if (
                 self._looks_like_greeting_text(message.user_message)
+                and not self._has_substantive_after_greeting(message.user_message)
                 and not self._looks_like_booking_message(message.user_message)
             ):
                 return self._build_direct_reply_result(

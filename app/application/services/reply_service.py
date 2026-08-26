@@ -214,12 +214,52 @@ class ReplyService:
             if self.knowledge_service
             else None
         )
+        if service is None:
+            service = self._find_bounded_consultation_service(normalized)
         price_requested = (
             self._looks_like_price_query(normalized)
             or intent == IntentType.PRICE
             or (service is not None and self._looks_like_how_much_marker(normalized))
         )
         service_context_id = context.get("current_service_id")
+
+        if self._looks_like_anesthesia_question(normalized):
+            target_service = service
+            if target_service is None and service_context_id:
+                target_service = self.knowledge_service.get_service_by_id(str(service_context_id))
+            if target_service is not None:
+                self._remember_front_desk_context(
+                    message.sender_id,
+                    current_service_id=str(target_service.get("id") or ""),
+                    question_context="pending_anesthesia",
+                )
+                return (
+                    f"Щодо «{target_service.get('name')}»: у базі немає точного правила про анестезію. "
+                    "Це краще підтвердити з адміністратором або лікарем перед візитом."
+                )
+        if context.get("question_context") == "pending_anesthesia" and service is not None:
+            self._remember_front_desk_context(
+                message.sender_id,
+                current_service_id=str(service.get("id") or ""),
+                question_context="pending_anesthesia",
+            )
+            return (
+                f"Щодо «{service.get('name')}»: у базі немає точного правила про анестезію. "
+                "Це краще підтвердити з адміністратором або лікарем перед візитом."
+            )
+
+        if self._looks_like_directions_origin(normalized, context):
+            return self._reply_with_directions_origin(message.sender_id, text)
+
+        if self._looks_like_directions_question(normalized):
+            self._remember_front_desk_context(
+                message.sender_id,
+                question_context="directions",
+            )
+            return "Звідки вам зручно їхати? Напишіть орієнтир або станцію метро, і я підкажу в межах наявної інформації."
+
+        if service is None and self._looks_like_service_availability_question(normalized):
+            return "Потрібно уточнити у клініки, чи ця послуга доступна. Можу допомогти записати вас на консультацію, щоб адміністратор або лікар підтвердили деталі."
 
         if service is not None and price_requested:
             return self._reply_with_service_price(message.sender_id, service)
@@ -371,6 +411,9 @@ class ReplyService:
         if self.knowledge_service is None:
             return None
 
+        if self._looks_like_special_date_hours_question(normalized):
+            return "Святковий або спеціальний графік потрібно уточнити в клініки. У базі є лише звичайний тижневий графік."
+
         faq_answer = self.knowledge_service.find_faq_answer(normalized, language)
         if faq_answer:
             return faq_answer
@@ -397,6 +440,27 @@ class ReplyService:
                     return "Контакти: " + ", ".join(parts) + "."
 
         return None
+
+    def _looks_like_special_date_hours_question(self, normalized: str) -> bool:
+        has_hours_context = any(
+            marker in normalized
+            for marker in ["працює", "працюєте", "відкрит", "графік", "години", "open", "hours"]
+        )
+        holiday_markers = [
+            "різдво",
+            "рiздво",
+            "новий рік",
+            "новий рiк",
+            "свято",
+            "святков",
+            "вихідн",
+            "пасха",
+            "великдень",
+            "holiday",
+            "christmas",
+            "new year",
+        ]
+        return has_hours_context and any(marker in normalized for marker in holiday_markers)
 
     def _get_pricing_reply(self, language: str) -> str:
         if not self._is_legacy_flowly_kb() and self.knowledge_service is not None:
@@ -479,6 +543,61 @@ class ReplyService:
     def _looks_like_price_query(self, normalized: str) -> bool:
         markers = ["скільки коштує", "коштує", "ціна", "ціну", "ціни", "вартість", "прайс", "price", "cost"]
         return any(marker in normalized for marker in markers)
+
+    def _looks_like_anesthesia_question(self, normalized: str) -> bool:
+        return any(marker in normalized for marker in ["анестез", "знебол", "обезбол"])
+
+    def _looks_like_directions_question(self, normalized: str) -> bool:
+        markers = [
+            "як до вас добрати",
+            "як добрати",
+            "як доїхати",
+            "як дістатися",
+            "маршрут",
+            "route",
+            "directions",
+        ]
+        return any(marker in normalized for marker in markers)
+
+    def _looks_like_directions_origin(self, normalized: str, context: dict[str, Any]) -> bool:
+        if context.get("question_context") != "directions":
+            return False
+        if self._looks_like_directions_question(normalized):
+            return False
+        return bool(normalized) and len(normalized.split()) <= 5
+
+    def _looks_like_service_availability_question(self, normalized: str) -> bool:
+        has_question = any(
+            marker in normalized
+            for marker in ["чи ", "є у вас", "робите", "вставляєте", "ставите", "можна"]
+        )
+        has_service_like_object = any(
+            marker in normalized
+            for marker in ["вінір", "венір", "коронк", "брекет", "елайнер", "послуг", "процедур"]
+        )
+        return has_question and has_service_like_object
+
+    def _find_bounded_consultation_service(self, normalized: str) -> dict[str, Any] | None:
+        if self.knowledge_service is None:
+            return None
+        compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
+        standalone = compact in {"огляд", "огляду"}
+        dental_qualified = bool(
+            re.search(r"\bогляд\s+стоматолог", compact)
+            or re.search(r"\bстоматологічн\w*\s+огляд\b", compact)
+        )
+        if not standalone and not dental_qualified:
+            return None
+        return self.knowledge_service.get_service_by_id("dental_consultation")
+
+    def _reply_with_directions_origin(self, sender_id: str, origin_text: str) -> str:
+        business = self.knowledge_service.get_business() if self.knowledge_service else {}
+        location = business.get("location") or "адресу клініки потрібно уточнити."
+        self._remember_front_desk_context(sender_id, question_context="directions")
+        return (
+            f"Ви їдете від: {origin_text.strip()}. Точного маршруту в базі немає, "
+            f"але адреса клініки: {location}. Для найзручнішого маршруту краще звірити дорогу в навігаторі або уточнити в адміністратора."
+        )
 
     def _looks_like_how_much_marker(self, normalized: str) -> bool:
         markers = ["скільки", "сколько", "how much"]
