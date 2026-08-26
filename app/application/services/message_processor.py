@@ -405,6 +405,29 @@ class MessageProcessor:
         )
         return has_date_word and has_time
 
+    def _has_active_booking_payload(self, text: str) -> bool:
+        if self._looks_like_business_hours_question(text):
+            return False
+        if self._looks_like_cancel_request(text) or self._looks_like_reschedule_request(text):
+            return True
+        if self._message_has_valid_contact_data(text):
+            return True
+        service = self._find_configured_front_desk_service(text)
+        normalized = self._normalize_for_booking_keywords(text)
+        if service is not None and (
+            not self._looks_like_service_faq_request(normalized)
+            or self._has_service_booking_action_signal(normalized)
+            or self.booking_service._extract_requested_date(text) is not None
+            or self.booking_service._parse_time_only(text) is not None
+            or self.booking_service._parse_requested_datetime(text) is not None
+        ):
+            return True
+        if self.booking_service._extract_requested_date(text) is not None:
+            return True
+        if self.booking_service._parse_time_only(text) is not None:
+            return True
+        return self.booking_service._parse_requested_datetime(text) is not None
+
     def _looks_like_reschedule_request(self, text: str) -> bool:
         normalized = text.strip().lower()
         markers = [
@@ -531,22 +554,7 @@ class MessageProcessor:
 
     def _looks_like_active_booking_availability_question(self, text: str) -> bool:
         normalized = self._normalize_for_conversation_matching(text)
-        business_hours_markers = [
-            "графік",
-            "години роботи",
-            "робочі години",
-            "режим роботи",
-            "до котрої",
-            "працюєте",
-            "працює",
-            "працювати",
-            "відкриті",
-            "зачинені",
-            "закриті",
-            "working hours",
-            "business hours",
-        ]
-        if any(marker in normalized for marker in business_hours_markers):
+        if self._looks_like_business_hours_question(text):
             return False
 
         appointment_markers = [
@@ -578,6 +586,25 @@ class MessageProcessor:
             return True
 
         return "підлаштуюсь" in normalized and "що є" in normalized
+
+    def _looks_like_business_hours_question(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        business_hours_markers = [
+            "графік",
+            "години роботи",
+            "робочі години",
+            "режим роботи",
+            "до котрої",
+            "працюєте",
+            "працює",
+            "працювати",
+            "відкриті",
+            "зачинені",
+            "закриті",
+            "working hours",
+            "business hours",
+        ]
+        return any(marker in normalized for marker in business_hours_markers)
 
     def _looks_like_time_window_constraint(self, text: str) -> bool:
         normalized = " ".join(text.strip().lower().replace("–", "-").replace("—", "-").split())
@@ -689,10 +716,14 @@ class MessageProcessor:
                 "кров сильно",
                 "не зупиняється кров",
                 "травма",
+                "вибили зуб",
                 "вибив зуб",
+                "вибито зуб",
                 "зламав зуб",
-                "набряк",
+                "набрякла щока",
                 "опухло",
+                "опухла щока",
+                "опухла десна",
                 "пухне",
                 "важко дихати",
                 "не можу дихати",
@@ -703,7 +734,21 @@ class MessageProcessor:
             bleeding_context = "кров" in normalized and any(
                 marker in normalized for marker in ["тече", "сильно", "багато", "не зупин"]
             )
-            if urgent_context or bleeding_context or any(marker in normalized for marker in emergency_markers):
+            swelling_context = bool(
+                re.search(r"\b(?:опух\w*|набрякл\w*|набряк\w*)\b", normalized)
+                and re.search(r"\b(?:щок\w*|десн\w*|сильно)\b", normalized)
+            )
+            knocked_tooth_context = bool(
+                re.search(r"\b(?:вибил\w*|вибив\w*|вибито)\b", normalized)
+                and re.search(r"\bзуб\w*\b", normalized)
+            )
+            if (
+                urgent_context
+                or bleeding_context
+                or swelling_context
+                or knocked_tooth_context
+                or any(marker in normalized for marker in emergency_markers)
+            ):
                 return (
                     "medical_emergency",
                     "Це може бути невідкладна ситуація. Будь ласка, зверніться до екстреної медичної допомоги або найближчого чергового медичного закладу. У чаті не можу безпечно оцінити стан.",
@@ -716,6 +761,7 @@ class MessageProcessor:
                 "поставте діагноз",
                 "який діагноз",
                 "діагноз",
+                "це карієс",
                 "що робити",
                 "шо робити",
                 "что делать",
@@ -725,7 +771,11 @@ class MessageProcessor:
                 for marker in ["болить зуб", "біль у зубі", "болить ясн", "сильний біль", "дуже болить"]
             )
             asks_diagnosis = any(marker in normalized for marker in diagnosis_markers)
-            if (has_symptom and asks_diagnosis) or (has_symptom and "що це" in normalized):
+            if (
+                (has_symptom and asks_diagnosis)
+                or (has_symptom and "що це" in normalized)
+                or "це карієс" in normalized
+            ):
                 return (
                     "diagnosis_request",
                     "Не можу поставити діагноз у чаті. Для цього потрібен огляд стоматолога; можу допомогти записати вас на консультацію або візит.",
@@ -2308,6 +2358,22 @@ class MessageProcessor:
             active_service_id, active_service_name = self._get_pending_front_desk_service_context(
                 message.sender_id
             )
+            if self._looks_like_cancel_request(message.user_message):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
             if self._looks_like_booking_pause_or_postpone(message.user_message):
                 booking_result = self.booking_service.process_booking_message(
                     sender_id=message.sender_id,
@@ -2415,6 +2481,76 @@ class MessageProcessor:
                         booking_result=booking_result,
                         fallback_service_id=active_service_id,
                         fallback_service_name=active_service_name,
+                    )
+
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and self._looks_like_availability_question(message.user_message)
+            ):
+                booking_result = self.booking_service.handle_availability_question(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_availability_question",
+                    booking_result=booking_result,
+                    fallback_service_id=active_service_id,
+                    fallback_service_name=active_service_name,
+                )
+
+            if self._has_active_booking_payload(message.user_message):
+                service = self._find_configured_front_desk_service(message.user_message)
+                pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
+                booking_service_id = active_service_id
+                booking_service_name = active_service_name
+                if service and service.get("id"):
+                    booking_service_id = str(service["id"])
+                    booking_service_name = str(service.get("name") or "")
+                    pending["current_service_id"] = booking_service_id
+                    if booking_service_name:
+                        pending["current_service_name"] = booking_service_name
+                    self.booking_service._save_pending_confirmation(message.sender_id, pending)
+
+                requested_dt_override = None
+                if (
+                    pending.get("start_dt")
+                    and self.booking_service._extract_requested_date(message.user_message) is None
+                    and self.booking_service._parse_requested_datetime(message.user_message) is None
+                    and self.booking_service._parse_time_only(message.user_message) is None
+                ):
+                    try:
+                        requested_dt_override = self.booking_service._deserialize_pending_start_dt(
+                            pending["start_dt"]
+                        )
+                    except Exception:
+                        requested_dt_override = None
+
+                if requested_dt_override is not None:
+                    booking_result = self.booking_service.start_booking_flow(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        source_channel=message.platform,
+                        requested_dt_override=requested_dt_override,
+                        current_service_id=booking_service_id,
+                        current_service_name=booking_service_name,
+                    )
+                else:
+                    booking_result = self.booking_service.process_booking_message(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        source_channel=message.platform,
+                    )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=booking_service_id,
+                        fallback_service_name=booking_service_name,
                     )
 
             grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)

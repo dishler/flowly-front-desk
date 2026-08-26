@@ -524,6 +524,12 @@ class BookingService:
             return f"Супер, {customer_name}, {label} підтвердили 🙌 Зв’яжемося з вами у домовлений час."
         return f"Супер, {label} підтвердили 🙌 Зв’яжемося з вами у домовлений час."
 
+    def _build_idempotent_already_confirmed_reply(self, language: str, start_dt: datetime) -> str:
+        return f"У вас уже є підтверджений {self._appointment_label()} на {self._format_scheduled_time_for_reply(start_dt, language)}."
+
+    def _build_missing_service_reply(self, language: str) -> str:
+        return "На яку послугу хочете записатися?"
+
     def _build_cancelled_reply(self, language: str) -> str:
         return "Добре, не бронюю. Якщо хочете, можете надіслати інший час."
 
@@ -828,6 +834,8 @@ class BookingService:
         requested_date: date,
         requested_day_label: str | None,
         daypart: dict[str, Any],
+        current_service_id: str | None = None,
+        current_service_name: str | None = None,
     ) -> Dict[str, Any]:
         status, slots = self._get_verified_daypart_slots(
             requested_date=requested_date,
@@ -860,6 +868,10 @@ class BookingService:
         pending = self._get_pending_confirmation(sender_id) or {}
         day_key = "selected_day"
         pending["availability_context"] = True
+        if current_service_id:
+            pending["current_service_id"] = current_service_id
+        if current_service_name:
+            pending["current_service_name"] = current_service_name
         pending["suggested_slots"] = [
             {
                 "day_key": day_key,
@@ -895,6 +907,8 @@ class BookingService:
         requested_date: date,
         requested_day_label: str | None,
         time_window: dict[str, Any],
+        current_service_id: str | None = None,
+        current_service_name: str | None = None,
     ) -> Dict[str, Any]:
         status, slots = self._get_verified_time_window_slots(
             requested_date=requested_date,
@@ -927,6 +941,10 @@ class BookingService:
         pending = self._get_pending_confirmation(sender_id) or {}
         day_key = "selected_day"
         pending["availability_context"] = True
+        if current_service_id:
+            pending["current_service_id"] = current_service_id
+        if current_service_name:
+            pending["current_service_name"] = current_service_name
         pending["suggested_slots"] = [
             {
                 "day_key": day_key,
@@ -1015,9 +1033,121 @@ class BookingService:
         parts = [part.strip() for part in re.split(r"[,;\n\r]+", text) if part.strip()]
         if len(parts) < 2:
             return self._empty_contact_details()
-        contact_details = self._extract_contact_details(" ".join(parts[1:]))
+        contact_index = next(
+            (
+                index
+                for index, part in enumerate(parts)
+                if self.PHONE_RE.search(part) or self.EMAIL_RE.search(part)
+            ),
+            None,
+        )
+        if contact_index is None:
+            return self._empty_contact_details()
+
+        contact_details = self._extract_contact_details(parts[contact_index])
+        if contact_index > 0:
+            name_part = parts[contact_index - 1]
+            if not re.search(
+                r"\b(?:хочу|запишіть|запиши|записатись|записатися|на|в|у|о|at|book)\b",
+                name_part.lower(),
+            ):
+                name_details = self._extract_contact_details(name_part)
+                if name_details["has_name"]:
+                    contact_details["customer_name"] = name_details["customer_name"]
         if not contact_details["has_phone"] and not contact_details["has_email"]:
             return self._empty_contact_details()
+        contact_details["has_name"] = bool(contact_details["customer_name"])
+        return contact_details
+
+    def _extract_anchored_contact_details(self, text: str) -> Dict[str, Any]:
+        trailing = self._extract_trailing_contact_details(text)
+        if trailing["has_phone"] or trailing["has_email"]:
+            return trailing
+
+        anchor_match = self.PHONE_RE.search(text) or self.EMAIL_RE.search(text)
+        if anchor_match is None:
+            return self._empty_contact_details()
+
+        contact_details = self._extract_contact_details(anchor_match.group(0))
+        before_anchor = text[:anchor_match.start()].strip(" ,;:-\n\r")
+        after_anchor = text[anchor_match.end():].strip(" ,;:-\n\r")
+
+        for candidate in (before_anchor, after_anchor):
+            if not candidate:
+                continue
+            if re.search(r"\b(?:хочу|запишіть|запиши|записатись|записатися|на|в|у|о|at|book)\b", candidate.lower()):
+                tail_name_match = re.search(
+                    r"([A-ZА-ЯІЇЄҐ][A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{1,}"
+                    r"(?:\s+[A-ZА-ЯІЇЄҐ][A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{1,}){0,2})$",
+                    candidate,
+                )
+                if tail_name_match:
+                    contact_details["customer_name"] = tail_name_match.group(1)
+                    break
+                continue
+            name_details = self._extract_contact_details(candidate)
+            if name_details["has_name"]:
+                contact_details["customer_name"] = name_details["customer_name"]
+                break
+
+        contact_details["has_name"] = bool(contact_details["customer_name"])
+        return contact_details
+
+    def _looks_like_standalone_customer_name_input(self, text: str) -> bool:
+        normalized = " ".join(text.strip().split())
+        if not normalized or "?" in normalized or re.search(r"\d", normalized):
+            return False
+        lowered = normalized.lower()
+        if (
+            self._is_confirmation_text(lowered)
+            or self._is_rejection(lowered)
+            or self._looks_like_another_time_request(lowered)
+            or self._looks_like_unrelated_question_during_booking(lowered)
+            or self._parse_time_only(lowered) is not None
+            or self._extract_time_window(lowered) is not None
+            or self._extract_daypart(lowered) is not None
+            or self._extract_requested_date(lowered) is not None
+        ):
+            return False
+        if re.search(
+            r"\b(?:хочу|запишіть|запиши|записатись|записатися|запис|можна|давайте|"
+            r"не\s+можу|не\s+виходить|зайнятий|будь\s+ласка|дякую|скільки|де|"
+            r"послуг|чистк|гігієн|консультац|відбілюван|карієс|прийом)\b",
+            lowered,
+        ):
+            return False
+        if re.match(r"(?i)^(?:мене\s+звати|моє\s+ім'?я|ім'?я)\s+\S+", normalized):
+            return True
+        if re.match(
+            r"(?i)^я\s+[A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{2,}"
+            r"(?:\s+[A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{2,}){0,2}$",
+            normalized,
+        ):
+            return True
+        return bool(
+            re.fullmatch(
+                r"[A-ZА-ЯІЇЄҐ][A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{1,}"
+                r"(?:\s+[A-ZА-ЯІЇЄҐ][A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{1,}){0,2}",
+                normalized,
+            )
+        )
+
+    def _extract_waiting_for_contact_details(self, text: str) -> Dict[str, Any]:
+        if self.PHONE_RE.search(text) or self.EMAIL_RE.search(text):
+            return self._extract_anchored_contact_details(text)
+
+        if not self._looks_like_standalone_customer_name_input(text):
+            return self._empty_contact_details()
+
+        contact_details = self._extract_contact_details(text)
+        explicit_i_match = re.match(
+            r"(?i)^я\s+([A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{2,}"
+            r"(?:\s+[A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{2,}){0,2})$",
+            " ".join(text.strip().split()),
+        )
+        if explicit_i_match:
+            contact_details["customer_name"] = explicit_i_match.group(1)
+            contact_details["has_name"] = True
         return contact_details
 
     def _merge_contact_details_with_pending(
@@ -1564,8 +1694,8 @@ class BookingService:
         customer_name = completed.get("customer_name")
         event_id = completed.get("calendar_event_id") or completed.get("event_id")
         return {
-            "status": "confirmed",
-            "reply_text": self._build_both_contacts_confirmed_reply(language, start_dt, customer_name),
+            "status": "already_confirmed",
+            "reply_text": self._build_idempotent_already_confirmed_reply(language, start_dt),
             "event_created": False,
             "booking_state": BookingState.NONE.value,
             "event_id": event_id,
@@ -2003,7 +2133,11 @@ class BookingService:
 
         requested_time = self._extract_suggested_slot_selection_time(message_text)
         if requested_time is None:
-            contact_details = self._extract_contact_details(message_text)
+            contact_details = (
+                self._extract_anchored_contact_details(message_text)
+                if self.PHONE_RE.search(message_text) or self.EMAIL_RE.search(message_text)
+                else self._extract_contact_details(message_text)
+            )
             if self._has_required_contact(
                 customer_name=contact_details["customer_name"] or pending.get("customer_name"),
                 email=contact_details["email"] or pending.get("contact_email"),
@@ -2561,8 +2695,10 @@ class BookingService:
         service_name = service.get("name")
         if service_id:
             pending["service_id"] = str(service_id)
+            pending["current_service_id"] = str(service_id)
         if service_name:
             pending["service_name"] = str(service_name)
+            pending["current_service_name"] = str(service_name)
         pending["context_summary"] = message_text[:280]
         pending["customer_name"] = None
         self._save_pending_confirmation(sender_id, pending)
@@ -2895,20 +3031,30 @@ class BookingService:
             if "сьогодні" in normalized or "today" in normalized:
                 return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        hour_match = re.search(r"\b(\d{1,2})\b", normalized)
+        requested_time = self._parse_time_only(normalized)
         weekday_match = self._find_weekday_marker(normalized)
         matched_weekday = weekday_match[1] if weekday_match is not None else None
+        if requested_time is None and weekday_match is not None:
+            weekday_marker = weekday_match[0]
+            marker_index = normalized.find(weekday_marker)
+            suffix = normalized[marker_index + len(weekday_marker) :] if marker_index >= 0 else ""
+            suffix_time = self._parse_time_only(suffix.strip(" ,.;"))
+            if suffix_time is not None:
+                requested_time = suffix_time
 
-        if hour_match and matched_weekday is not None:
-            hour = int(hour_match.group(1))
-            if 0 <= hour <= 23:
-                days_ahead = (matched_weekday - now.weekday()) % 7
-                if days_ahead == 0:
-                    days_ahead = 7
-                base = now + timedelta(days=days_ahead)
-                return base.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if requested_time is not None and matched_weekday is not None:
+            days_ahead = (matched_weekday - now.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            base = now + timedelta(days=days_ahead)
+            return base.replace(
+                hour=requested_time.hour,
+                minute=requested_time.minute,
+                second=0,
+                microsecond=0,
+            )
 
-        if hour_match and (
+        if requested_time is not None and (
             "завтра" in normalized
             or "tomorrow" in normalized
             or "післязавтра" in normalized
@@ -2916,25 +3062,94 @@ class BookingService:
             or "сьогодні" in normalized
             or "today" in normalized
         ):
-            hour = int(hour_match.group(1))
-            minute = 0
+            if "післязавтра" in normalized or "day after tomorrow" in normalized:
+                base = now + timedelta(days=2)
+                return base.replace(
+                    hour=requested_time.hour,
+                    minute=requested_time.minute,
+                    second=0,
+                    microsecond=0,
+                )
 
-            if 0 <= hour <= 23:
-                if "післязавтра" in normalized or "day after tomorrow" in normalized:
-                    base = now + timedelta(days=2)
-                    return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if "завтра" in normalized or "tomorrow" in normalized:
+                base = now + timedelta(days=1)
+                return base.replace(
+                    hour=requested_time.hour,
+                    minute=requested_time.minute,
+                    second=0,
+                    microsecond=0,
+                )
 
-                if "завтра" in normalized or "tomorrow" in normalized:
-                    base = now + timedelta(days=1)
-                    return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-                if "сьогодні" in normalized or "today" in normalized:
-                    return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if "сьогодні" in normalized or "today" in normalized:
+                return now.replace(
+                    hour=requested_time.hour,
+                    minute=requested_time.minute,
+                    second=0,
+                    microsecond=0,
+                )
 
         return None
 
     def handle_booking_request(self, sender_id: str, message_text: str) -> Dict[str, Any]:
         return self.start_booking_flow(sender_id=sender_id, message_text=message_text)
+
+    def _service_required_for_booking(self) -> bool:
+        return self.front_desk_config_service is not None
+
+    def _text_has_service_hint(self, text: str) -> bool:
+        normalized = " ".join(text.strip().lower().split())
+        service_markers = [
+            "чистк",
+            "гігієн",
+            "консультац",
+            "карієс",
+            "пломб",
+            "відбілюван",
+            "протез",
+            "імплант",
+            "дитяч",
+        ]
+        return any(marker in normalized for marker in service_markers)
+
+    def _save_missing_service_context(
+        self,
+        *,
+        sender_id: str,
+        language: str,
+        message_text: str,
+        source_channel: str | None,
+        requested_dt: datetime | None = None,
+        requested_date: date | None = None,
+        requested_day_label: str | None = None,
+        contact_details: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        contact_details = contact_details or self._empty_contact_details()
+        preserved_date = requested_date or (requested_dt.date() if requested_dt else None)
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            start_dt=requested_dt,
+            source_channel=source_channel,
+            context_summary=message_text[:280],
+            requested_date=preserved_date,
+            requested_day_label=requested_day_label,
+            customer_name=contact_details["customer_name"],
+            contact_email=contact_details["email"],
+            contact_phone=contact_details["phone"],
+        )
+        pending = self._get_pending_confirmation(sender_id) or {}
+        pending["missing_service"] = True
+        self._save_pending_confirmation(sender_id, pending)
+        return {
+            "status": "waiting_for_service",
+            "reply_text": self._build_missing_service_reply(language),
+            "requires_confirmation": False,
+            "event_created": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+            "start_dt": requested_dt.isoformat() if requested_dt else None,
+            "requested_date": preserved_date.isoformat() if preserved_date else None,
+        }
 
     def start_booking_flow(
         self,
@@ -2973,6 +3188,56 @@ class BookingService:
             bool(message_text),
             requested_dt is not None,
         )
+        service_known = bool(current_service_id)
+
+        idempotency_contact_details = (
+            self._extract_anchored_contact_details(message_text)
+            if requested_dt is not None and (self.PHONE_RE.search(message_text) or self.EMAIL_RE.search(message_text))
+            else self._empty_contact_details()
+        )
+        if requested_dt is not None and (
+            idempotency_contact_details["email"] or idempotency_contact_details["phone"]
+        ):
+            completed_match = self._completed_booking_matches_candidate(
+                sender_id,
+                start_dt=requested_dt,
+                email=idempotency_contact_details["email"],
+                phone=idempotency_contact_details["phone"],
+                current_service_id=current_service_id,
+            )
+            if completed_match is not None:
+                logger.info(
+                    "Booking semantic retry skipped before service/availability sender_id=%s start_dt=%s",
+                    sender_id,
+                    requested_dt.isoformat(),
+                )
+                self._clear_pending_confirmation(sender_id)
+                return self._build_idempotent_confirmed_result(
+                    language=language,
+                    completed=completed_match,
+                )
+
+        if (
+            self._service_required_for_booking()
+            and not service_known
+        ):
+            requested_date = partial_date.get("date") if partial_date else None
+            requested_day_label = partial_date.get("day_label") if partial_date else None
+            early_contact_details = (
+                idempotency_contact_details
+                if self.PHONE_RE.search(message_text) or self.EMAIL_RE.search(message_text)
+                else self._empty_contact_details()
+            )
+            return self._save_missing_service_context(
+                sender_id=sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel,
+                requested_dt=requested_dt,
+                requested_date=requested_date,
+                requested_day_label=requested_day_label,
+                contact_details=early_contact_details,
+            )
 
         if requested_dt is None:
             requested_date = partial_date.get("date") if partial_date else None
@@ -2987,6 +3252,8 @@ class BookingService:
                     requested_date=requested_date,
                     requested_day_label=requested_day_label,
                     time_window=time_window,
+                    current_service_id=current_service_id,
+                    current_service_name=current_service_name,
                 )
             if requested_date is not None and daypart is not None:
                 return self._suggest_daypart_slots(
@@ -2997,6 +3264,8 @@ class BookingService:
                     requested_date=requested_date,
                     requested_day_label=requested_day_label,
                     daypart=daypart,
+                    current_service_id=current_service_id,
+                    current_service_name=current_service_name,
                 )
             self._save_booking_state(
                 sender_id,
@@ -3057,7 +3326,7 @@ class BookingService:
             }
 
         early_contact_details = self._merge_contact_details_with_pending(
-            self._extract_contact_details(message_text),
+            self._extract_anchored_contact_details(message_text),
             previous_pending,
             message_text,
         )
@@ -3277,11 +3546,41 @@ class BookingService:
                 "status": "unavailable",
                 "reply_text": self._build_unavailable_reply(language),
                 "requires_confirmation": False,
+                "event_created": False,
+                "start_dt": requested_dt.isoformat(),
+            }
+
+        contact_details = early_contact_details
+        if (
+            self._service_required_for_booking()
+            and not service_known
+            and (
+                (previous_pending and previous_pending.get("missing_service"))
+                or contact_details["email"]
+                or contact_details["phone"]
+            )
+        ):
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_TIME,
+                language=language,
+                start_dt=requested_dt,
+                source_channel=source_channel,
+                context_summary=message_text[:280],
+                requested_date=requested_dt.date(),
+                customer_name=contact_details["customer_name"],
+                contact_email=contact_details["email"],
+                contact_phone=contact_details["phone"],
+            )
+            return {
+                "status": "waiting_for_service",
+                "reply_text": self._build_missing_service_reply(language),
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "start_dt": requested_dt.isoformat(),
             }
 
         self._clear_pending_confirmation(sender_id)
-        contact_details = early_contact_details
 
         if self._has_required_contact(
             customer_name=contact_details["customer_name"],
@@ -3372,6 +3671,9 @@ class BookingService:
                         "booking_state": BookingState.NONE.value,
                         "event_id": created.event_id,
                         "event_link": created.html_link,
+                        "customer_name": contact_details["customer_name"],
+                        "contact_email": contact_details["email"],
+                        "contact_phone": contact_details["phone"],
                     }
                 else:
                     logger.warning(
@@ -3417,6 +3719,13 @@ class BookingService:
             contact_email=contact_details["email"],
             contact_phone=contact_details["phone"],
         )
+        pending = self._get_pending_confirmation(sender_id) or {}
+        if current_service_id:
+            pending["current_service_id"] = current_service_id
+        if current_service_name:
+            pending["current_service_name"] = current_service_name
+        if current_service_id or current_service_name:
+            self._save_pending_confirmation(sender_id, pending)
 
         return {
             "status": "waiting_for_contact",
@@ -3511,6 +3820,43 @@ class BookingService:
                 pending["requested_date"] = pending_requested_date.isoformat()
                 pending["requested_day_label"] = partial_date.get("day_label")
                 self._save_pending_confirmation(sender_id, pending)
+
+            if self._service_required_for_booking() and not pending.get("current_service_id"):
+                contact_details = self._extract_waiting_for_contact_details(message_text)
+                if contact_details["customer_name"]:
+                    pending["customer_name"] = contact_details["customer_name"]
+                if contact_details["email"]:
+                    pending["contact_email"] = contact_details["email"]
+                if contact_details["phone"]:
+                    pending["contact_phone"] = contact_details["phone"]
+                preserved_start_dt = None
+                if requested_time is not None and pending_requested_date is not None:
+                    preserved_start_dt = self._combine_requested_date_and_time(
+                        pending_requested_date,
+                        requested_time,
+                    )
+                    pending["start_dt"] = self._serialize_pending_start_dt(preserved_start_dt)
+                    pending["requested_date"] = pending_requested_date.isoformat()
+                elif pending.get("start_dt"):
+                    try:
+                        preserved_start_dt = self._deserialize_pending_start_dt(pending["start_dt"])
+                    except Exception:
+                        preserved_start_dt = None
+                pending["missing_service"] = True
+                self._save_pending_confirmation(sender_id, pending)
+                return {
+                    "status": "waiting_for_service",
+                    "reply_text": self._build_missing_service_reply(language),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "start_dt": preserved_start_dt.isoformat() if preserved_start_dt else None,
+                    "requested_date": (
+                        pending_requested_date.isoformat()
+                        if pending_requested_date is not None
+                        else pending.get("requested_date")
+                    ),
+                }
 
             if time_window is None and partial_date and pending.get("time_window"):
                 time_window = self._deserialize_pending_time_window(pending)
@@ -3649,7 +3995,7 @@ class BookingService:
                     "requested_date": requested_date.isoformat() if requested_date else None,
                 }
 
-            contact_details = self._extract_contact_details(message_text)
+            contact_details = self._extract_waiting_for_contact_details(message_text)
 
             if (
                 not contact_details["has_name"]
@@ -3746,6 +4092,18 @@ class BookingService:
                 "reply_text": self._build_create_failed_reply(language),
                 "event_created": False,
                 "booking_state": BookingState.NONE.value,
+            }
+
+        if self._service_required_for_booking() and not pending.get("current_service_id"):
+            pending["missing_service"] = True
+            self._save_pending_confirmation(sender_id, pending)
+            return {
+                "status": "waiting_for_service",
+                "reply_text": self._build_missing_service_reply(language),
+                "event_created": False,
+                "requires_contact": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "start_dt": start_dt.isoformat(),
             }
 
         try:

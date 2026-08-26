@@ -307,7 +307,7 @@ def test_redis_completed_booking_prevents_duplicate_calendar_create(fake_redis):
         current_service_name="Професійна чистка зубів",
     )
 
-    assert result["status"] == "confirmed"
+    assert result["status"] == "already_confirmed"
     assert result["event_created"] is False
     assert result["idempotent"] is True
     assert result["event_id"] == "calendar-event-123"
@@ -361,7 +361,7 @@ def test_redis_completed_booking_dedupes_equivalent_ukrainian_phone(fake_redis):
         current_service_name="Професійна чистка зубів",
     )
 
-    assert result["status"] == "confirmed"
+    assert result["status"] == "already_confirmed"
     assert result["event_created"] is False
     assert result["idempotent"] is True
     assert result["event_id"] == "calendar-event-123"

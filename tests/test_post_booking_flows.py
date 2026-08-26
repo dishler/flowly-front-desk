@@ -976,7 +976,11 @@ async def test_general_availability_fix_keeps_daypart_and_time_window_verified(p
         front_desk_config_service=FrontDeskConfigService("app/data/front_desk_config.json"),
     )
 
-    daypart = booking_service.start_booking_flow("user-1", "хочу записатись у четвер зранку")
+    daypart = booking_service.start_booking_flow(
+        "user-1",
+        "хочу записатись у четвер зранку",
+        current_service_id="dental_cleaning",
+    )
     time_window = booking_service.process_booking_message("user-1", "після 15")
 
     assert daypart["status"] == "daypart_slots_suggested"
@@ -1317,7 +1321,11 @@ async def test_exact_time_booking_outside_hours_rejects_before_calendar_check(pr
         front_desk_config_service=FrontDeskConfigService("app/data/front_desk_config.json"),
     )
 
-    result = booking_service.start_booking_flow("user-1", "сьогодні о 3")
+    result = booking_service.start_booking_flow(
+        "user-1",
+        "сьогодні о 3",
+        current_service_id="dental_cleaning",
+    )
 
     assert result["status"] == "outside_business_hours"
     assert calendar_service.availability_checks == []

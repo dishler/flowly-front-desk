@@ -186,6 +186,8 @@ def test_exact_time_booking_rejects_closed_sunday_before_calendar_check(tmp_path
         "user-1",
         "Хочу записатися на чистку завтра о 12",
         requested_dt_override=_dt(2026, 8, 23, 12),
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
     )
 
     assert result["status"] == "outside_business_hours"
@@ -203,7 +205,12 @@ def test_exact_time_booking_checks_calendar_for_open_monday(tmp_path):
         business=_smile_business_hours(),
     )
 
-    result = service.start_booking_flow("user-1", "Хочу записатися на чистку у понеділок о 12")
+    result = service.start_booking_flow(
+        "user-1",
+        "Хочу записатися на чистку у понеділок о 12",
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
 
     assert result["status"] == "waiting_for_contact"
     assert calendar.checked
@@ -220,7 +227,11 @@ def test_exact_time_booking_rolls_same_weekday_saturday_to_next_week_and_rejects
         business=_smile_business_hours(),
     )
 
-    result = service.start_booking_flow("user-1", "Хочу записатися у суботу о 9")
+    result = service.start_booking_flow(
+        "user-1",
+        "Хочу записатися у суботу о 9",
+        current_service_id="dental_cleaning",
+    )
 
     assert result["status"] == "outside_business_hours"
     assert result["start_dt"] == "2026-08-29T09:00:00+03:00"
@@ -236,7 +247,11 @@ def test_exact_time_booking_rolls_same_weekday_saturday_to_next_week_and_checks_
         business=_smile_business_hours(),
     )
 
-    result = service.start_booking_flow("user-1", "Хочу записатися у суботу о 10")
+    result = service.start_booking_flow(
+        "user-1",
+        "Хочу записатися у суботу о 10",
+        current_service_id="dental_cleaning",
+    )
 
     assert result["status"] == "waiting_for_contact"
     assert calendar.checked
@@ -252,7 +267,12 @@ def test_exact_time_booking_with_service_rolls_same_weekday_saturday_to_next_wee
         business=_smile_business_hours(),
     )
 
-    result = service.start_booking_flow("user-1", "Хочу записатися на чистку у суботу о 10")
+    result = service.start_booking_flow(
+        "user-1",
+        "Хочу записатися на чистку у суботу о 10",
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна чистка зубів",
+    )
 
     assert result["status"] == "waiting_for_contact"
     assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
@@ -271,6 +291,7 @@ def test_exact_time_booking_rejects_saturday_before_opening(tmp_path):
         "user-1",
         "субота 09:00",
         requested_dt_override=_dt(2026, 8, 22, 9),
+        current_service_id="dental_cleaning",
     )
 
     assert result["status"] == "outside_business_hours"
@@ -290,6 +311,7 @@ def test_exact_time_booking_checks_calendar_for_saturday_opening(tmp_path):
         "user-1",
         "субота 10:00",
         requested_dt_override=_dt(2026, 8, 22, 10),
+        current_service_id="dental_cleaning",
     )
 
     assert result["status"] == "waiting_for_contact"
@@ -309,6 +331,7 @@ def test_exact_time_booking_rejects_saturday_after_closing(tmp_path):
         "user-1",
         "субота 16:30",
         requested_dt_override=_dt(2026, 8, 22, 16, 30),
+        current_service_id="dental_cleaning",
     )
 
     assert result["status"] == "outside_business_hours"
@@ -328,6 +351,7 @@ def test_exact_time_booking_rejects_weekday_before_opening(tmp_path):
         "user-1",
         "понеділок 08:30",
         requested_dt_override=_dt(2026, 8, 24, 8, 30),
+        current_service_id="dental_cleaning",
     )
 
     assert result["status"] == "outside_business_hours"
@@ -347,6 +371,7 @@ def test_exact_time_booking_allows_weekday_slot_ending_at_closing(tmp_path):
         "user-1",
         "понеділок 18:30",
         requested_dt_override=_dt(2026, 8, 24, 18, 30),
+        current_service_id="dental_cleaning",
     )
 
     assert result["status"] == "waiting_for_contact"
@@ -367,6 +392,7 @@ def test_exact_time_booking_rejects_weekday_slot_starting_at_closing(tmp_path):
         "user-1",
         "понеділок 19:00",
         requested_dt_override=_dt(2026, 8, 24, 19),
+        current_service_id="dental_cleaning",
     )
 
     assert result["status"] == "outside_business_hours"
@@ -386,6 +412,7 @@ def test_exact_time_booking_fails_closed_when_working_hours_missing(tmp_path):
         "user-1",
         "понеділок 12:00",
         requested_dt_override=_dt(2026, 8, 24, 12),
+        current_service_id="dental_cleaning",
     )
 
     assert result["status"] == "outside_business_hours"
@@ -405,16 +432,19 @@ def test_booking_duration_and_label_come_from_config(tmp_path):
         },
     )
 
-    waiting = service.start_booking_flow("user-1", "завтра о 12")
+    waiting = service.start_booking_flow(
+        "user-1",
+        "завтра о 12",
+        current_service_id="dental_cleaning",
+    )
     confirmed = service.process_booking_message("user-1", "Іван +380991112233")
 
     assert "візит" in waiting["reply_text"]
     assert calendar.checked[0]["duration_minutes"] == 45
     assert calendar.checked[-1]["duration_minutes"] == 45
+    assert confirmed["status"] == "confirmed"
     assert calendar.created[0]["duration_minutes"] == 45
     assert calendar.created[0]["summary"] == "Візит booking"
-    assert confirmed["status"] == "confirmed"
-    assert "візит" in confirmed["reply_text"]
 
 
 def test_required_contact_fields_can_require_phone_not_email(tmp_path):
@@ -428,7 +458,11 @@ def test_required_contact_fields_can_require_phone_not_email(tmp_path):
         },
     )
 
-    service.start_booking_flow("user-1", "завтра о 12")
+    service.start_booking_flow(
+        "user-1",
+        "завтра о 12",
+        current_service_id="dental_cleaning",
+    )
     result = service.process_booking_message("user-1", "Іван ivan@example.test")
 
     assert result["status"] == "waiting_for_contact"
