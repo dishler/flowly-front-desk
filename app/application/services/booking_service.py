@@ -1750,6 +1750,16 @@ class BookingService:
         if selected is not None:
             return selected
 
+        rejected_time, negation_replacement_time, _wants_alternative = (
+            self._extract_negated_time_context(text)
+        )
+        if negation_replacement_time is not None:
+            return negation_replacement_time
+        if rejected_time is not None:
+            # A rejected time (e.g. "не о 14, а о 16" before finding the
+            # replacement) must never be picked up as the selected slot.
+            return None
+
         selected = self._extract_selected_slot_time(text)
         if selected is not None:
             return selected
@@ -2196,6 +2206,125 @@ class BookingService:
 
         return None
 
+    def _extract_negated_time_context(
+        self, text: str
+    ) -> tuple[time | None, time | None, bool]:
+        """Detects a rejected time, an explicit replacement, and whether the
+        user is asking for an alternative -- regardless of whether the
+        rejection cue appears before or after the time it negates.
+
+        Returns (rejected_time, replacement_time, wants_alternative):
+        - rejected_time: the time the user explicitly said is unavailable or
+          unwanted ("не о 14", "о 14 не можу", "о 14 зайнятий",
+          "о 14 не підходить", "на 14 не встигаю", ...), or None.
+        - replacement_time: the explicitly stated positive replacement time
+          when one is given (e.g. "о 14 не можу, а о 16 можу",
+          "о 14 зайнятий, давайте 16", "14 не вийде, 16 підійде"
+          -> time(16, 0)); otherwise None.
+        - wants_alternative: True when the user rejects a time and asks for
+          another one ("є інший час?", "щось пізніше?") without naming a
+          specific replacement.
+        """
+        normalized = " ".join(text.strip().lower().split())
+
+        time_tokens: list[tuple[int, int, time]] = []
+        for match in re.finditer(
+            r"\b(?:о|на|at)?\s*(\d{1,2})(?:\s*:\s*(\d{1,3})|\s+(\d{1,3}))?\b",
+            normalized,
+        ):
+            minute_str = match.group(2) or match.group(3)
+            resolved = self._resolve_hour_minute(match.group(1), minute_str)
+            if resolved is not None:
+                time_tokens.append((match.start(), match.end(), resolved))
+        if not time_tokens:
+            return None, None, False
+
+        replacement_marker_positions = [
+            match.start()
+            for match in re.finditer(r"\b(?:а|тоді|краще|давай|давайте|можна)\b", normalized)
+        ]
+        positive_suffix_spans = [
+            (match.start(), match.end())
+            for match in re.finditer(r"\b(?:підійде|норм|нормально)\b", normalized)
+        ]
+
+        def _nearest_time_index(position: int) -> int | None:
+            best_index = None
+            best_distance = None
+            for index, (start, end, _resolved) in enumerate(time_tokens):
+                distance = min(abs(start - position), abs(end - position))
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_index = index
+            return best_index
+
+        def _next_time_index_at_or_after(position: int) -> int | None:
+            for index, (start, _end, _resolved) in enumerate(time_tokens):
+                if start >= position:
+                    return index
+            return None
+
+        def _previous_time_index_at_or_before(position: int) -> int | None:
+            result = None
+            for index, (_start, end, _resolved) in enumerate(time_tokens):
+                if end <= position:
+                    result = index
+            return result
+
+        rejected_index = None
+
+        # Bare "не" directly attached to a time ("не 14", "не о 14",
+        # "не на 14") -- tightly bound to the number immediately following
+        # it, not merely the nearest one in the sentence.
+        for match in re.finditer(r"\bне\s+(?:(?:о|на)\s+)?(\d{1,2})\b", normalized):
+            index = _nearest_time_index(match.start(1))
+            if index is not None:
+                rejected_index = index
+
+        # Broader rejection cues (verb/adjective forms), associated with the
+        # nearest time regardless of whether the cue precedes or follows it
+        # (e.g. "о 14 не можу", "о 14 зайнятий", "на 14 не встигаю").
+        for match in re.finditer(
+            r"не\s*(?:можу|зможу|вийде|виходить|підходить|встигаю|буду|буде|"
+            r"прийду|прийти|дуже|зручно)"
+            r"|зайнят(?:ий|а|і)",
+            normalized,
+        ):
+            index = _nearest_time_index((match.start() + match.end()) // 2)
+            if index is not None:
+                rejected_index = index
+
+        if rejected_index is None:
+            return None, None, False
+
+        replacement_index = None
+        # "а"/"тоді"/"краще"/"давай"/"давайте"/"можна" precede the time they
+        # introduce, so look forward for the replacement they name.
+        for position in replacement_marker_positions:
+            index = _next_time_index_at_or_after(position)
+            if index is not None and index != rejected_index:
+                replacement_index = index
+        # "підійде"/"норм"/"нормально" follow the time they confirm, so look
+        # backward for it.
+        for start, end in positive_suffix_spans:
+            index = _previous_time_index_at_or_before(end)
+            if index is not None and index != rejected_index:
+                replacement_index = index
+
+        rejected_time = time_tokens[rejected_index][2]
+        replacement_time = (
+            time_tokens[replacement_index][2] if replacement_index is not None else None
+        )
+
+        wants_alternative = replacement_time is None and bool(
+            re.search(
+                r"\b(?:пізніше|інший|інше|іншого|варіант|варіанти|ще)\b",
+                normalized,
+            )
+        )
+
+        return rejected_time, replacement_time, wants_alternative
+
     def _looks_like_booking_correction(self, text: str) -> bool:
         normalized = " ".join(text.strip().lower().split())
         # Standalone-word markers: matched only as a whole token, so they
@@ -2301,25 +2430,25 @@ class BookingService:
             if 0 <= hour <= 23 and 0 <= minute <= 59:
                 return time(hour=hour, minute=minute)
 
+        # "а" is matched as a standalone word so it never fires on the
+        # trailing "а" of "на" (e.g. "не на 14" must not be sliced into a
+        # fake "а 14" replacement clause).
+        standalone_a_matches = list(re.finditer(r"\bа\b", normalized))
         marker_positions = [
-            normalized.rfind(marker)
-            for marker in [
-                "а ",
-                " а ",
-                "ні",
-                "краще",
-                "тоді",
-                "давай",
-                "давайте",
-                "можна",
-                "мав на увазі",
-                "мала на увазі",
-                "маю на увазі",
-                "rather",
-                "instead",
-                "mean",
-                "meant",
-            ]
+            standalone_a_matches[-1].start() if standalone_a_matches else -1,
+            normalized.rfind("ні"),
+            normalized.rfind("краще"),
+            normalized.rfind("тоді"),
+            normalized.rfind("давай"),
+            normalized.rfind("давайте"),
+            normalized.rfind("можна"),
+            normalized.rfind("мав на увазі"),
+            normalized.rfind("мала на увазі"),
+            normalized.rfind("маю на увазі"),
+            normalized.rfind("rather"),
+            normalized.rfind("instead"),
+            normalized.rfind("mean"),
+            normalized.rfind("meant"),
         ]
         last_marker = max(marker_positions)
         if last_marker >= 0:
@@ -2438,6 +2567,93 @@ class BookingService:
             return None
         return self._deserialize_pending_start_dt(raw_start_dt)
 
+    def _offer_verified_alternative_after_rejection(
+        self,
+        *,
+        sender_id: str,
+        pending: dict[str, Any],
+        language: str,
+        state: BookingState,
+        source_channel: str | None,
+        partial_date: dict[str, Any] | None,
+        rejected_time: time,
+    ) -> Dict[str, Any] | None:
+        """Offers a Calendar-verified slot after the user rejects a time,
+        without ever checking the rejected time itself, and without
+        clearing the pending booking."""
+        pending_start_dt = None
+        if state == BookingState.WAITING_FOR_CONTACT:
+            try:
+                pending_start_dt = self._get_pending_start_dt(pending)
+            except Exception:
+                pending_start_dt = None
+
+        pending_requested_date = None
+        if pending.get("requested_date"):
+            try:
+                pending_requested_date = self._deserialize_pending_requested_date(
+                    pending.get("requested_date")
+                )
+            except Exception:
+                pending_requested_date = None
+
+        target_date = partial_date["date"] if partial_date else None
+        if target_date is None:
+            target_date = (
+                pending_start_dt.date() if pending_start_dt is not None else pending_requested_date
+            )
+        if target_date is None:
+            return None
+
+        rejected_dt = self._combine_requested_date_and_time(target_date, rejected_time)
+        try:
+            next_slot = self._find_next_available_slot(rejected_dt)
+        except Exception:
+            logger.exception(
+                "alternative-slot lookup failed after rejection sender_id=%s rejected_dt=%s",
+                sender_id,
+                rejected_dt.isoformat(),
+            )
+            return None
+        if next_slot is None:
+            return None
+
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel or pending.get("source_channel"),
+            context_summary=pending.get("context_summary"),
+            requested_date=target_date,
+            requested_day_label=pending.get("requested_day_label"),
+        )
+        refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+        if pending.get("current_service_id"):
+            refreshed_pending["current_service_id"] = pending.get("current_service_id")
+        if pending.get("current_service_name"):
+            refreshed_pending["current_service_name"] = pending.get("current_service_name")
+        refreshed_pending["availability_context"] = True
+        refreshed_pending["suggested_slots"] = [
+            {
+                "day_key": "selected_day",
+                "start_dt": self._serialize_pending_start_dt(next_slot),
+            }
+        ]
+        refreshed_pending["last_suggested_day"] = "selected_day"
+        self._save_pending_confirmation(sender_id, refreshed_pending)
+
+        return {
+            "status": "slot_suggested",
+            "reply_text": (
+                f"Добре, {self._format_scheduled_time_for_reply(rejected_dt, language)} "
+                f"прибираю. Як щодо {self._format_scheduled_time_for_reply(next_slot, language)}?"
+            ),
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+            "requires_contact": False,
+            "suggested_slots": refreshed_pending["suggested_slots"],
+            "start_dt": next_slot.isoformat(),
+        }
+
     def _merge_booking_correction(
         self,
         *,
@@ -2453,12 +2669,41 @@ class BookingService:
 
         looks_like_correction = self._looks_like_booking_correction(message_text)
         corrected_time = self._extract_corrected_time(message_text) if looks_like_correction else None
-        if corrected_time is None and state == BookingState.WAITING_FOR_CONTACT:
+        rejected_time, negation_replacement_time, wants_alternative = (
+            self._extract_negated_time_context(message_text)
+        )
+        if corrected_time is None and negation_replacement_time is not None:
+            corrected_time = negation_replacement_time
+        if (
+            corrected_time is None
+            and state == BookingState.WAITING_FOR_CONTACT
+            and rejected_time is None
+        ):
+            # A negation-blind fallback here would otherwise let a purely
+            # rejected time (e.g. "точно не о 14") become the selected one.
             corrected_time = self._parse_time_only(message_text)
+
+        partial_date = self._extract_requested_date(message_text)
+
+        if corrected_time is None and rejected_time is not None and wants_alternative:
+            # "о 14 не можу, є інший час?" -- the rejected time must never be
+            # checked/selected, and this must not fall through to generic
+            # postpone/cancellation handling (e.g. a bare "пізніше" marker).
+            alternative_result = self._offer_verified_alternative_after_rejection(
+                sender_id=sender_id,
+                pending=pending,
+                language=language,
+                state=state,
+                source_channel=source_channel,
+                partial_date=partial_date,
+                rejected_time=rejected_time,
+            )
+            if alternative_result is not None:
+                return alternative_result
+
         if not looks_like_correction and corrected_time is None:
             return None
 
-        partial_date = self._extract_requested_date(message_text)
         if partial_date is None and corrected_time is None:
             return None
 
@@ -3076,7 +3321,17 @@ class BookingService:
                     return availability_result
 
             partial_date = self._extract_requested_date(message_text)
-            requested_time = self._parse_time_only(message_text)
+            rejected_time, negation_replacement_time, _wants_alternative = (
+                self._extract_negated_time_context(message_text)
+            )
+            if negation_replacement_time is not None:
+                requested_time = negation_replacement_time
+            elif rejected_time is not None:
+                # A rejected time (e.g. "не о 14") must never be treated as
+                # the time the user is now requesting.
+                requested_time = None
+            else:
+                requested_time = self._parse_time_only(message_text)
             daypart = self._extract_daypart(message_text)
             time_window = self._extract_time_window(message_text)
             pending_requested_date = None
