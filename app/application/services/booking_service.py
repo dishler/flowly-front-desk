@@ -2156,23 +2156,43 @@ class BookingService:
 
         return None
 
+    def _resolve_hour_minute(self, hour_str: str, minute_str: str | None) -> time | None:
+        hour = int(hour_str)
+        if not (0 <= hour <= 23):
+            return None
+        if minute_str is None:
+            return time(hour=hour, minute=0)
+        # An explicit minute token was present but isn't exactly two digits
+        # (e.g. "14 3" or "14 300") -- reject rather than silently falling
+        # back to the bare hour, which would lose the user's intended minutes.
+        if len(minute_str) != 2:
+            return None
+        minute = int(minute_str)
+        if not (0 <= minute <= 59):
+            return None
+        return time(hour=hour, minute=minute)
+
     def _parse_time_only(self, text: str) -> time | None:
         normalized = text.strip().lower()
 
-        time_match = re.search(r"\b(\d{1,2}):(\d{2})\b", normalized)
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = int(time_match.group(2))
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                return time(hour=hour, minute=minute)
+        # HH:MM or HH: MM anywhere in the text (colon is an unambiguous time marker).
+        colon_match = re.search(r"\b(\d{1,2})\s*:\s*(\d{1,3})\b", normalized)
+        if colon_match:
+            return self._resolve_hour_minute(colon_match.group(1), colon_match.group(2))
 
-        hour_match = re.search(r"\b(?:о|на|at)\s*(\d{1,2})(?::00)?\b", normalized)
-        if not hour_match:
-            hour_match = re.fullmatch(r"\s*(\d{1,2})(?::00)?\s*", normalized)
-        if hour_match:
-            hour = int(hour_match.group(1))
-            if 0 <= hour <= 23:
-                return time(hour=hour, minute=0)
+        # о/на/at HH [MM] -- marker-anchored, space-separated minutes optional.
+        marker_match = re.search(
+            r"\b(?:о|на|at)\s*(\d{1,2})(?:\s+(\d{1,3}))?\b",
+            normalized,
+        )
+        if marker_match:
+            return self._resolve_hour_minute(marker_match.group(1), marker_match.group(2))
+
+        # Bare "HH" or "HH MM" -- only when it is the entire message, so an
+        # unrelated number elsewhere in a sentence is never mistaken for a time.
+        bare_match = re.fullmatch(r"\s*(\d{1,2})(?:\s+(\d{1,3}))?\s*", normalized)
+        if bare_match:
+            return self._resolve_hour_minute(bare_match.group(1), bare_match.group(2))
 
         return None
 

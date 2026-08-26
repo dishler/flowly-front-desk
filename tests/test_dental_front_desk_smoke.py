@@ -2604,6 +2604,153 @@ async def test_dental_multiple_alternatives_contact_does_not_select_first():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phrase",
+    ["о 14 30", "на 14 30", "14 30", "о 14: 30", "14: 30", "о 14:30", "на 14:30"],
+)
+async def test_dental_waiting_for_time_space_separated_minutes_never_truncate(phrase):
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 14, 30)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер"))
+    corrected = await processor.process(_message(phrase))
+    contact = await processor.process(_message("Дмитро 0987121328"))
+
+    assert corrected["booking_result"]["start_dt"] == "2026-08-27T14:30:00+03:00"
+    assert contact["booking_result"]["status"] == "confirmed"
+    assert len(calendar.created) == 1
+    assert calendar.created[0]["start_dt"] == _kyiv_dt(2026, 8, 27, 14, 30)
+    assert calendar.checked[0]["start_dt"] == _kyiv_dt(2026, 8, 27, 14, 30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phrase", ["14", "о 14", "на 14"])
+async def test_dental_waiting_for_time_hour_only_still_means_hh00(phrase):
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 14)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер"))
+    result = await processor.process(_message(phrase))
+
+    assert result["booking_result"]["start_dt"] == "2026-08-27T14:00:00+03:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phrase",
+    ["14 60", "25 30", "о 25 30", "14 99", "о 14 3", "14 300"],
+)
+async def test_dental_waiting_for_time_malformed_minutes_rejected_safely(phrase):
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 14, 30)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер"))
+    result = await processor.process(_message(phrase))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert "start_dt" not in pending
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_space_separated_minutes_busy_never_falls_back_to_hh00():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 14), _kyiv_dt(2026, 8, 27, 17, 30),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер"))
+    result = await processor.process(_message("о 14 30"))
+
+    assert result["booking_result"]["status"] == "slot_suggested"
+    assert result["booking_result"]["start_dt"] == "2026-08-27T17:30:00+03:00"
+    assert calendar.checked[0]["start_dt"] == _kyiv_dt(2026, 8, 27, 14, 30)
+    assert all(c["start_dt"].minute != 0 for c in calendar.checked if c["start_dt"].hour == 14)
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_space_separated_minutes_calendar_exception_no_create():
+    calendar = FailingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер"))
+    result = await processor.process(_message("о 14 30"))
+
+    assert result["booking_result"]["status"] == "availability_check_failed"
+    assert result["booking_result"]["event_created"] is False
+    assert calendar.checked == [{"start_dt": _kyiv_dt(2026, 8, 27, 14, 30), "duration_minutes": 30}]
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_waiting_for_contact_correction_space_separated_minutes():
+    calendar = UniqueEventConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 14), _kyiv_dt(2026, 8, 27, 16, 30),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер о 14"))
+    corrected = await processor.process(_message("тоді 16 30"))
+    contact = await processor.process(_message("Дмитро 0987121328"))
+
+    assert corrected["booking_result"]["start_dt"] == "2026-08-27T16:30:00+03:00"
+    assert contact["booking_result"]["status"] == "confirmed"
+    assert len(calendar.created) == 1
+    assert calendar.created[0]["start_dt"] == _kyiv_dt(2026, 8, 27, 16, 30)
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["мені 14 років", "нас буде 14 30 людей", "через 14 30 хвилин"],
+)
+def test_dental_parse_time_only_never_reads_unrelated_number_phrases(phrase):
+    processor, _calendar = _build_dental_processor()
+
+    assert processor.booking_service._parse_time_only(phrase) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phrase",
+    ["нас буде 14 30 людей", "через 14 30 хвилин"],
+)
+async def test_dental_waiting_for_time_unrelated_number_phrases_are_not_times(phrase):
+    calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 14, 30)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку у четвер"))
+    result = await processor.process(_message(phrase))
+
+    assert calendar.checked == []
+    assert calendar.created == []
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    if pending is not None:
+        assert "start_dt" not in pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phrase",
+    ["15 30", "о 15 30", "15: 30", "давайте 15 30"],
+)
+async def test_dental_suggested_slot_parser_unchanged_by_time_only_fix(phrase):
+    calendar = UniqueEventConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 27, 15), _kyiv_dt(2026, 8, 27, 15, 30), _kyiv_dt(2026, 8, 27, 16),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатися у четвер після 14"))
+    result = await processor.process(_message(phrase))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert result["booking_result"]["start_dt"] == "2026-08-27T15:30:00+03:00"
+
+
+@pytest.mark.asyncio
 async def test_dental_suggested_slot_acceptance_does_not_become_customer_name():
     calendar = BusyAt13ConfiguredCalendarService()
     processor, calendar = _build_dental_processor(calendar_service=calendar)
