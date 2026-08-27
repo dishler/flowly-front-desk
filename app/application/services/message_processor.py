@@ -699,6 +699,39 @@ class MessageProcessor:
             return False
         return True
 
+    def _has_single_pending_verified_slot_offer(self, sender_id: str) -> bool:
+        if self.booking_service.get_booking_state(sender_id) != BookingState.WAITING_FOR_TIME:
+            return False
+        pending = self.booking_service._get_pending_confirmation(sender_id) or {}
+        if not pending.get("availability_context"):
+            return False
+        suggested_slots = pending.get("suggested_slots")
+        return isinstance(suggested_slots, list) and len(suggested_slots) == 1
+
+    def _unknown_detail_booking_switch_service(self, sender_id: str, text: str) -> dict[str, Any] | None:
+        if self.memory_service is None:
+            return None
+        context = self.memory_service.get_context(sender_id)
+        if (
+            context.get("question_context") != "unknown_detail_pending"
+            or context.get("unknown_detail_booking_intent") is not True
+        ):
+            return None
+        service = self._find_configured_front_desk_service(text)
+        if service is None:
+            return None
+        normalized = self._normalize_for_booking_keywords(text)
+        if self._looks_like_service_faq_request(normalized) and not self._has_service_booking_action_signal(normalized):
+            return None
+        if not (
+            self._has_service_booking_action_signal(normalized)
+            or re.search(r"\b(?:тоді|то|краще)?\s*на\s+\w+", normalized)
+        ):
+            return None
+        if self._unknown_service_detail_reply_for_booking(sender_id, text) is not None:
+            return None
+        return service
+
     def _looks_like_cancel_request(self, text: str) -> bool:
         normalized = text.strip().lower()
         markers = [
@@ -2745,6 +2778,26 @@ class MessageProcessor:
             active_service_id, active_service_name = self._get_pending_front_desk_service_context(
                 message.sender_id
             )
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and self._has_single_pending_verified_slot_offer(message.sender_id)
+                and self.booking_service._is_confirmation_text(message.user_message)
+            ):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
             if self._looks_like_cancel_request(message.user_message):
                 booking_result = self.booking_service.process_booking_message(
                     sender_id=message.sender_id,
@@ -2790,6 +2843,11 @@ class MessageProcessor:
                     message.user_message,
                 )
                 if unknown_detail_reply is not None:
+                    if self.memory_service is not None:
+                        self.memory_service.update_context(
+                            message.sender_id,
+                            unknown_detail_booking_intent=True,
+                        )
                     return self._build_direct_reply_result(
                         message=message,
                         reply_text=unknown_detail_reply,
@@ -3181,6 +3239,11 @@ class MessageProcessor:
                     message.user_message,
                 )
                 if unknown_detail_reply is not None:
+                    if self.memory_service is not None:
+                        self.memory_service.update_context(
+                            message.sender_id,
+                            unknown_detail_booking_intent=True,
+                        )
                     return self._build_direct_reply_result(
                         message=message,
                         reply_text=unknown_detail_reply,
@@ -3261,6 +3324,60 @@ class MessageProcessor:
                 routing_category="answered_basic",
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
+
+        unknown_detail_booking_switch = self._unknown_detail_booking_switch_service(
+            message.sender_id,
+            message.user_message,
+        )
+        if unknown_detail_booking_switch is not None:
+            service_id = str(unknown_detail_booking_switch.get("id") or "")
+            service_name = str(unknown_detail_booking_switch.get("name") or "")
+            booking_result = self._start_front_desk_booking_flow(
+                sender_id=message.sender_id,
+                message_text=message.user_message,
+                source_channel=message.platform,
+                current_service_id=service_id,
+                current_service_name=service_name,
+            )
+            if self.memory_service is not None:
+                self.memory_service.update_context(
+                    message.sender_id,
+                    unknown_detail_booking_intent=None,
+                )
+            return self._build_booking_reply_result(
+                message=message,
+                reply_text=booking_result["reply_text"],
+                intent_value="booking_request",
+                booking_result=booking_result,
+                fallback_service_id=service_id,
+                fallback_service_name=service_name,
+            )
+
+        if (
+            self._is_configured_front_desk_mode()
+            and self.booking_service._looks_like_dental_pain_mention(message.user_message)
+            and self.booking_service._looks_like_nearest_availability_request(message.user_message)
+        ):
+            booking_service_id, booking_service_name = self._service_context_for_booking(
+                message.sender_id,
+                message.user_message,
+            )
+            if booking_service_id:
+                booking_result = self.booking_service.handle_nearest_availability_request(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                    current_service_id=booking_service_id,
+                    current_service_name=booking_service_name,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_flow",
+                    booking_result=booking_result,
+                    fallback_service_id=booking_service_id,
+                    fallback_service_name=booking_service_name,
+                )
 
         # A bare pain mention with no booking/scheduling intent ("болить
         # зуб") deserves a human acknowledgement, not silence or a generic
@@ -3372,6 +3489,11 @@ class MessageProcessor:
                     message.user_message,
                 )
                 if unknown_detail_reply is not None:
+                    if self.memory_service is not None:
+                        self.memory_service.update_context(
+                            message.sender_id,
+                            unknown_detail_booking_intent=True,
+                        )
                     return self._build_direct_reply_result(
                         message=message,
                         reply_text=unknown_detail_reply,
@@ -3792,6 +3914,11 @@ class MessageProcessor:
                 message.user_message,
             )
             if unknown_detail_reply is not None:
+                if self.memory_service is not None:
+                    self.memory_service.update_context(
+                        message.sender_id,
+                        unknown_detail_booking_intent=True,
+                    )
                 return self._build_direct_reply_result(
                     message=message,
                     reply_text=unknown_detail_reply,

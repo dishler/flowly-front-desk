@@ -276,19 +276,8 @@ class ReplyService:
                 "Це краще підтвердити з адміністратором або лікарем перед візитом."
             )
 
-        if self._looks_like_directions_origin(normalized, context):
-            origin = self._extract_directions_origin(text) or text
-            return self._reply_with_directions_origin(message.sender_id, origin)
-
         if self._looks_like_directions_question(normalized):
-            origin = self._extract_directions_origin(text)
-            if origin:
-                return self._reply_with_directions_origin(message.sender_id, origin)
-            self._remember_front_desk_context(
-                message.sender_id,
-                question_context="directions",
-            )
-            return "Звідки вам зручно їхати? Напишіть орієнтир або станцію метро, і я підкажу в межах наявної інформації."
+            return self._reply_with_grounded_directions(message.sender_id)
 
         if service is None and self._looks_like_service_availability_question(normalized):
             return "Не хочу дати вам неточну інформацію. Це краще підтвердити з адміністратором або лікарем. Можу допомогти записатися на консультацію або передати питання."
@@ -491,7 +480,7 @@ class ReplyService:
         if any(marker in normalized for marker in ["де ви", "адрес", "локац", "location", "address"]):
             location = business.get("location")
             if location:
-                return f"Ми знаходимося: {location}."
+                return f"Ми знаходимося: {str(location).strip().rstrip('.!?… ')}."
 
         if any(marker in normalized for marker in ["графік", "години", "працюєте", "working hours", "hours"]):
             working_hours = business.get("working_hours")
@@ -722,13 +711,17 @@ class ReplyService:
         return has_question and has_service_like_object
 
     def _reply_with_directions_origin(self, sender_id: str, origin_text: str) -> str:
+        return self._reply_with_grounded_directions(sender_id)
+
+    def _reply_with_grounded_directions(self, sender_id: str) -> str:
         business = self.knowledge_service.get_business() if self.knowledge_service else {}
-        location = business.get("location") or "адресу клініки потрібно уточнити."
+        raw_location = str(business.get("location") or "").strip()
+        location = raw_location.rstrip(".!?… ") or "адресу клініки потрібно уточнити"
         if self.memory_service is not None:
             self.memory_service.update_context(sender_id, question_context=None)
         return (
-            f"Ви їдете від: {origin_text.strip()}. Точного маршруту в базі немає, "
-            f"але адреса клініки: {location}. Для найзручнішого маршруту краще звірити дорогу в навігаторі або уточнити в адміністратора."
+            f"Адреса клініки: {location}. "
+            "Точного маршруту в базі немає, тому для найзручнішої дороги краще звірити маршрут у навігаторі."
         )
 
     def _looks_like_how_much_marker(self, normalized: str) -> bool:

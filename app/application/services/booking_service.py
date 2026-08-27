@@ -1992,6 +1992,32 @@ class BookingService:
         if requested_dt is not None:
             return self._finalize_reschedule_to(sender_id, requested_dt=requested_dt, language=language)
 
+        pending = self._get_pending_confirmation(sender_id) or {}
+        pending_reschedule_date = None
+        if pending.get("reschedule_pending") and pending.get("requested_date"):
+            try:
+                pending_reschedule_date = self._deserialize_pending_requested_date(
+                    pending.get("requested_date")
+                )
+            except Exception:
+                logger.warning(
+                    "invalid pending reschedule date ignored sender_id=%s raw_requested_date=%r",
+                    sender_id,
+                    pending.get("requested_date"),
+                )
+
+        requested_time = self._parse_time_only(message_text)
+        if (
+            pending_reschedule_date is not None
+            and requested_time is not None
+            and not self._has_reschedule_target_residual_content(message_text)
+        ):
+            requested_dt = self._combine_requested_date_and_time(
+                pending_reschedule_date,
+                requested_time,
+            )
+            return self._finalize_reschedule_to(sender_id, requested_dt=requested_dt, language=language)
+
         # No single exact time, but a date + time-window ("на п'ятницю після
         # 16") is still a concrete reschedule target -- reuse the existing
         # verified-slot suggestion machinery to offer real availability
@@ -2031,6 +2057,32 @@ class BookingService:
             pending["reschedule_pending"] = True
             self._save_pending_confirmation(sender_id, pending)
             return result
+
+        if requested_date is not None and self._extract_absolute_calendar_date(message_text) is not None:
+            completed_booking = self._get_completed_booking(sender_id) or {}
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_TIME,
+                language=language,
+                source_channel=None,
+                context_summary=message_text[:280],
+                requested_date=requested_date,
+                requested_day_label=partial_date.get("day_label"),
+            )
+            pending = self._get_pending_confirmation(sender_id) or {}
+            pending["reschedule_pending"] = True
+            if completed_booking.get("current_service_id"):
+                pending["current_service_id"] = completed_booking.get("current_service_id")
+            if completed_booking.get("current_service_name"):
+                pending["current_service_name"] = completed_booking.get("current_service_name")
+            self._save_pending_confirmation(sender_id, pending)
+            return {
+                "status": "reschedule_prompt",
+                "reply_text": self.get_reschedule_prompt_reply(language),
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "event_created": False,
+                "requested_date": requested_date.isoformat(),
+            }
 
         return {
             "status": "reschedule_prompt",
@@ -2304,6 +2356,30 @@ class BookingService:
         # would silently reschedule the existing Calendar event.
         requested_dt = self._parse_requested_datetime(message_text)
         if requested_dt is not None and not self._has_reschedule_target_residual_content(message_text):
+            return self._finalize_reschedule_to(sender_id, requested_dt=requested_dt, language=language)
+
+        pending_requested_date = None
+        if pending.get("requested_date"):
+            try:
+                pending_requested_date = self._deserialize_pending_requested_date(
+                    pending.get("requested_date")
+                )
+            except Exception:
+                logger.warning(
+                    "invalid pending reschedule date ignored sender_id=%s raw_requested_date=%r",
+                    sender_id,
+                    pending.get("requested_date"),
+                )
+        requested_time_only = self._parse_time_only(message_text)
+        if (
+            pending_requested_date is not None
+            and requested_time_only is not None
+            and not self._has_reschedule_target_residual_content(message_text)
+        ):
+            requested_dt = self._combine_requested_date_and_time(
+                pending_requested_date,
+                requested_time_only,
+            )
             return self._finalize_reschedule_to(sender_id, requested_dt=requested_dt, language=language)
 
         slots_by_day = self._suggested_slots_from_pending(pending)
