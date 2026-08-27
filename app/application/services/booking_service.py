@@ -401,16 +401,36 @@ class BookingService:
         compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
         return bool(re.fullmatch(r"(?:я\s+)?передумав[аи]?", compact))
 
-    def _build_unclear_time_reply(self, language: str) -> str:
-        if self.front_desk_config_service is None:
-            return (
-                "Супер, тоді можемо коротко розібрати ваш кейс зі спеціалістом. "
-                "Напишіть, будь ласка, який день і приблизний час вам зручний?"
-            )
+    def _looks_like_dental_pain_mention(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        markers = [
+            "болить зуб",
+            "зуб болить",
+            "болять зуби",
+            "зуби болять",
+            "зуб ниє",
+            "ниє зуб",
+            "зубний біль",
+            "гострий біль",
+        ]
+        return any(marker in normalized for marker in markers)
+
+    def _pain_acknowledgement_sentence(self) -> str:
+        return "Розумію, це неприємно. Якщо зуб болить, краще не відкладати огляд. "
+
+    def get_pain_acknowledgement_reply(self, language: str) -> str:
         return (
-            f"Супер, тоді можемо підібрати {self._appointment_label()}. "
-            "Напишіть, будь ласка, який день і приблизний час вам зручний?"
+            self._pain_acknowledgement_sentence()
+            + "Можу допомогти підібрати найближчий вільний час, якщо хочете записатися."
         )
+
+    def _build_unclear_time_reply(self, language: str, *, pain_mentioned: bool = False) -> str:
+        prompt = "Напишіть, будь ласка, який день і приблизний час вам зручний?"
+        if pain_mentioned:
+            return self._pain_acknowledgement_sentence() + "Можу допомогти підібрати найближчий вільний час. " + prompt
+        if self.front_desk_config_service is None:
+            return "Супер, тоді можемо коротко розібрати ваш кейс зі спеціалістом. " + prompt
+        return f"Супер, тоді можемо підібрати {self._appointment_label()}. " + prompt
 
     def _build_missing_time_reply(self, language: str, day_label: str | None = None) -> str:
         label = day_label or "цей день"
@@ -539,7 +559,9 @@ class BookingService:
     def _build_idempotent_already_confirmed_reply(self, language: str, start_dt: datetime) -> str:
         return f"У вас уже є підтверджений {self._appointment_label()} на {self._format_scheduled_time_for_reply(start_dt, language)}."
 
-    def _build_missing_service_reply(self, language: str) -> str:
+    def _build_missing_service_reply(self, language: str, *, pain_mentioned: bool = False) -> str:
+        if pain_mentioned:
+            return self._pain_acknowledgement_sentence() + "На яку послугу хочете записатися?"
         return "На яку послугу хочете записатися?"
 
     def _build_cancelled_reply(self, language: str) -> str:
@@ -727,6 +749,183 @@ class BookingService:
             ):
                 return next_dt
         return None
+
+    def _looks_like_nearest_availability_request(self, text: str) -> bool:
+        """Whether `text` is asking for the soonest bookable slot ("найближчий
+        час", "коли найближче?", "earliest available") rather than naming a
+        specific day/time. Distinct from `_looks_like_availability_question`,
+        which answers "what times are generally free" with a couple of fixed
+        illustrative candidates -- this one drives an actual forward Calendar
+        search (see `_find_nearest_available_slot`), so it must win whenever
+        both could match the same message.
+        """
+        normalized = self._normalize_booking_text(text)
+        if re.search(r"\bнайближч\w*\b", normalized):
+            return True
+        english_markers = [
+            "earliest available",
+            "earliest slot",
+            "earliest appointment",
+            "earliest time",
+            "next available",
+            "as soon as possible",
+        ]
+        if any(marker in normalized for marker in english_markers):
+            return True
+        return bool(re.search(r"\basap\b", normalized))
+
+    def _find_nearest_available_slot(
+        self,
+        *,
+        search_from: datetime | None = None,
+        horizon_days: int = 14,
+    ) -> datetime | None:
+        """Searches forward, day by day, through valid business hours for the
+        first Calendar-verified available slot -- reusing the same per-slot
+        check `_get_verified_time_window_slots` already uses, just walking
+        multiple days instead of one fixed date. Closed days are skipped via
+        `_business_hours_status_for_date`; a slot is never trusted without a
+        live `check_specific_time_availability` call.
+        """
+        duration = self._booking_duration_minutes()
+        now = search_from or datetime.now(self.timezone)
+        for day_offset in range(horizon_days):
+            target_date = now.date() + timedelta(days=day_offset)
+            status, window = self._business_hours_status_for_date(target_date)
+            if status == "legacy_open":
+                window = (time(0, 0), time(23, 59))
+            elif status != "open" or window is None:
+                continue
+
+            day_start = datetime.combine(target_date, window[0], tzinfo=self.timezone)
+            day_end = datetime.combine(target_date, window[1], tzinfo=self.timezone)
+            cursor = day_start
+            if day_offset == 0 and now > day_start:
+                elapsed_slots = int((now - day_start).total_seconds() // 1800) + 1
+                cursor = day_start + timedelta(minutes=30 * elapsed_slots)
+
+            while cursor + timedelta(minutes=duration) <= day_end:
+                if self._is_within_business_hours(cursor, duration):
+                    try:
+                        if self.calendar_service.check_specific_time_availability(
+                            cursor,
+                            duration_minutes=duration,
+                        ):
+                            return cursor
+                    except Exception:
+                        logger.exception(
+                            "nearest-availability check failed start_dt=%s",
+                            cursor.isoformat(),
+                        )
+                cursor += timedelta(minutes=30)
+        return None
+
+    def _build_nearest_availability_unavailable_reply(self, language: str) -> str:
+        return (
+            "Наразі не бачу вільного часу найближчим часом. "
+            "Підкажіть, будь ласка, зручний день і час, і ми перевіримо запис."
+        )
+
+    def handle_nearest_availability_request(
+        self,
+        sender_id: str,
+        message_text: str,
+        source_channel: str | None = None,
+        current_service_id: str | None = None,
+        current_service_name: str | None = None,
+    ) -> Dict[str, Any]:
+        """Handles "найближчий час"/"earliest available" style requests: find
+        and offer the first real, Calendar-verified slot instead of asking
+        the user to name a day and time themselves. Reuses the existing
+        booking-state/pending-confirmation machinery so the normal
+        acceptance/contact safety rules apply unchanged -- this never
+        creates an event by itself.
+        """
+        language = self._detect_language(message_text)
+        previous_pending = self._get_pending_confirmation(sender_id) or {}
+        current_service_id = current_service_id or previous_pending.get("current_service_id")
+        current_service_name = current_service_name or previous_pending.get("current_service_name")
+        pain_mentioned = self._looks_like_dental_pain_mention(message_text)
+
+        if self._service_required_for_booking() and not current_service_id:
+            return self._save_missing_service_context(
+                sender_id=sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or previous_pending.get("source_channel"),
+                contact_details=self._empty_contact_details(),
+            )
+
+        slot = self._find_nearest_available_slot()
+        if slot is None:
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_TIME,
+                language=language,
+                source_channel=source_channel or previous_pending.get("source_channel"),
+                context_summary=message_text[:280],
+            )
+            pending = self._get_pending_confirmation(sender_id) or {}
+            if current_service_id:
+                pending["current_service_id"] = current_service_id
+            if current_service_name:
+                pending["current_service_name"] = current_service_name
+            self._save_pending_confirmation(sender_id, pending)
+            reply_text = self._build_nearest_availability_unavailable_reply(language)
+            if pain_mentioned:
+                reply_text = self._pain_acknowledgement_sentence() + reply_text
+            return {
+                "status": "nearest_availability_unavailable",
+                "reply_text": reply_text,
+                "requires_confirmation": False,
+                "event_created": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+            }
+
+        early_contact_details = self._extract_trailing_contact_details(message_text)
+        requested_day_label = self._format_date_label_for_reply(slot.date(), language)
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel or previous_pending.get("source_channel"),
+            context_summary=message_text[:280],
+            requested_date=slot.date(),
+            requested_day_label=requested_day_label,
+            customer_name=early_contact_details["customer_name"],
+            contact_email=early_contact_details["email"],
+            contact_phone=early_contact_details["phone"],
+        )
+        pending = self._get_pending_confirmation(sender_id) or {}
+        day_key = "selected_day"
+        pending["availability_context"] = True
+        if current_service_id:
+            pending["current_service_id"] = current_service_id
+        if current_service_name:
+            pending["current_service_name"] = current_service_name
+        pending["suggested_slots"] = [
+            {"day_key": day_key, "start_dt": self._serialize_pending_start_dt(slot)}
+        ]
+        pending["last_suggested_day"] = day_key
+        self._save_pending_confirmation(sender_id, pending)
+
+        day_label = requested_day_label or "цей день"
+        day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
+        time_label = self._format_slot_times([slot], language)
+        reply_text = f"{day_prefix} {day_label} найближчий вільний час {time_label}. Записати вас на цей час?"
+        if pain_mentioned:
+            reply_text = self._pain_acknowledgement_sentence() + reply_text
+
+        return {
+            "status": "nearest_availability_suggested",
+            "reply_text": reply_text,
+            "requires_confirmation": False,
+            "event_created": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+            "requested_date": slot.date().isoformat(),
+            "suggested_slots": pending["suggested_slots"],
+            "start_dt": slot.isoformat(),
+        }
 
     def _extract_daypart(self, text: str) -> dict[str, Any] | None:
         normalized = self._normalize_booking_text(text)
@@ -1928,13 +2127,24 @@ class BookingService:
             "start_dt": requested_dt.isoformat(),
         }
 
-    def _reschedule_offer_still_engaged(self, message_text: str) -> bool:
+    def _reschedule_offer_still_engaged(
+        self,
+        message_text: str,
+        candidate_slots: list[datetime] | None = None,
+    ) -> bool:
         """True if `message_text` plausibly continues an in-flight reschedule
         offer (a new target time, a day/window refinement, or an explicit
         accept/reject) -- the same signals `_continue_reschedule_selection`
         and the availability follow-up already act on. False means the
         message has nothing to do with the offer (e.g. an unrelated FAQ),
         which is the point at which the offer must be treated as abandoned.
+
+        `candidate_slots`, when supplied, lets a natural offered-slot answer
+        ("17 година буде зручно") count as a date/time signal too -- without
+        it, this predicate would disagree with `_continue_reschedule_selection`
+        (which does have the candidates) about whether such a message is a
+        genuine answer, and the offer would be invalidated out from under a
+        message that was about to legitimately select a slot.
         """
         if (
             self._is_confirmation_text(message_text)
@@ -1951,7 +2161,10 @@ class BookingService:
             or self._extract_requested_date(message_text) is not None
             or self._extract_daypart(message_text) is not None
             or self._extract_time_window(message_text) is not None
-            or self._extract_suggested_slot_selection_time(message_text) is not None
+            or self._extract_suggested_slot_selection_time(
+                message_text, candidate_slots=candidate_slots
+            )
+            is not None
             or self._detect_requested_day_key(message_text) is not None
         )
         if not has_date_time_signal:
@@ -1980,7 +2193,8 @@ class BookingService:
         normalized = re.sub(
             r"\b(?:у|в|на|щодо|до|через|після|о|об|го|ого|сьогодні|завтра|післязавтра|"
             r"пізніше|раніше|ввечері|вранці|вдень|зранку|давайте|давай|можна|"
-            r"так|добре|підходить|today|tomorrow|at)\b",
+            r"так|добре|підходить|підійде|мені|хочу|годин\w*|год|буде|зручн\w*|"
+            r"today|tomorrow|at)\b",
             " ",
             normalized,
         )
@@ -2001,7 +2215,9 @@ class BookingService:
         pending = self._get_pending_confirmation(sender_id)
         if not pending or not pending.get("reschedule_pending"):
             return
-        if self._reschedule_offer_still_engaged(message_text):
+        slots_by_day = self._suggested_slots_from_pending(pending)
+        candidate_slots = [slot for slots in slots_by_day.values() for slot in slots]
+        if self._reschedule_offer_still_engaged(message_text, candidate_slots=candidate_slots):
             return
         pending["reschedule_pending"] = False
         pending["suggested_slots"] = []
@@ -2024,7 +2240,9 @@ class BookingService:
         pending = self._get_pending_confirmation(sender_id)
         if not pending or not pending.get("busy_alternative"):
             return
-        if self._reschedule_offer_still_engaged(message_text):
+        slots_by_day = self._suggested_slots_from_pending(pending)
+        candidate_slots = [slot for slots in slots_by_day.values() for slot in slots]
+        if self._reschedule_offer_still_engaged(message_text, candidate_slots=candidate_slots):
             return
         if self.EMAIL_RE.search(message_text) or self.PHONE_RE.search(message_text):
             # Contact info alone is the explicit missing piece this offer is
@@ -2099,7 +2317,9 @@ class BookingService:
         if len(candidate_slots) == 1 and self._is_confirmation_text(message_text):
             return self._finalize_reschedule_to(sender_id, requested_dt=candidate_slots[0], language=language)
 
-        requested_time = self._extract_suggested_slot_selection_time(message_text)
+        requested_time = self._extract_suggested_slot_selection_time(
+            message_text, candidate_slots=candidate_slots
+        )
         if requested_time is None:
             return None
 
@@ -2276,7 +2496,11 @@ class BookingService:
                 return time(hour=hour, minute=minute)
         return None
 
-    def _extract_suggested_slot_selection_time(self, text: str) -> time | None:
+    def _extract_suggested_slot_selection_time(
+        self,
+        text: str,
+        candidate_slots: list[datetime] | None = None,
+    ) -> time | None:
         selected = self._extract_natural_suggested_slot_time(text)
         if selected is not None:
             return selected
@@ -2312,7 +2536,66 @@ class BookingService:
                 if 0 <= hour <= 23:
                     return time(hour=hour, minute=0)
 
+        if candidate_slots:
+            selected = self._extract_offered_slot_time(text, candidate_slots)
+            if selected is not None:
+                return selected
+
         return None
+
+    def _extract_offered_slot_time(
+        self,
+        text: str,
+        candidate_slots: list[datetime],
+    ) -> time | None:
+        """A more permissive, but still safe, "the user directly answered
+        our question" match: when there is an active list of offered
+        slots, a message whose only numeric content is a bare hour
+        matching one of those offered slots -- wrapped in ordinary
+        acceptance/filler wording ("17 година буде зручно", "підходить
+        17", typos included) -- is strong evidence of selecting that slot.
+        Only used as a last-resort tier by `_extract_suggested_slot_selection_time`,
+        after every fixed-pattern match already failed.
+
+        Reuses `_looks_like_unrelated_number_phrase` to keep excluding
+        age/headcount/duration numbers ("мені 17 років", "нас буде 10
+        людей"), and the same residual-content principle already used for
+        the reschedule-offer guard: any number that is incidental to some
+        other statement (rather than a direct answer) leaves substantive
+        text behind after stripping digits and known filler/connector
+        words, and is rejected.
+        """
+        if self._looks_like_unrelated_number_phrase(text):
+            return None
+        if self.PHONE_RE.search(text) or self.EMAIL_RE.search(text):
+            return None
+
+        offered_hours = {slot.hour for slot in candidate_slots}
+        normalized = self._normalize_booking_text(text)
+
+        matching_hours = {
+            int(match.group(1))
+            for match in re.finditer(r"(?<!\d)(\d{1,2})(?!\d)", normalized)
+            if int(match.group(1)) in offered_hours
+        }
+        if len(matching_hours) != 1:
+            # No offered hour named, or more than one -- ambiguous, don't guess.
+            return None
+        selected_hour = next(iter(matching_hours))
+
+        residual = re.sub(r"\d+", " ", normalized)
+        residual = re.sub(
+            r"\b(?:годин\w*|год|буде|зручн\w*|давайте|давай|тоді|"
+            r"можна|мені|хочу|на|о|об|так|да|ок|окей|добре|підходить|підійде|"
+            r"норм|нормально)\b",
+            " ",
+            residual,
+        )
+        residual = re.sub(r"[^\w\sа-яіїєґё]", " ", residual, flags=re.IGNORECASE)
+        if re.search(r"[a-zа-яіїєґ]{2,}", residual, flags=re.IGNORECASE):
+            return None
+
+        return time(hour=selected_hour, minute=0)
 
     def _looks_like_unrelated_number_phrase(self, text: str) -> bool:
         normalized = self._normalize_booking_text(text)
@@ -2397,6 +2680,43 @@ class BookingService:
         if times:
             return f"Добре, {day_label_uk} можемо запропонувати {times}. Який час вам зручніший?"
         return f"На {day_label_uk} вільного часу не бачу. Можете написати інший день або конкретний час, і я перевірю."
+
+    def handle_greeting_during_active_offer(
+        self,
+        sender_id: str,
+        message_text: str,
+    ) -> Dict[str, Any] | None:
+        """A harmless greeting ("Привіт") while slots are already on offer
+        must not be treated as if it answered or reset the pending
+        question -- it carries no date/time/service content at all, so
+        every existing parser correctly finds nothing in it and the flow
+        would otherwise fall through to the generic "which time?" prompt,
+        silently dropping the fact that specific slots were just offered.
+        Read-only: does not touch pending state, so it cannot weaken any
+        stale-offer/reschedule safety gate -- those are unaffected because
+        this never fires for messages that carry real content.
+        """
+        pending = self._get_pending_confirmation(sender_id)
+        if not pending or not pending.get("availability_context"):
+            return None
+
+        slots_by_day = self._suggested_slots_from_pending(pending)
+        day_key = pending.get("last_suggested_day")
+        slots = slots_by_day.get(day_key, []) if day_key else []
+        if not slots:
+            slots = [slot for day_slots in slots_by_day.values() for slot in day_slots]
+        if not slots:
+            return None
+
+        language = pending.get("language") or self._detect_language(message_text)
+        offer_reply = self._build_day_slots_reply(language, day_key or "selected_day", slots)
+        return {
+            "status": "greeting_during_active_offer",
+            "reply_text": "Вітаю 🙂 Ми якраз підбирали для вас час. " + offer_reply,
+            "event_created": False,
+            "requires_confirmation": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+        }
 
     def _process_availability_followup(
         self,
@@ -2601,7 +2921,9 @@ class BookingService:
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
             }
 
-        requested_time = self._extract_suggested_slot_selection_time(message_text)
+        requested_time = self._extract_suggested_slot_selection_time(
+            message_text, candidate_slots=candidate_slots
+        )
         if requested_time is None:
             contact_details = (
                 self._extract_anchored_contact_details(message_text)
@@ -3773,7 +4095,9 @@ class BookingService:
         self._save_pending_confirmation(sender_id, pending)
         return {
             "status": "waiting_for_service",
-            "reply_text": self._build_missing_service_reply(language),
+            "reply_text": self._build_missing_service_reply(
+                language, pain_mentioned=self._looks_like_dental_pain_mention(message_text)
+            ),
             "requires_confirmation": False,
             "event_created": False,
             "booking_state": BookingState.WAITING_FOR_TIME.value,
@@ -3889,6 +4213,14 @@ class BookingService:
                 else None
             )
             requested_day_label = requested_day_label or previous_pending.get("requested_day_label")
+            if requested_date is None and self._looks_like_nearest_availability_request(message_text):
+                return self.handle_nearest_availability_request(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    source_channel=source_channel or previous_pending.get("source_channel"),
+                    current_service_id=current_service_id or previous_pending.get("current_service_id"),
+                    current_service_name=current_service_name or previous_pending.get("current_service_name"),
+                )
             if requested_date is not None and time_window is not None:
                 return self._suggest_time_window_slots(
                     sender_id,
@@ -3941,7 +4273,9 @@ class BookingService:
                 "reply_text": (
                     self._build_missing_time_reply(language, requested_day_label)
                     if requested_date
-                    else self._build_unclear_time_reply(language)
+                    else self._build_unclear_time_reply(
+                        language, pain_mentioned=self._looks_like_dental_pain_mention(message_text)
+                    )
                 ),
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
@@ -4504,6 +4838,19 @@ class BookingService:
             }
 
         if state == BookingState.WAITING_FOR_TIME:
+            if (
+                not pending.get("reschedule_pending")
+                and not pending.get("busy_alternative")
+                and self._looks_like_nearest_availability_request(message_text)
+            ):
+                return self.handle_nearest_availability_request(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    current_service_id=pending.get("current_service_id"),
+                    current_service_name=pending.get("current_service_name"),
+                )
+
             reschedule_result = self._continue_reschedule_selection(
                 sender_id=sender_id,
                 message_text=message_text,

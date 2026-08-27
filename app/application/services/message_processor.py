@@ -282,7 +282,38 @@ class MessageProcessor:
         if fallback_service_id:
             return fallback_service_id, fallback_service_name
 
-        return self._remembered_service_context_for_booking(sender_id)
+        remembered_service_id, remembered_service_name = self._remembered_service_context_for_booking(
+            sender_id
+        )
+        if remembered_service_id:
+            return remembered_service_id, remembered_service_name
+
+        # "На коли найближчий час можна записатись до дантиста?" names no
+        # specific treatment -- only a generic dentist visit, which is
+        # exactly what the configured "dental_consultation" service already
+        # is. Bounded to nearest-availability requests so a plain "болить
+        # зуб" or "до дантиста" mention elsewhere still asks which service,
+        # as before.
+        if self.booking_service._looks_like_nearest_availability_request(
+            text
+        ) and self._looks_like_general_dental_complaint(text):
+            knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+            generic_service = (
+                knowledge_service.get_service_by_id("dental_consultation")
+                if knowledge_service is not None
+                else None
+            )
+            if generic_service is not None:
+                return str(generic_service["id"]), str(generic_service.get("name") or "")
+
+        return None, None
+
+    def _looks_like_general_dental_complaint(self, text: str) -> bool:
+        if self.booking_service._looks_like_dental_pain_mention(text):
+            return True
+        normalized = self._normalize_for_booking_keywords(text)
+        markers = ["до дантиста", "до стоматолога", "дантист", "стоматолог"]
+        return any(marker in normalized for marker in markers)
 
     def _remembered_service_context_for_booking(
         self,
@@ -2374,7 +2405,8 @@ class MessageProcessor:
         normalized = re.sub(
             r"\b(?:у|в|на|щодо|до|через|після|о|об|го|ого|сьогодні|завтра|післязавтра|"
             r"пізніше|раніше|ввечері|вранці|вдень|зранку|давайте|давай|можна|"
-            r"так|добре|підходить|today|tomorrow|at)\b",
+            r"так|добре|підходить|підійде|мені|хочу|годин\w*|год|буде|зручн\w*|"
+            r"today|tomorrow|at)\b",
             " ",
             normalized,
         )
@@ -2686,6 +2718,29 @@ class MessageProcessor:
                 message.sender_id, message.user_message
             )
 
+            # A harmless greeting/interjection with no other content must not
+            # be treated as if it answered (or reset) the pending question --
+            # it should keep whatever offer is still standing. Checked AFTER
+            # the two invalidation calls above, so a reschedule/busy-
+            # alternative offer that safety rules already deemed stale (e.g.
+            # it named no date/time at all) has already been cleared by the
+            # time this runs -- this can only ever restate an offer that is
+            # still genuinely active, never resurrect one that safety just
+            # dropped.
+            if self._looks_like_greeting_text(
+                message.user_message
+            ) and not self._has_substantive_after_greeting(message.user_message):
+                greeting_result = self.booking_service.handle_greeting_during_active_offer(
+                    message.sender_id, message.user_message
+                )
+                if greeting_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=greeting_result["reply_text"],
+                        intent_value="greeting_during_active_offer",
+                        booking_result=greeting_result,
+                    )
+
         if booking_state != BookingState.NONE:
             active_service_id, active_service_name = self._get_pending_front_desk_service_context(
                 message.sender_id
@@ -2795,6 +2850,30 @@ class MessageProcessor:
             if (
                 booking_state == BookingState.WAITING_FOR_TIME
                 and self._looks_like_time_window_constraint(message.user_message)
+            ):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
+            # "найближчий час"/"коли найближче?" style requests must win over
+            # the generic availability-question markers below (e.g. "вільний
+            # час" overlaps both) -- those markers route to a hardcoded
+            # tomorrow/day-after-tomorrow generator, not a real forward
+            # Calendar search, so this must be checked first.
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and self.booking_service._looks_like_nearest_availability_request(message.user_message)
             ):
                 booking_result = self.booking_service.process_booking_message(
                     sender_id=message.sender_id,
@@ -3159,6 +3238,49 @@ class MessageProcessor:
                 reply_text=reply_text,
                 intent_value=reason,
                 routing_category="safe_handoff",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
+        # A short acknowledgement ("гаразд, уточніть", "добре") right after
+        # the bot itself said a detail needs administrator/doctor
+        # confirmation refers to that same unresolved subject -- scoped
+        # strictly to the "unknown_detail_pending" marker the containment
+        # reply just set, so a generic "так"/"добре" elsewhere is never
+        # affected. Checked before `_looks_like_active_booking_continuation`
+        # below, which would otherwise treat a bare "добре" as continuing a
+        # booking for the remembered service (there is none -- the last
+        # reply was a safe-uncertainty containment, not a booking prompt).
+        unknown_detail_followup_reply = self.reply_service.get_unknown_detail_followup_reply(
+            message.sender_id, message.user_message
+        )
+        if unknown_detail_followup_reply:
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=unknown_detail_followup_reply,
+                intent_value="unknown_detail_followup",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
+        # A bare pain mention with no booking/scheduling intent ("болить
+        # зуб") deserves a human acknowledgement, not silence or a generic
+        # clarifying question -- but no diagnosis, and no booking flow is
+        # started (0 Calendar involvement). A message that also carries
+        # booking intent (e.g. "хочу записатись") skips this and flows into
+        # the normal booking path instead, where the same acknowledgement is
+        # prefixed onto that flow's own reply.
+        if (
+            self._is_configured_front_desk_mode()
+            and self.booking_service._looks_like_dental_pain_mention(message.user_message)
+            and not self._looks_like_booking_message(message.user_message)
+            and not self._looks_like_fresh_booking_request(message.user_message)
+        ):
+            language = self.reply_service.detect_user_language(message.user_message)
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=self.booking_service.get_pain_acknowledgement_reply(language),
+                intent_value="pain_acknowledgement",
+                routing_category="answered_basic",
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
 

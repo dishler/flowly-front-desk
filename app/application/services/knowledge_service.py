@@ -289,8 +289,23 @@ class KnowledgeService:
         """Returns extra service-detail tokens that are not grounded in the
         matched service's aliases/name/description/options. This catches
         "known broader topic + unknown variant/brand" without blacklisting
-        particular procedures."""
-        query_tokens = self._service_query_tokens(text) - self._service_action_tokens()
+        particular procedures.
+
+        Ordinary conversational/reporting verbs and generic booking-action
+        words around the service mention ("Скажіть, ви ставите брекети?",
+        "можна поставити брекети?", "скільки коштують брекети?") must not
+        themselves count as an unrecognized "detail" -- they name no
+        service variant at all. Matched by STEM (substring), not exact
+        word-form, so this stays robust to conjugation and Ukrainian
+        verb prefixation (ставите/ставити/поставити, коштує/коштують)
+        without having to enumerate every inflected form by hand.
+        """
+        query_tokens = {
+            token
+            for token in self._service_query_tokens(text)
+            if token not in self._service_action_exact_tokens()
+            and not any(stem in token for stem in self._service_action_stems())
+        }
         if not query_tokens:
             return set()
         service_tokens = self._service_tokens(service, include_description=True)
@@ -301,7 +316,7 @@ class KnowledgeService:
         }
         return unknown_tokens
 
-    def _service_action_tokens(self) -> set[str]:
+    def _service_action_exact_tokens(self) -> set[str]:
         return {
             "ви",
             "вас",
@@ -310,39 +325,9 @@ class KnowledgeService:
             "який",
             "чи",
             "що",
-            "входить",
-            "робите",
-            "робити",
-            "роблять",
-            "ставите",
-            "ставити",
-            "лікуєте",
-            "лікувати",
-            "полікувати",
-            "записатися",
-            "записатись",
-            "записати",
-            "запишіть",
-            "хочу",
-            "тоді",
-            "можна",
-            "потрібно",
-            "треба",
             "ні",
-            "краще",
-            "років",
-            "роки",
-            "року",
-            "людей",
-            "дітей",
-            "дитини",
-            "дітям",
-            "дитині",
-            "дорослим",
-            "дорослих",
+            "тоді",
             "для",
-            "привіт",
-            "доброго",
             "день",
             "do",
             "you",
@@ -350,6 +335,35 @@ class KnowledgeService:
             "provide",
             "book",
             "want",
+        }
+
+    def _service_action_stems(self) -> set[str]:
+        return {
+            "вход",
+            "роб",
+            "став",
+            "ліку",
+            "запис",
+            "запиш",
+            "хоч",
+            "можн",
+            "потрібн",
+            "треба",
+            "кращ",
+            "рок",
+            "люд",
+            "діт",
+            "дитин",
+            "дорослим",
+            "дорослих",
+            "прив",
+            "добр",
+            "скаж",
+            "підкаж",
+            "розкаж",
+            "поясн",
+            "кошт",
+            "цікав",
         }
 
     def _token_matches_any(self, token: str, candidates: set[str]) -> bool:

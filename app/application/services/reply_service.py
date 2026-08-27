@@ -912,12 +912,62 @@ class ReplyService:
         self._remember_front_desk_context(
             sender_id,
             current_service_id=str(service_id) if service_id else None,
-            question_context="services",
+            question_context="unknown_detail_pending",
         )
         service_name = service.get("name") or "цієї послуги"
         return (
             f"Щодо «{service_name}»: у базі немає підтвердження саме цієї деталі або варіанту. "
             "Краще уточнити це з адміністратором або лікарем перед записом."
+        )
+
+    def _looks_like_unknown_detail_followup_ack(self, text: str) -> bool:
+        normalized = " ".join(text.strip().lower().split())
+        normalized = re.sub(r"[.!?…]+$", "", normalized).strip()
+        normalized = re.sub(r"[,;]+", " ", normalized)
+        words = " ".join(normalized.split()).split()
+        if not words or len(words) > 3:
+            return False
+        ack_words = {
+            "так",
+            "добре",
+            "гаразд",
+            "ок",
+            "окей",
+            "давайте",
+            "давай",
+            "звісно",
+            "уточніть",
+            "уточни",
+            "уточнити",
+        }
+        return all(word in ack_words for word in words)
+
+    def get_unknown_detail_followup_reply(self, sender_id: str, text: str) -> Optional[str]:
+        """A short acknowledgement ("гаразд, уточніть", "добре") right after
+        the bot's own unknown-service-detail containment reply refers to
+        that same unresolved subject -- it must not be answered with a
+        generic "what would you like to clarify?" as if the prior turn
+        never happened, and must not claim a handoff (e.g. "passed to the
+        administrator") that this application never actually performs.
+        Scoped strictly to the `unknown_detail_pending` marker the
+        containment reply sets, so an ordinary "так" elsewhere in the
+        conversation is completely unaffected.
+        """
+        if self.memory_service is None or self.knowledge_service is None:
+            return None
+        context = self.memory_service.get_context(sender_id)
+        if context.get("question_context") != "unknown_detail_pending":
+            return None
+        if not self._looks_like_unknown_detail_followup_ack(text):
+            return None
+
+        service_id = context.get("current_service_id")
+        service = self.knowledge_service.get_service_by_id(str(service_id)) if service_id else None
+        subject = service.get("name") if service else "цієї деталі"
+        self._remember_front_desk_context(sender_id, question_context="services")
+        return (
+            f"Щодо «{subject}» потрібне уточнення адміністратора або лікаря. "
+            "Можу допомогти записатися на консультацію."
         )
 
     def _get_channel_reply(self, text: str, language: str) -> Optional[str]:

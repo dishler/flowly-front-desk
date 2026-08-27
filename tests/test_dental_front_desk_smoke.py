@@ -1129,7 +1129,7 @@ async def test_dental_pain_symptom_does_not_become_service_summary_but_diagnosis
     diagnosis = await processor.process(_message("болить зуб шо робити", sender_id="patient-2"))
     emergency = await processor.process(_message("кров тече", sender_id="patient-3"))
 
-    assert pain["intent"] == "front_desk_safe_fallback"
+    assert pain["intent"] == "pain_acknowledgement"
     assert "Лікування карієсу" not in pain["reply_text"]
     assert "Професійна гігієна" not in pain["reply_text"]
     assert diagnosis["intent"] == "diagnosis_request"
@@ -4895,6 +4895,400 @@ async def test_dental_active_reschedule_offer_unrelated_faq_then_bare_time_does_
     assert calendar.rescheduled == []
     completed = processor.booking_service._get_completed_booking("patient-1")
     assert completed["calendar_event_id"] == "calendar-event-123"
+
+
+class BusyAllSaturdayConfiguredCalendarService(RecordingConfiguredCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append({"start_dt": start_dt, "duration_minutes": duration_minutes})
+        return start_dt.weekday() != 5
+
+
+async def test_dental_nearest_availability_production_phrase_offers_verified_slot():
+    """Matrix 1: a pain mention combined with a nearest-availability request
+    ("на коли найближчий час можна записатись до дантиста?") must acknowledge
+    the pain, resolve the generic dental-consultation service, run a real
+    Calendar search, and offer the first verified slot -- not repeat the
+    generic "which day and time?" prompt, and not create anything yet."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(
+        _message("В мене болить зуб, на коли найближчий час можна записатись до дантиста?")
+    )
+
+    assert result["booking_result"]["status"] == "nearest_availability_suggested"
+    assert "Розумію" in result["reply_text"]
+    assert "найближчий вільний час" in result["reply_text"]
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["current_service_id"] == "dental_consultation"
+    assert len(calendar.checked) >= 1
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "followup_text",
+    [
+        "найближчий час",
+        "коли найближче?",
+        "який найближчий вільний час?",
+    ],
+)
+async def test_dental_nearest_availability_variants_after_known_service(followup_text):
+    """Matrix 2-5: once a service is already established, every nearest-
+    availability wording must run a real forward Calendar search and offer
+    a verified slot -- not repeat the generic day/time prompt, and not fall
+    into the old hardcoded tomorrow/day-after-tomorrow availability-question
+    generator (which "вільний час" wording used to trigger)."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    first = await processor.process(_message("хочу на чистку"))
+    assert first["booking_result"]["status"] == "waiting_for_time"
+    checks_before = len(calendar.checked)
+
+    result = await processor.process(_message(followup_text))
+
+    assert result["booking_result"]["status"] == "nearest_availability_suggested"
+    assert "Розумію" not in result["reply_text"]
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert len(calendar.checked) > checks_before
+    assert calendar.created == []
+
+
+async def test_dental_nearest_availability_skips_busy_and_closed_days():
+    """Availability safety: the search must only ever return a Calendar-
+    verified slot within valid business hours, skipping a fully busy day
+    (Saturday here) and a closed day (Sunday) without ever offering either."""
+    calendar = BusyAllSaturdayConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    result = await processor.process(_message("найближчий час"))
+
+    assert result["booking_result"]["status"] == "nearest_availability_suggested"
+    start_dt = processor.booking_service._deserialize_pending_start_dt(
+        result["booking_result"]["start_dt"]
+    )
+    assert start_dt.weekday() == 0  # Monday -- Saturday busy, Sunday closed
+    assert start_dt.hour == 9
+    assert all(check["start_dt"].weekday() != 6 for check in calendar.checked)
+
+
+async def test_dental_nearest_availability_requires_acceptance_and_contact_before_create():
+    """Availability safety: the offered nearest slot must never create a
+    Calendar event by itself -- only after the normal accept + contact
+    sequence, exactly once."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    offer = await processor.process(_message("найближчий час"))
+    assert calendar.created == []
+
+    accepted = await processor.process(_message("так, підходить"))
+    assert accepted["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.created == []
+
+    completed = await processor.process(_message("Дмитро 0987121328"))
+    assert completed["booking_result"]["status"] == "confirmed"
+    assert len(calendar.created) == 1
+
+
+async def test_dental_nearest_availability_without_service_still_asks_which_service():
+    """Guard: a bare nearest-availability request with no pain/dentist
+    context and no prior service or booking intent must not silently
+    default to a service or touch the Calendar -- the generic
+    dental_consultation fallback is bounded to an actual pain/dentist
+    mention, not every unresolved-service nearest-availability request."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("найближчий час"))
+
+    assert result["booking_result"] is None
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert not pending or not pending.get("current_service_id")
+    assert calendar.checked == []
+
+
+async def test_dental_pain_mention_alone_gets_acknowledgement_without_booking():
+    """Matrix 6: a bare pain mention with no booking intent gets a neutral
+    human acknowledgement -- no diagnosis, no Calendar interaction."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("болить зуб"))
+
+    assert "Розумію" in result["reply_text"]
+    assert "діагноз" not in result["reply_text"].lower()
+    assert calendar.checked == []
+    assert calendar.created == []
+    assert processor.booking_service.get_booking_state("patient-1").value == "NONE"
+
+
+async def test_dental_pain_mention_with_booking_intent_starts_booking_flow():
+    """Matrix 7: pain mentioned together with explicit booking intent gets
+    acknowledged once, then proceeds into the normal booking flow (here:
+    asking which service, since none was named) -- no invented diagnosis."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("дуже болить зуб, хочу записатись"))
+
+    assert result["booking_result"]["status"] == "waiting_for_service"
+    assert "Розумію" in result["reply_text"]
+    assert "На яку послугу" in result["reply_text"]
+    assert calendar.checked == []
+
+
+async def test_dental_pain_diagnosis_question_still_blocked():
+    """Matrix 8: asking the bot to confirm a specific diagnosis must still
+    be refused by the existing diagnosis-safety guard, unaffected by the
+    new pain-acknowledgement/nearest-availability handling."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("болить зуб, це пульпіт?"))
+
+    assert "не можу поставити діагноз" in result["reply_text"].lower()
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+# ---------------------------------------------------------------------------
+# Conversational understanding fix: natural slot selection (A1-A7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reply_text",
+    [
+        "17 година буде зручно",
+        "17 година буде зручноо",
+        "давайте на 17",
+        "підходить 17",
+        "тоді 17",
+        "хочу на 17",
+        "мені на 17",
+        "можна 17?",
+    ],
+)
+async def test_dental_natural_offered_slot_selection_variants(reply_text):
+    """A1-A4: natural phrasing that directly answers an active multi-slot
+    offer ("17 година буде зручно", typos included, "підходить 17", etc.)
+    must select the matching offered slot and progress to contact -- not
+    repeat the generic "on which time?" prompt."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    offer = await processor.process(_message("3 вересня ввечері"))
+    assert offer["booking_result"]["status"] == "daypart_slots_suggested"
+
+    result = await processor.process(_message(reply_text))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert result["booking_result"]["start_dt"] == "2026-09-03T17:00:00+03:00"
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "reply_text",
+    [
+        "мені 17 років",
+        "нас буде 10 людей",
+        "дитині 5 років",
+    ],
+)
+async def test_dental_natural_slot_selection_excludes_unrelated_numbers(reply_text):
+    """A5-A7: age/headcount numbers that happen to equal an offered slot's
+    hour must never be mistaken for a time selection."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("3 вересня ввечері"))
+
+    result = await processor.process(_message(reply_text))
+
+    assert result["booking_result"]["status"] != "waiting_for_contact"
+    assert calendar.created == []
+
+
+async def test_dental_natural_slot_selection_reschedule_flow_too():
+    """The same natural-language tolerance applies to an active reschedule
+    offer, not just a fresh booking -- reusing the same shared parsing
+    path, still gated by the existing residual-content safety check."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("хочу перенести запис на п'ятницю ввечері"))
+    result = await processor.process(_message("17 година буде зручно"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "calendar-event-123"
+
+
+# ---------------------------------------------------------------------------
+# Conversational understanding fix: offer continuity (B8-B9)
+# ---------------------------------------------------------------------------
+
+
+async def test_dental_greeting_during_active_offer_restates_context():
+    """B8: a harmless greeting mid-offer must not be treated as answering
+    or resetting the pending question -- it should acknowledge and restate
+    the still-active offer, not fall back to a generic prompt."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    offer = await processor.process(_message("3 вересня ввечері"))
+    assert offer["booking_result"]["status"] == "daypart_slots_suggested"
+
+    result = await processor.process(_message("Привіт"))
+
+    assert result["booking_result"]["status"] == "greeting_during_active_offer"
+    assert "17:00" in result["reply_text"]
+    assert calendar.created == []
+    # The offer must still be genuinely selectable afterwards.
+    followup = await processor.process(_message("17:00"))
+    assert followup["booking_result"]["status"] == "waiting_for_contact"
+
+
+async def test_dental_greeting_during_reschedule_offer_does_not_resurrect_stale_state():
+    """B8/B9 safety boundary: a greeting during an ACTIVE RESCHEDULE offer
+    must not keep dangerous reschedule state alive -- the existing stale-
+    reschedule-offer invalidation (which treats a bare greeting as "not
+    engaged") must still run first and clear it; the greeting handler must
+    then find nothing left to restate."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("хочу перенести запис на п'ятницю ввечері"))
+    greeting_result = await processor.process(_message("Привіт"))
+    assert greeting_result["booking_result"] is None or greeting_result["booking_result"].get(
+        "status"
+    ) != "greeting_during_active_offer"
+
+    result = await processor.process(_message("17:00"))
+
+    assert result["booking_result"] is None or result["booking_result"].get("status") != "rescheduled"
+    assert calendar.rescheduled == []
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert completed["calendar_event_id"] == "calendar-event-123"
+
+
+# ---------------------------------------------------------------------------
+# Conversational understanding fix: supported service grounding (C10-C15)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ставите брекети?",
+        "можна поставити брекети?",
+        "хочу поставити брекети",
+        "робите брекети?",
+        "запишіть на брекети",
+    ],
+)
+async def test_dental_ordinary_action_verbs_do_not_contain_supported_service(text):
+    """C10-C11: ordinary action verbs around a supported base service
+    ("ставите", "поставити", "робите", "запишіть") must not trigger the
+    unsupported-variant safe-uncertainty reply -- the service is grounded
+    in the KB and should be answered directly."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message(text))
+
+    assert "у базі немає підтвердження" not in result["reply_text"]
+
+
+async def test_dental_grounded_price_question_for_supported_service():
+    """C12: a plain price question for a supported service must be
+    answered with the grounded KB price, not contained as unknown."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("скільки коштують брекети?"))
+
+    assert "у базі немає підтвердження" not in result["reply_text"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "сапфірові брекети ставите?",
+        "імпланти Straumann робите?",
+        "лазерне відбілювання робите?",
+    ],
+)
+async def test_dental_unsupported_variant_containment_still_works(text):
+    """C13-C15: an unsupported qualifier/brand/material on top of a
+    supported base service must still trigger safe-uncertainty containment
+    -- the broadened action-verb exclusion must not weaken this."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message(text))
+
+    assert "у базі немає підтвердження" in result["reply_text"]
+
+
+# ---------------------------------------------------------------------------
+# Conversational understanding fix: contextual uncertainty follow-up (D16-D17)
+# ---------------------------------------------------------------------------
+
+
+async def test_dental_uncertainty_followup_retains_subject_without_fake_handoff():
+    """D16: "гаразд, уточніть" right after a safe-uncertainty containment
+    reply must retain the unresolved subject (braces) rather than asking a
+    generic "what would you like clarified?", and must not claim a human
+    handoff that never actually happens."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("сапфірові брекети ставите?"))
+    result = await processor.process(_message("Гаразд, уточніть"))
+
+    assert "Брекети" in result["reply_text"]
+    assert "що саме уточнити" not in result["reply_text"].lower()
+    assert "передав" not in result["reply_text"].lower()
+    assert "передам" not in result["reply_text"].lower()
+
+
+async def test_dental_uncertainty_followup_bare_ack_does_not_start_booking():
+    """D17: a bare "добре" after the same containment reply must not
+    fabricate a clarification or accidentally start a booking flow for the
+    unresolved service."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("сапфірові брекети ставите?"))
+    result = await processor.process(_message("добре"))
+
+    assert result["booking_result"] is None
+    assert "Брекети" in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_uncertainty_followup_scoped_to_pending_marker_only():
+    """Guard: a generic "так"/"добре" with no preceding unknown-detail
+    containment reply must be completely unaffected by the new followup
+    handler (it must not globally intercept acknowledgement words)."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    result = await processor.process(_message("так"))
+
+    assert "Брекети" not in result["reply_text"]
 
 
 async def test_dental_date_only_correction_preserves_previous_time():
