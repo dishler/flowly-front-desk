@@ -420,7 +420,7 @@ async def test_dental_explicit_cleaning_price_is_specific_not_general(dental_pro
 
     assert "1800 грн" in result["reply_text"]
     assert "2200 грн" not in result["reply_text"]
-    assert "6500 грн" not in result["reply_text"]
+    assert "4500 грн" not in result["reply_text"]
     assert "Для дзвінка підкажіть" not in result["reply_text"]
     _assert_no_flowly_leakage(result["reply_text"])
 
@@ -433,7 +433,7 @@ async def test_dental_short_how_much_service_questions_are_specific(dental_proce
     whitening = await processor.process(_message("а відбілювання?"))
 
     assert "1800 грн" in cleaning["reply_text"]
-    assert "6500 грн" in whitening["reply_text"]
+    assert "4500 грн" in whitening["reply_text"]
     assert "2200 грн" not in cleaning["reply_text"]
     assert "1800 грн" not in whitening["reply_text"]
     _assert_no_flowly_leakage(cleaning["reply_text"], whitening["reply_text"])
@@ -495,7 +495,7 @@ async def test_dental_price_objection_after_price_context_stays_dental(dental_pr
     price = await processor.process(_message("Скільки коштує відбілювання?"))
     objection = await processor.process(_message("це дорого"))
 
-    assert "6500" in price["reply_text"]
+    assert "4500" in price["reply_text"]
     assert objection["intent"] == "front_desk_safe_fallback"
     assert "старт від 200" not in objection["reply_text"]
     assert "мінімального сценарію" not in objection["reply_text"]
@@ -1180,6 +1180,275 @@ async def test_dental_pediatric_question_remains_grounded_after_confidence_tight
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("text", "expected_price", "expected_service_id"),
+    [
+        ("дитині 5 років, скільки коштує лікування карієсу?", "1800 грн", "pediatric_caries_treatment"),
+        ("скільки коштує лікування карієсу дитині?", "1800 грн", "pediatric_caries_treatment"),
+        ("скільки лікування карієсу дитині?", "1800 грн", "pediatric_caries_treatment"),
+        ("скільки коштує чистка дитині?", "1200 грн", "pediatric_cleaning"),
+    ],
+)
+async def test_dental_pediatric_service_prices_use_pediatric_topics(
+    text,
+    expected_price,
+    expected_service_id,
+):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert expected_price in result["reply_text"]
+    assert context["current_service_id"] == expected_service_id
+    assert result["booking_result"] is None
+    assert calendar.created == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected_pending_name", "expected_topic_id"),
+    [
+        ("дитині 5 років, треба полікувати карієс", "Лікування карієсу у дітей", "pediatric_caries_treatment"),
+        ("хочу записати дитину на лікування карієсу", "Лікування карієсу у дітей", "pediatric_caries_treatment"),
+        ("хочу на дитячу чистку", "Дитяча чистка зубів", "pediatric_cleaning"),
+        ("хочу записати дитину на чистку", "Дитяча чистка зубів", "pediatric_cleaning"),
+    ],
+)
+async def test_dental_pediatric_booking_topics_redirect_to_pediatric_dentistry(
+    text,
+    expected_pending_name,
+    expected_topic_id,
+):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "pediatric_dentistry"
+    assert pending["current_service_name"] == expected_pending_name
+    assert context["current_service_id"] == expected_topic_id
+    assert calendar.created == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "дитині 5 років",
+    ],
+)
+async def test_dental_pediatric_marker_alone_does_not_fabricate_specific_treatment(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert context.get("current_service_id") not in {
+        "pediatric_caries_treatment",
+        "pediatric_cleaning",
+    }
+    assert result["booking_result"] is None
+    assert calendar.created == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_child_booking_without_specific_service_uses_pediatric_consultation():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу записати дитину"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "pediatric_dentistry"
+    assert context["current_service_id"] == "pediatric_dentistry"
+    assert calendar.created == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected_price", "expected_service_id"),
+    [
+        ("скільки коштує лікування карієсу?", "2200 грн", "caries_treatment"),
+        ("скільки коштує чистка?", "1800 грн", "dental_cleaning"),
+    ],
+)
+async def test_dental_adult_service_prices_stay_on_adult_topics(
+    text,
+    expected_price,
+    expected_service_id,
+):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert expected_price in result["reply_text"]
+    assert context["current_service_id"] == expected_service_id
+    assert result["booking_result"] is None
+    assert calendar.created == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected_service_id", "expected_service_name"),
+    [
+        ("хочу на чистку", "dental_cleaning", "Професійна гігієна зубів"),
+        ("хочу лікувати карієс", "caries_treatment", "Лікування карієсу"),
+    ],
+)
+async def test_dental_adult_booking_phrases_stay_on_adult_topics(
+    text,
+    expected_service_id,
+    expected_service_name,
+):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == expected_service_id
+    assert pending["current_service_name"] == expected_service_name
+    assert context["current_service_id"] == expected_service_id
+    assert calendar.created == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_veneers_contextual_followups_use_remembered_topic():
+    processor, calendar = _build_dental_processor()
+
+    service = await processor.process(_message("чи робите вініри?"))
+    price = await processor.process(_message("скільки один?"))
+    trimming = await processor.process(_message("а треба обточувати?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Вініри" in service["reply_text"]
+    assert "12000 грн" in price["reply_text"]
+    assert "ортопед" in trimming["reply_text"]
+    assert context["current_service_id"] == "veneers"
+    assert calendar.created == []
+    _assert_no_flowly_leakage(service["reply_text"], price["reply_text"], trimming["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_crown_contextual_followups_use_options_and_safe_faq():
+    processor, calendar = _build_dental_processor()
+
+    options = await processor.process(_message("які коронки є?"))
+    zirconia = await processor.process(_message("а цирконієва скільки?"))
+    best = await processor.process(_message("яка краща?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Металокерамічна коронка" in options["reply_text"]
+    assert "Цирконієва коронка" in options["reply_text"]
+    assert "9000 грн" in zirconia["reply_text"]
+    assert "Не обираємо матеріал дистанційно" in best["reply_text"]
+    assert context["current_service_id"] == "dental_crowns"
+    assert calendar.created == []
+    _assert_no_flowly_leakage(options["reply_text"], zirconia["reply_text"], best["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_implant_contextual_followups_do_not_switch_to_crowns():
+    processor, calendar = _build_dental_processor()
+
+    price = await processor.process(_message("скільки коштує імплант?"))
+    crown = await processor.process(_message("коронка входить?"))
+    suitability = await processor.process(_message("давно немає зуба, можна поставити?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "16000 грн" in price["reply_text"]
+    assert "розраховується окремо" in crown["reply_text"]
+    assert "рентген-діагностики" in suitability["reply_text"]
+    assert context["current_service_id"] == "dental_implant"
+    assert calendar.created == []
+    _assert_no_flowly_leakage(price["reply_text"], crown["reply_text"], suitability["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_contextual_followups_do_not_switch_to_crowns():
+    processor, calendar = _build_dental_processor()
+
+    service = await processor.process(_message("брекети ставите?"))
+    metal = await processor.process(_message("а металеві скільки?"))
+    duration = await processor.process(_message("скільки носити?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Брекети" in service["reply_text"]
+    assert "19000 грн" in metal["reply_text"]
+    assert "щелепу" in metal["reply_text"]
+    assert "Термін лікування залежить" in duration["reply_text"]
+    assert context["current_service_id"] == "braces"
+    assert calendar.created == []
+    _assert_no_flowly_leakage(service["reply_text"], metal["reply_text"], duration["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_root_canal_contextual_followups_stay_safe():
+    processor, calendar = _build_dental_processor()
+
+    service = await processor.process(_message("лікуєте канали?"))
+    microscope = await processor.process(_message("під мікроскопом?"))
+    diagnosis = await processor.process(_message("це точно пульпіт?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "4500 грн" in service["reply_text"]
+    assert "мікроскопом" in microscope["reply_text"]
+    assert diagnosis["intent"] == "diagnosis_request"
+    assert "Не можу поставити діагноз" in diagnosis["reply_text"]
+    assert context["current_service_id"] == "root_canal_treatment"
+    assert calendar.created == []
+    _assert_no_flowly_leakage(service["reply_text"], microscope["reply_text"], diagnosis["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "second", "expected_topic", "expected_booking_service"),
+    [
+        ("скільки коштує імплант?", "а які коронки у вас є?", "dental_crowns", "prosthetics_consultation"),
+        ("брекети ставите?", "а вініри робите?", "veneers", "prosthetics_consultation"),
+        ("вініри робите?", "хочу на чистку", "dental_cleaning", "dental_cleaning"),
+    ],
+)
+async def test_dental_contextual_followups_allow_explicit_topic_switches(
+    first,
+    second,
+    expected_topic,
+    expected_booking_service,
+):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message(first))
+    result = await processor.process(_message(second))
+    context = processor.memory_service.get_context("patient-1")
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert context["current_service_id"] == expected_topic
+    assert (
+        pending.get("current_service_id")
+        or processor._effective_booking_service_id(context["current_service_id"])
+    ) == expected_booking_service
+    assert calendar.created == []
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "text",
     [
         "чистка у вівторок дорожча?",
@@ -1210,7 +1479,7 @@ async def test_dental_booking_service_survives_different_service_faq_interruptio
 
     assert start["booking_result"]["status"] == "waiting_for_time"
     assert faq["intent"] == "booking_grounded_question"
-    assert "6500 грн" in faq["reply_text"]
+    assert "4500 грн" in faq["reply_text"]
     assert resume["intent"] == "booking_flow"
     assert pending["current_service_id"] == "dental_cleaning"
     assert pending["current_service_name"] == "Професійна гігієна зубів"
@@ -1240,7 +1509,7 @@ async def test_dental_active_booking_faq_interruption_preserves_booking_context(
     pending = processor.booking_service._get_pending_confirmation("patient-1")
 
     assert faq["intent"] == "booking_grounded_question"
-    assert "6500" in faq["reply_text"]
+    assert "4500" in faq["reply_text"]
     assert pending["state"] == "WAITING_FOR_TIME"
     _assert_no_flowly_leakage(faq["reply_text"])
 
@@ -1300,7 +1569,7 @@ async def test_dental_exact_time_booking_rejects_closed_sunday_before_calendar(d
     assert result["booking_result"]["status"] == "outside_business_hours"
     assert "клініка не працює" in result["reply_text"].lower()
     assert calendar.checked == []
-    assert processor.booking_service.get_booking_state("patient-1").value == "NONE"
+    assert processor.booking_service.get_booking_state("patient-1").value == "WAITING_FOR_TIME"
     _assert_no_flowly_leakage(result["reply_text"])
 
 
@@ -1890,7 +2159,7 @@ async def test_dental_active_booking_time_window_refinement_beats_stale_pricing_
         {"day_key": "selected_day", "start_dt": "2026-08-27T16:30:00+03:00"},
         {"day_key": "selected_day", "start_dt": "2026-08-27T17:00:00+03:00"},
     ]
-    assert "6500" not in refined["reply_text"]
+    assert "4500" not in refined["reply_text"]
     assert "відбілювання" not in refined["reply_text"].lower()
     assert pending["state"] == "WAITING_FOR_TIME"
     assert pending["requested_date"] == "2026-08-27"
@@ -1979,7 +2248,7 @@ async def test_dental_active_booking_availability_question_can_override_known_da
         ("який у вас графік роботи?", "Графік роботи"),
         ("до котрої ви працюєте?", "Графік роботи"),
         ("в неділю ви працюєте?", "Графік роботи"),
-        ("скільки коштує відбілювання?", "6500 грн"),
+        ("скільки коштує відбілювання?", "4500 грн"),
         ("скільки коштує чистка?", "1800 грн"),
     ],
 )
@@ -2045,7 +2314,7 @@ async def test_dental_active_booking_time_window_keeps_legitimate_price_faq():
 
     assert faq["intent"] == "booking_grounded_question"
     assert faq["booking_result"] is None
-    assert "6500" in faq["reply_text"]
+    assert "4500" in faq["reply_text"]
     assert pending["state"] == "WAITING_FOR_TIME"
     assert pending["requested_date"] == "2026-08-27"
 
@@ -4221,6 +4490,571 @@ async def test_dental_active_booking_cancel_stays_unchanged(dental_processor):
     assert calendar.checked == []
 
 
+class RescheduleTrackingCalendarService(RecordingConfiguredCalendarService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rescheduled: list[dict] = []
+        self.deleted: list[str] = []
+
+    def reschedule_event(self, event_id: str, start_dt, duration_minutes: int = 30) -> None:
+        self.rescheduled.append(
+            {"event_id": event_id, "start_dt": start_dt, "duration_minutes": duration_minutes}
+        )
+
+    def delete_event(self, event_id: str) -> None:
+        self.deleted.append(event_id)
+
+
+def _mark_dental_booking_confirmed(processor, event_id: str = "calendar-event-123") -> None:
+    processor.booking_service._mark_booking_completed(
+        "patient-1",
+        start_dt=_kyiv_dt(2026, 4, 27, 12),
+        customer_name="Іван",
+        email="client@example.com",
+        phone="0987121328",
+        calendar_event_id=event_id,
+    )
+
+
+async def test_dental_confirmed_booking_business_hours_question_does_not_reschedule():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    result = await processor.process(_message("ви завтра працюєте о 17?"))
+
+    assert "Графік роботи" in result["reply_text"]
+    assert calendar.rescheduled == []
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert not pending or not pending.get("reschedule_pending")
+
+
+async def test_dental_confirmed_booking_hours_window_question_does_not_arm_reschedule():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    result = await processor.process(_message("чи працюєте ви сьогодні до 17?"))
+
+    assert "Графік роботи" in result["reply_text"]
+    assert calendar.rescheduled == []
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert not pending or not pending.get("reschedule_pending")
+
+
+async def test_dental_confirmed_booking_unrelated_meeting_mention_does_not_reschedule():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("зустріч завтра о 17"))
+
+    assert calendar.rescheduled == []
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert completed["calendar_event_id"] == "calendar-event-123"
+
+
+async def test_dental_confirmed_booking_price_question_does_not_reschedule():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("ціна чистки завтра о 17"))
+
+    assert calendar.rescheduled == []
+
+
+async def test_dental_confirmed_booking_bare_datetime_reschedules_once():
+    # This file's clock is frozen to Saturday 2026-08-22 (see
+    # freeze_dental_smoke_booking_clock); "завтра" would land on the closed
+    # Sunday, so "сьогодні" is used here to land on an open day instead --
+    # the reschedule-succeeds assertion is unaffected by that choice.
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    result = await processor.process(_message("сьогодні о 14"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "calendar-event-123"
+
+
+async def test_dental_confirmed_booking_explicit_reschedule_still_works():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    result = await processor.process(_message("хочу перенести запис на сьогодні о 14"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "calendar-event-123"
+
+
+async def test_dental_confirmed_booking_explicit_cancellation_wins_over_datetime():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    result = await processor.process(_message("скасуйте запис на завтра о 17"))
+
+    assert result["booking_result"]["status"] == "cancelled"
+    assert calendar.rescheduled == []
+
+
+async def test_dental_confirmed_booking_can_i_book_tomorrow_does_not_mutate_old_event():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("можна завтра о 17?"))
+
+    assert calendar.rescheduled == []
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert completed["calendar_event_id"] == "calendar-event-123"
+
+
+async def test_dental_direct_booking_then_bare_contact_completes_once():
+    """P1-A regression guard: a single-message date/time booking request
+    followed by bare contact info must attach to the already-verified slot
+    and create exactly one booking (confirms this path is NOT broken)."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    offer = await processor.process(_message("хочу записатися на чистку 3 вересня о 16"))
+    assert offer["booking_result"]["status"] == "waiting_for_contact"
+
+    confirmed = await processor.process(_message("Дмитро 0987121328"))
+
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert len(calendar.created) == 1
+    assert calendar.created[0]["start_dt"].hour == 16
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert completed["customer_name"] == "Дмитро"
+    assert completed["phone"] == "0987121328"
+
+
+class BusyAt17ConfiguredCalendarService(RecordingConfiguredCalendarService):
+    def check_specific_time_availability(self, start_dt, duration_minutes: int = 30) -> bool:
+        self.checked.append({"start_dt": start_dt, "duration_minutes": duration_minutes})
+        return start_dt.hour != 17
+
+
+async def test_dental_reject_busy_alternative_with_ni_asks_for_new_time():
+    """P1-B: rejecting a single busy-alternative offer with "ні" must ask
+    for another time/day, not return an unrelated KB answer, and must not
+    create the rejected alternative."""
+    calendar = BusyAt17ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    offer = await processor.process(_message("хочу на чистку 3 вересня о 17"))
+    assert offer["booking_result"]["status"] == "slot_suggested"
+
+    contact = await processor.process(_message("Дмитро 0987121328"))
+    assert contact["booking_result"]["status"] != "confirmed"
+
+    result = await processor.process(_message("ні"))
+
+    assert result["booking_result"]["status"] == "alternative_rejected"
+    assert "інший" in result["reply_text"].lower()
+    assert calendar.created == []
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending.get("busy_alternative") is not True
+    assert pending.get("suggested_slots") in (None, [])
+
+
+async def test_dental_explicit_service_switch_beats_stale_topic_context():
+    """P1-C: an explicit new-service booking request must switch away from
+    a stale remembered service, not be swallowed as an unknown detail of
+    the old one."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу вініри"))
+    result = await processor.process(_message("ні, краще хочу записатися на чистку"))
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "робите лазерне відбілювання?",
+        "ставите сапфірові брекети?",
+        "імпланти Straumann ставите?",
+    ],
+)
+async def test_dental_unknown_variant_containment_survives_service_switch_fix(text):
+    """P1-C must not weaken unknown-variant containment."""
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert "у базі немає підтвердження" in result["reply_text"]
+    assert calendar.created == []
+
+
+async def test_dental_implant_to_consultation_still_prosthetics():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу імплант"))
+    await processor.process(_message("хочу записатися на консультацію"))
+
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["current_service_id"] == "prosthetics_consultation"
+
+
+async def test_dental_braces_to_consultation_still_orthodontic():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу брекети"))
+    await processor.process(_message("хочу записатися на консультацію"))
+
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["current_service_id"] == "orthodontic_consultation"
+
+
+async def test_dental_fragmented_reschedule_with_time_window_completes():
+    """P1-D: "хочу перенести запис" -> "у п'ятницю після 16" must offer
+    verified Friday slots and, once one is selected, reschedule the
+    existing event exactly once."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("хочу перенести запис"))
+    offer = await processor.process(_message("у п'ятницю після 16"))
+
+    assert offer["booking_result"]["status"] == "time_window_slots_suggested"
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["reschedule_pending"] is True
+
+    result = await processor.process(_message("17:00"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "calendar-event-123"
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "followup_text",
+    [
+        "чи працюєте ви в п'ятницю о 17?",
+        "а скільки коштує чистка о 17?",
+        "зустріч у п'ятницю о 17",
+    ],
+)
+async def test_dental_pending_reschedule_still_invalidated_by_unrelated_text(followup_text):
+    """P1-D must not broadly loosen residual-content validation -- FAQ and
+    unrelated text must still invalidate the pending reschedule."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("хочу перенести запис"))
+    await processor.process(_message(followup_text))
+
+    assert calendar.rescheduled == []
+
+
+@pytest.mark.parametrize(
+    "followup_text",
+    [
+        "зустріч у п'ятницю о 17",
+        "а скільки коштує чистка о 17?",
+        "чи працюєте ви в п'ятницю о 17?",
+    ],
+)
+async def test_dental_active_reschedule_offer_not_hijacked_by_unrelated_datetime(followup_text):
+    """P0: once a reschedule offer is already active (slots verified,
+    reschedule_pending=True), an unrelated message that merely happens to
+    name a date/time matching an offered slot must not silently reschedule
+    the existing confirmed booking."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    offer = await processor.process(_message("хочу перенести запис на п'ятницю ввечері"))
+    assert offer["booking_result"]["status"] == "daypart_slots_suggested"
+
+    result = await processor.process(_message(followup_text))
+
+    assert result["booking_result"] is None or result["booking_result"].get("status") != "rescheduled"
+    assert calendar.rescheduled == []
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert completed["calendar_event_id"] == "calendar-event-123"
+
+
+async def test_dental_active_reschedule_offer_bare_datetime_still_reschedules_once():
+    """P0 regression guard: a genuinely bare date/time reply to an active
+    offer must still reschedule exactly once (shorthand must not be lost)."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("хочу перенести запис на п'ятницю ввечері"))
+    result = await processor.process(_message("17:00"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "calendar-event-123"
+    assert calendar.created == []
+
+
+async def test_dental_explicit_reschedule_verb_survives_residual_content_guard():
+    """P0 fix must not block a legitimate explicit reschedule request that
+    names the reschedule verb itself ("перенесіть") while an offer is
+    already active."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("хочу перенести запис на п'ятницю ввечері"))
+    result = await processor.process(_message("перенесіть на суботу о 12:00"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "calendar-event-123"
+
+
+@pytest.mark.parametrize(
+    "interruption_text",
+    [
+        "зустріч завтра",
+        "ціна чистки завтра",
+        "ви завтра працюєте?",
+    ],
+)
+async def test_dental_active_reschedule_offer_not_hijacked_by_unrelated_day_mention_then_bare_time(
+    interruption_text,
+):
+    """P0 (multi-turn release blocker): a message that merely names a day
+    (no time) but carries unrelated content must invalidate an active
+    reschedule offer, the same as a single message combining unrelated
+    content with a full date/time already does. Without this,
+    `_reschedule_offer_still_engaged` treated any day mention as "still
+    engaged", so a later, separate bare offered time could resurrect and
+    reschedule the existing confirmed booking against unrelated intent."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    offer = await processor.process(_message("хочу перенести запис на п'ятницю ввечері"))
+    assert offer["booking_result"]["status"] == "daypart_slots_suggested"
+
+    await processor.process(_message(interruption_text))
+    result = await processor.process(_message("17:00"))
+
+    assert result["booking_result"] is None or result["booking_result"].get("status") != "rescheduled"
+    assert calendar.rescheduled == []
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert completed["calendar_event_id"] == "calendar-event-123"
+
+
+async def test_dental_active_reschedule_offer_day_refinement_then_bare_time_still_reschedules():
+    """P0 regression guard: "а завтра?" (a genuine day refinement, not
+    unrelated content) followed later by a bare offered time must still
+    complete the reschedule -- the invalidation added for the unrelated-
+    day-mention case above must not also block legitimate refinements."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    await processor.process(_message("хочу перенести запис"))
+    await processor.process(_message("3 вересня ввечері"))
+    await processor.process(_message("а завтра?"))
+    result = await processor.process(_message("17"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1
+    assert calendar.rescheduled[0]["event_id"] == "calendar-event-123"
+
+
+async def test_dental_active_reschedule_offer_unrelated_faq_then_bare_time_does_not_reschedule():
+    """P0 regression guard: an unrelated FAQ interruption followed later by
+    a bare number matching a previously offered slot must not reschedule
+    the existing confirmed booking (the multi-turn counterpart of the
+    already-covered single-message unrelated-content case)."""
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor)
+
+    offer = await processor.process(_message("хочу перенести запис на п'ятницю ввечері"))
+    assert offer["booking_result"]["status"] == "daypart_slots_suggested"
+
+    await processor.process(_message("а скільки коштує чистка?"))
+    result = await processor.process(_message("17:00"))
+
+    assert result["booking_result"] is None or result["booking_result"].get("status") != "rescheduled"
+    assert calendar.rescheduled == []
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert completed["calendar_event_id"] == "calendar-event-123"
+
+
+async def test_dental_date_only_correction_preserves_previous_time():
+    """P1: "не, краще 4 вересня" must not misread the day-of-month digit
+    "4" as an hour (04:00) -- it must preserve the previously-known 16:00
+    and re-check it on the corrected date."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу чистку 3 вересня о 16"))
+    result = await processor.process(_message("не, краще 4 вересня"))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert result["booking_result"]["start_dt"] == "2026-09-04T16:00:00+03:00"
+
+
+async def test_dental_date_only_correction_numeric_format_preserves_time():
+    """P1: same guard for the numeric "DD.MM" date format -- neither the
+    day nor month component may be misread as an hour."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу чистку 3 вересня о 16"))
+    result = await processor.process(_message("не, краще 04.09"))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert result["booking_result"]["start_dt"] == "2026-09-04T16:00:00+03:00"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_start_dt"),
+    [
+        ("4 вересня о 17", "2026-09-04T17:00:00+03:00"),
+        ("04.09 о 17", "2026-09-04T17:00:00+03:00"),
+    ],
+)
+async def test_dental_date_with_explicit_time_still_parses_exact_hour(text, expected_start_dt):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу чистку"))
+    result = await processor.process(_message(text))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert result["booking_result"]["start_dt"] == expected_start_dt
+
+
+async def test_dental_busy_alternative_invalidated_by_faq_then_fresh_checked():
+    """P2: a busy-slot alternative offer must be dropped by an unrelated
+    FAQ interruption; a later coincidental match gets a fresh Calendar
+    check rather than being silently trusted from the stale offer."""
+    calendar = BusyAt17ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    offer = await processor.process(_message("хочу на чистку 3 вересня о 17"))
+    assert offer["booking_result"]["status"] == "slot_suggested"
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["busy_alternative"] is True
+
+    await processor.process(_message("а скільки коштує чистка"))
+    pending_after_faq = processor.booking_service._get_pending_confirmation("patient-1")
+    assert not pending_after_faq.get("busy_alternative")
+
+    checks_before = len(calendar.checked)
+    result = await processor.process(_message("18"))
+
+    assert len(calendar.checked) > checks_before
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.created == []
+
+
+async def test_dental_busy_alternative_contact_only_does_not_invalidate_offer():
+    """P2 fix must not regress: supplying contact info alone (the missing
+    piece the offer is waiting on) must not be treated as abandoning the
+    offer -- explicit acceptance afterwards must still complete once."""
+    calendar = BusyAt17ConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку 3 вересня о 17"))
+    await processor.process(_message("Дмитро 0987121328"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["busy_alternative"] is True
+
+    result = await processor.process(_message("так, підходить"))
+
+    assert result["booking_result"]["status"] == "confirmed"
+    assert len(calendar.created) == 1
+    assert calendar.created[0]["start_dt"].hour == 18
+
+
+async def test_dental_ok_book_it_resumes_pending_contact_not_fresh_booking():
+    """P1-E: "ок записуй" while WAITING_FOR_CONTACT for an already-verified
+    slot must resume that booking, not reset it."""
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу чистку"))
+    offer = await processor.process(_message("можна 3 вересня о 17?"))
+    assert offer["booking_result"]["status"] == "waiting_for_contact"
+
+    await processor.process(_message("стоп а скільки чистка?"))
+    pending_before = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending_before["state"] == "WAITING_FOR_CONTACT"
+    assert pending_before.get("start_dt")
+
+    resume = await processor.process(_message("ок записуй"))
+    pending_after = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert pending_after["state"] == "WAITING_FOR_CONTACT"
+    assert pending_after.get("start_dt") == pending_before.get("start_dt")
+    assert calendar.created == []
+
+    confirmed = await processor.process(_message("Дмитро 0987121328"))
+
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert len(calendar.created) == 1
+
+
+async def test_dental_records_still_start_fresh_booking_without_active_contact_wait():
+    """P1-E caveat: outside an active WAITING_FOR_CONTACT booking,
+    "записуй"/"хочу записатися" must still start a fresh booking."""
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу записатись"))
+
+    assert result["booking_result"]["status"] == "waiting_for_service"
+
+
+async def test_dental_pediatric_cleaning_bare_adult_followup_resolves_dental_cleaning():
+    """P1-F: a bare "а дорослим?" after discussing pediatric cleaning must
+    resolve to adult dental_cleaning, not an unrelated service."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("дитяча чистка є?"))
+    await processor.process(_message("скільки?"))
+    result = await processor.process(_message("а дорослим?"))
+
+    assert "1800" in result["reply_text"]
+    assert "19000" not in result["reply_text"]
+    ctx = processor.memory_service.get_context("patient-1")
+    assert ctx.get("current_service_id") == "dental_cleaning"
+
+
+async def test_dental_pediatric_caries_child_cleaning_followup_still_pediatric():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("дитині треба лікувати карієс"))
+    result = await processor.process(_message("а чистку дітям робите?"))
+
+    assert "1200" in result["reply_text"]
+
+
+async def test_dental_pediatric_caries_adult_cleaning_followup_still_switches():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("дитині треба лікувати карієс"))
+    result = await processor.process(_message("а дорослим чистку робите?"))
+
+    assert "1800" in result["reply_text"]
+
+
 @pytest.mark.asyncio
 async def test_dental_early_contact_survives_invalid_time_then_valid_time():
     calendar = UniqueEventConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 14)])
@@ -4549,7 +5383,7 @@ async def test_dental_confirmed_booking_allows_normal_faq_and_pricing(dental_pro
     assert location["intent"] == "front_desk_contextual_answer"
     assert "Липська, 12" in location["reply_text"]
     assert whitening["intent"] == "front_desk_contextual_answer"
-    assert "6500 грн" in whitening["reply_text"]
+    assert "4500 грн" in whitening["reply_text"]
     assert "Для дзвінка підкажіть" not in location["reply_text"]
     assert "Для дзвінка підкажіть" not in whitening["reply_text"]
     _assert_no_flowly_leakage(location["reply_text"], whitening["reply_text"])
@@ -4911,10 +5745,10 @@ async def test_dental_filling_anesthesia_referent_and_clarification_use_last_ser
 async def test_dental_greeting_with_substantive_questions_does_not_consume_intent():
     processor, calendar = _build_dental_processor()
 
-    veneers = await processor.process(_message("доброго дня, чи вставляєте ви вініри?"))
+    laser = await processor.process(_message("доброго дня, чи робите ви лазерні процедури?"))
     price = await processor.process(_message("Привіт, скільки коштує чистка?"))
 
-    assert "Потрібно уточнити" in veneers["reply_text"]
+    assert "адміністратор" in laser["reply_text"].lower()
     assert "1800 грн" in price["reply_text"]
     assert calendar.checked == []
     assert calendar.created == []
@@ -5229,5 +6063,40 @@ async def test_dental_weekly_hours_and_address_still_work_after_context_hardenin
     assert "Пн-Пт" in hours["reply_text"] or "09:00-19:00" in hours["reply_text"]
     assert "Липська, 12" in address["reply_text"]
     assert "Вітаю" in greeting["reply_text"] or "Smile Dental Clinic" in greeting["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+UNKNOWN_SERVICE_DETAIL_CONTAINMENT_MARKER = "у базі немає підтвердження"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ви робите лазерне відбілювання?",
+        "ставите сапфірові брекети?",
+        "робите імпланти Straumann?",
+    ],
+)
+async def test_dental_unknown_service_variant_stays_safely_contained(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert UNKNOWN_SERVICE_DETAIL_CONTAINMENT_MARKER in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_supported_implant_question_is_not_wrongly_contained():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("робите імпланти?"))
+
+    assert UNKNOWN_SERVICE_DETAIL_CONTAINMENT_MARKER not in result["reply_text"]
+    context = processor.memory_service.get_context("patient-1")
+    assert context.get("current_service_id") == "dental_implant"
     assert calendar.checked == []
     assert calendar.created == []

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1331,7 +1331,7 @@ async def test_exact_time_booking_outside_hours_rejects_before_calendar_check(pr
     assert calendar_service.availability_checks == []
     assert calendar_service.created_events == []
     assert not booking_service.has_confirmed_booking("user-1")
-    assert booking_service.get_booking_state("user-1").value == "NONE"
+    assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
 
 
 async def test_exact_time_booking_availability_exception_with_contact_does_not_complete(processor_factory):
@@ -2134,6 +2134,310 @@ async def test_confirmed_booking_fresh_booking_after_faq_messages(processor_fact
     assert len(calendar_service.created_events) == existing_created_count
     assert calendar_service.rescheduled_events == []
     assert booking_service.get_booking_state("user-1").value == "WAITING_FOR_CONTACT"
+
+
+def _open_all_hours(booking_service: BookingService, monkeypatch) -> None:
+    monkeypatch.setattr(
+        booking_service,
+        "_business_hours_status_for_date",
+        lambda target_date: ("open", (time(0, 0), time(23, 59))),
+    )
+
+
+async def _offer_reschedule_slots(processor, booking_service, monkeypatch):
+    """Starts a reschedule for a completed booking and gets back multiple
+    verified offered slots (16:00 / 16:30 / 17:00), leaving `reschedule_pending`
+    set in the pending confirmation -- the state the stale-offer guard has to
+    protect.
+    """
+    _open_all_hours(booking_service, monkeypatch)
+    result = await processor.process(_message(text="хочу перенести дзвінок на завтра після 16"))
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["reschedule_pending"] is True
+    assert len(pending["suggested_slots"]) == 3
+    return result
+
+
+async def test_stale_reschedule_offer_immediate_explicit_acceptance_reschedules_once(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    result = await processor.process(_message(text="17:00"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar_service.rescheduled_events) == 1
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_stale_reschedule_offer_explicit_new_target_invalidates_old_slots(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    result = await processor.process(_message(text="перенесіть на післязавтра о 18:00"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar_service.rescheduled_events) == 1
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
+    assert calendar_service.rescheduled_events[0]["start_dt"].hour == 18
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_stale_reschedule_offer_not_resurrected_by_later_ambiguous_time(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    # An unrelated turn in between -- the user has moved on from the offer.
+    await processor.process(_message(text="Дякую за інформацію"))
+    pending_after_unrelated = booking_service._get_pending_confirmation("user-1")
+    assert pending_after_unrelated["reschedule_pending"] is False
+
+    result = await processor.process(_message(text="17"))
+
+    assert result["booking_result"] is None or result["booking_result"]["status"] != "rescheduled"
+    assert calendar_service.rescheduled_events == []
+
+
+async def test_stale_reschedule_offer_not_resurrected_by_unrelated_text(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    await processor.process(_message(text="Дякую за інформацію"))
+    result = await processor.process(_message(text="Дякую, до зустрічі"))
+
+    assert result["booking_result"] is None or result["booking_result"]["status"] != "rescheduled"
+    assert calendar_service.rescheduled_events == []
+
+
+async def test_stale_reschedule_offer_generic_confirmation_does_not_arbitrarily_reschedule(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    result = await processor.process(_message(text="так"))
+
+    assert result["booking_result"]["status"] != "rescheduled"
+    assert calendar_service.rescheduled_events == []
+
+
+async def _offer_single_reschedule_slot(processor, booking_service, monkeypatch):
+    """Narrows business hours to a single 30-minute window so the reschedule
+    offer verifies exactly one candidate slot (16:00).
+    """
+    monkeypatch.setattr(
+        booking_service,
+        "_business_hours_status_for_date",
+        lambda target_date: ("open", (time(16, 0), time(16, 30))),
+    )
+    result = await processor.process(_message(text="хочу перенести дзвінок на завтра після 16"))
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["reschedule_pending"] is True
+    assert len(pending["suggested_slots"]) == 1
+    return result
+
+
+@pytest.mark.parametrize("confirmation_text", ["так", "добре", "підходить"])
+async def test_stale_reschedule_offer_single_slot_generic_confirmation_reschedules_once(
+    processor_factory,
+    monkeypatch,
+    confirmation_text,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_single_reschedule_slot(processor, booking_service, monkeypatch)
+    result = await processor.process(_message(text=confirmation_text))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar_service.rescheduled_events) == 1
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
+    assert calendar_service.rescheduled_events[0]["start_dt"].hour == 16
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_reschedule_refinement_later_preserves_reschedule_pending_and_reschedules_once(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    later = await processor.process(_message(text="пізніше?"))
+    assert later["booking_result"]["status"] == "time_window_slots_suggested"
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["reschedule_pending"] is True
+
+    result = await processor.process(_message(text="18:00"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar_service.rescheduled_events) == 1
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
+    assert calendar_service.rescheduled_events[0]["start_dt"].hour == 18
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_reschedule_refinement_daypart_preserves_reschedule_pending_and_reschedules_once(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    evening = await processor.process(_message(text="ввечері"))
+    assert evening["booking_result"]["status"] == "daypart_slots_suggested"
+    pending = booking_service._get_pending_confirmation("user-1")
+    assert pending["reschedule_pending"] is True
+
+    result = await processor.process(_message(text="18:00"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar_service.rescheduled_events) == 1
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
+    assert booking_service.get_booking_state("user-1").value == "NONE"
+
+
+async def test_fresh_booking_after_abandoned_reschedule_offer_does_not_reschedule(
+    processor_factory,
+    monkeypatch,
+):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await _offer_reschedule_slots(processor, booking_service, monkeypatch)
+    await processor.process(_message(text="Дякую за інформацію"))
+    result = await processor.process(_message(text="післязавтра о 12:00"))
+
+    assert result["booking_result"]["status"] != "rescheduled"
+    assert calendar_service.rescheduled_events == []
+    assert result["booking_result"]["start_dt"] == "2026-08-29T12:00:00+03:00"
+
+
+async def test_pending_reschedule_valid_continuation_reschedules_once(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    result = await processor.process(_message(text="у п'ятницю о 17"))
+
+    assert result["booking_result"]["status"] == "rescheduled"
+    assert len(calendar_service.rescheduled_events) == 1
+    assert calendar_service.rescheduled_events[0]["event_id"] == "calendar-event-123"
+
+
+async def test_pending_reschedule_business_hours_faq_does_not_reschedule(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    result = await processor.process(_message(text="чи працюєте ви в п'ятницю о 17:00?"))
+
+    assert result["intent"] != "booking_reschedule"
+    assert calendar_service.rescheduled_events == []
+
+
+async def test_pending_reschedule_price_faq_does_not_reschedule(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    result = await processor.process(_message(text="а скільки коштує чистка о 17?"))
+
+    assert calendar_service.rescheduled_events == []
+
+
+async def test_pending_reschedule_fresh_booking_exits_reschedule_intent(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    result = await processor.process(_message(text="хочу записатися на чистку в п'ятницю о 17"))
+
+    assert result["intent"] == "booking_request"
+    assert calendar_service.rescheduled_events == []
+
+
+async def test_pending_reschedule_cancellation_uses_cancel_semantics(processor_factory):
+    calendar_service = RecordingCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    result = await processor.process(_message(text="скасуй"))
+
+    assert result["intent"] == "booking_cancel"
+    assert calendar_service.deleted_event_ids == ["calendar-event-123"]
+    assert not booking_service.has_confirmed_booking("user-1")
+
+
+async def test_pending_reschedule_unrelated_datetime_does_not_reschedule(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    result = await processor.process(_message(text="зустріч у п'ятницю о 17"))
+
+    assert calendar_service.rescheduled_events == []
+
+
+async def test_pending_reschedule_fragmented_date_then_time_stays_safe(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    await processor.process(_message(text="у п'ятницю"))
+    await processor.process(_message(text="о 17"))
+
+    assert calendar_service.rescheduled_events == []
+
+
+async def test_pending_reschedule_stale_context_not_resurrected_by_later_bare_time(processor_factory):
+    calendar_service = RecordingCreateCalendarService()
+    processor, booking_service = processor_factory(calendar_service=calendar_service)
+    _mark_confirmed(booking_service, event_id="calendar-event-123")
+
+    await processor.process(_message(text="хочу перенести запис"))
+    await processor.process(_message(text="а скільки коштує чистка?"))
+    await processor.process(_message(text="17"))
+
+    assert calendar_service.rescheduled_events == []
 
 
 async def test_language_request_does_not_answer_in_russian(processor_factory):

@@ -99,7 +99,51 @@ class MessageProcessor:
         if knowledge_service is None:
             return None
 
-        return knowledge_service.find_confident_service(text)
+        service = knowledge_service.find_confident_service(text)
+        if service is not None:
+            return service
+        return knowledge_service.find_bounded_consultation_service(text)
+
+    def _effective_booking_service_id(self, service_id: str | None) -> str | None:
+        """A knowledge topic keeps its own identity (id/name/description),
+        but may book into a different Calendar/booking service via an
+        optional `booking_service_id` field (e.g. veneers -> prosthetics
+        consultation). Resolves that redirection for the one argument that
+        actually reaches BookingService; every other read of the topic id
+        (replies, remembered context) is untouched and keeps referring to
+        the original topic."""
+        if not service_id:
+            return service_id
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        if knowledge_service is None:
+            return service_id
+        service = knowledge_service.get_service_by_id(service_id)
+        if not service:
+            return service_id
+        return str(service.get("booking_service_id") or service_id)
+
+    def _start_front_desk_booking_flow(
+        self,
+        *,
+        sender_id: str,
+        message_text: str,
+        source_channel: str | None,
+        current_service_id: str | None,
+        current_service_name: str | None,
+        requested_dt_override: Any | None = None,
+    ) -> Dict[str, Any]:
+        """Thin wrapper around BookingService.start_booking_flow that maps a
+        knowledge topic id to its effective booking service id (see
+        _effective_booking_service_id) right before the call, without
+        altering the topic name/identity passed alongside it."""
+        return self.booking_service.start_booking_flow(
+            sender_id=sender_id,
+            message_text=message_text,
+            source_channel=source_channel,
+            requested_dt_override=requested_dt_override,
+            current_service_id=self._effective_booking_service_id(current_service_id),
+            current_service_name=current_service_name,
+        )
 
     def _looks_like_service_faq_request(self, normalized: str) -> bool:
         faq_markers = [
@@ -222,8 +266,31 @@ class MessageProcessor:
 
         service = self._find_configured_front_desk_service(text)
         if service and service.get("id"):
+            context_service_id, context_service_name = self._remembered_service_context_for_booking(
+                sender_id,
+                fallback_service_id=fallback_service_id,
+                fallback_service_name=fallback_service_name,
+            )
+            if self._should_keep_specialty_context_for_generic_consultation(
+                text,
+                matched_service_id=str(service["id"]),
+                context_service_id=context_service_id,
+            ):
+                return context_service_id, context_service_name
             return str(service["id"]), str(service.get("name") or "")
 
+        if fallback_service_id:
+            return fallback_service_id, fallback_service_name
+
+        return self._remembered_service_context_for_booking(sender_id)
+
+    def _remembered_service_context_for_booking(
+        self,
+        sender_id: str,
+        *,
+        fallback_service_id: str | None = None,
+        fallback_service_name: str | None = None,
+    ) -> tuple[str | None, str | None]:
         if fallback_service_id:
             return fallback_service_id, fallback_service_name
 
@@ -235,6 +302,57 @@ class MessageProcessor:
         if not service_id:
             return None, None
         return str(service_id), context.get("current_service_name")
+
+    def _should_keep_specialty_context_for_generic_consultation(
+        self,
+        text: str,
+        *,
+        matched_service_id: str | None,
+        context_service_id: str | None,
+    ) -> bool:
+        if matched_service_id != "dental_consultation" or not context_service_id:
+            return False
+        if not self._looks_like_generic_consultation_booking(text):
+            return False
+
+        effective_context_id = self._effective_booking_service_id(context_service_id)
+        return bool(
+            effective_context_id
+            and effective_context_id != "dental_consultation"
+            and effective_context_id.endswith("_consultation")
+        )
+
+    def _looks_like_generic_consultation_booking(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        has_consultation = bool(re.search(r"\b(?:консультац\w*|consultation)\b", normalized))
+        has_booking_action = self._has_service_booking_action_signal(normalized) or self._looks_like_booking_message(text)
+        return has_consultation and has_booking_action
+
+    def _unknown_service_detail_reply_for_booking(
+        self,
+        sender_id: str,
+        text: str,
+    ) -> str | None:
+        if not self._is_configured_front_desk_mode():
+            return None
+        if (
+            self.booking_service._extract_requested_date(text) is not None
+            or self.booking_service._parse_requested_datetime(text) is not None
+            or self.booking_service._parse_time_only(text) is not None
+            or self.booking_service._extract_time_window(text) is not None
+            or self.booking_service._extract_daypart(text) is not None
+            or self.booking_service.PHONE_RE.search(text)
+            or self.booking_service.EMAIL_RE.search(text)
+        ):
+            return None
+        service = self._find_configured_front_desk_service(text)
+        if service is None:
+            return None
+        return self.reply_service.get_unknown_service_detail_reply(
+            sender_id,
+            self._normalize_for_booking_keywords(text),
+            service,
+        )
 
     def _remember_front_desk_booking_service_context(
         self,
@@ -249,13 +367,21 @@ class MessageProcessor:
         service = self._find_configured_front_desk_service(text)
         service_id = str(service.get("id")) if service and service.get("id") else None
         service_name = str(service.get("name")) if service and service.get("name") else None
+        context_service_id, context_service_name = self._remembered_service_context_for_booking(
+            sender_id,
+            fallback_service_id=fallback_service_id,
+            fallback_service_name=fallback_service_name,
+        )
+        if self._should_keep_specialty_context_for_generic_consultation(
+            text,
+            matched_service_id=service_id,
+            context_service_id=context_service_id,
+        ):
+            service_id = context_service_id
+            service_name = context_service_name
         if service_id is None:
-            service_id = fallback_service_id
-            service_name = fallback_service_name
-        if service_id is None:
-            context = self.memory_service.get_context(sender_id) if self.memory_service else {}
-            service_id = context.get("current_service_id")
-            service_name = context.get("current_service_name")
+            service_id = context_service_id
+            service_name = context_service_name
 
         if not service_id:
             return
@@ -268,7 +394,7 @@ class MessageProcessor:
 
         pending = self.booking_service._get_pending_confirmation(sender_id)
         if pending and pending.get("is_active") is True:
-            pending["current_service_id"] = service_id
+            pending["current_service_id"] = self._effective_booking_service_id(service_id)
             if service_name:
                 pending["current_service_name"] = service_name
             self.booking_service._save_pending_confirmation(sender_id, pending)
@@ -395,6 +521,17 @@ class MessageProcessor:
         return False
 
     def _looks_like_datetime_only_message(self, text: str) -> bool:
+        """True only for a genuinely bare (or near-bare) date/time reply --
+        e.g. "завтра о 17" as reschedule/booking shorthand -- not any
+        message that merely happens to contain a relative date word and an
+        hour-shaped number somewhere in it. "ви завтра працюєте о 17?" and
+        "зустріч завтра о 17" both contain a date word and an hour, but
+        neither is a bare datetime: the former is a business-hours question,
+        the latter names an unrelated subject alongside the date/time.
+        Reuses the same business-hours exclusion and residual-content check
+        already used to validate a pending-reschedule target, rather than
+        blocking specific phrases.
+        """
         normalized = text.strip().lower()
         date_words = [
             "today",
@@ -410,7 +547,11 @@ class MessageProcessor:
             or re.search(r"\b(10|11|12|13|14|15|16|17|18|19|20|21|22|23)\b", normalized)
             or re.search(r"\b(о|на|at)\s*(10|11|12|13|14|15|16|17|18|19|20|21|22|23)\b", normalized)
         )
-        return has_date_word and has_time
+        if not (has_date_word and has_time):
+            return False
+        if self._looks_like_business_hours_question(text):
+            return False
+        return not self._has_reschedule_target_residual_content(text)
 
     def _has_active_booking_payload(self, text: str) -> bool:
         if self._looks_like_business_hours_question(text):
@@ -504,6 +645,28 @@ class MessageProcessor:
             any(marker in normalized for marker in explicit_booking_markers)
             or self._looks_like_book_me_request(normalized)
         )
+
+    def _has_active_pending_booking_awaiting_contact(self, sender_id: str, text: str) -> bool:
+        """A pending booking that already has a verified slot and is only
+        waiting on contact info takes precedence over an explicit-fresh-
+        booking-looking phrase like "ок записуй" ("ok, book it") -- that's
+        an acknowledgment to continue the CURRENT booking, not a request to
+        start a new one. Only applies when the message doesn't itself carry
+        new date/time specifics, which would legitimately signal the user
+        wants a different target and should be free to restart.
+        """
+        if self.booking_service.get_booking_state(sender_id) != BookingState.WAITING_FOR_CONTACT:
+            return False
+        pending = self.booking_service._get_pending_confirmation(sender_id) or {}
+        if not pending.get("start_dt"):
+            return False
+        if (
+            self.booking_service._extract_requested_date(text) is not None
+            or self.booking_service._parse_requested_datetime(text) is not None
+            or self.booking_service._parse_time_only(text) is not None
+        ):
+            return False
+        return True
 
     def _looks_like_cancel_request(self, text: str) -> bool:
         normalized = text.strip().lower()
@@ -774,7 +937,6 @@ class MessageProcessor:
                 "поставте діагноз",
                 "який діагноз",
                 "діагноз",
-                "це карієс",
                 "що робити",
                 "шо робити",
                 "что делать",
@@ -784,10 +946,24 @@ class MessageProcessor:
                 for marker in ["болить зуб", "біль у зубі", "болить ясн", "сильний біль", "дуже болить"]
             )
             asks_diagnosis = any(marker in normalized for marker in diagnosis_markers)
+            # "це (точно) <діагноз>?" / "у мене <діагноз>?" asks us to confirm
+            # a specific condition -- that's a diagnosis question regardless
+            # of symptom wording, and must not be answered with the
+            # matching service's price/description as if the condition were
+            # confirmed. Bounded to naming a condition explicitly (not a
+            # general "це карієс" service question like "скільки коштує
+            # лікування карієсу?", which has no "це"/"у мене" in front of it).
+            diagnosis_confirmation = bool(
+                re.search(
+                    r"\b(?:це|у\s+мене)\s+(?:точно\s+)?"
+                    r"(?:карієс|пульпіт|запаленн|флюс|кіст|періодонтит|пародонтит)\w*",
+                    normalized,
+                )
+            )
             if (
                 (has_symptom and asks_diagnosis)
                 or (has_symptom and "що це" in normalized)
-                or "це карієс" in normalized
+                or diagnosis_confirmation
             ):
                 return (
                     "diagnosis_request",
@@ -808,10 +984,21 @@ class MessageProcessor:
             if any(marker in normalized for marker in complex_markers) and any(
                 marker in normalized for marker in estimate_markers
             ):
-                return (
-                    "complex_treatment_estimate",
-                    "Точний кошторис для складного лікування лікар готує після огляду та діагностики. У чаті можу лише записати на консультацію або передати запит адміністратору.",
+                # A generic "complex treatment" deflection shouldn't shadow a
+                # concrete, approved reference price the knowledge base
+                # already has for this exact topic (e.g. "скільки коштує
+                # імплант?" when the KB has an approved from-price) -- only
+                # decline when there's genuinely no KB price to offer.
+                matched_service = self._find_configured_front_desk_service(text)
+                has_kb_price = bool(
+                    matched_service
+                    and (matched_service.get("price_note") or matched_service.get("price_options"))
                 )
+                if not has_kb_price:
+                    return (
+                        "complex_treatment_estimate",
+                        "Точний кошторис для складного лікування лікар готує після огляду та діагностики. У чаті можу лише записати на консультацію або передати запит адміністратору.",
+                    )
 
         return None
 
@@ -2146,14 +2333,92 @@ class MessageProcessor:
 
         return knowledge_service.find_service(normalized)
 
+    def _is_pending_reschedule_continuation(self, sender_id: str) -> bool:
+        if self.memory_service is None:
+            return False
+        return bool(self.memory_service.get_context(sender_id).get("pending_reschedule"))
+
+    def _looks_like_pending_reschedule_target(self, text: str) -> bool:
+        """Whether `text` plausibly answers the open-ended "which day/time
+        would you like to move it to?" reschedule prompt that `pending_reschedule`
+        tracks -- not just any message that happens to contain a parseable
+        date/time. A business-hours question, a cancellation, or a fresh
+        booking request take priority even when they also name a day/time
+        (e.g. "чи працюєте ви в п'ятницю о 17:00?" is a hours FAQ, not a
+        reschedule target); and a message that names a day/time alongside
+        unrelated content (e.g. "зустріч у п'ятницю о 17" -- some other
+        meeting) isn't a direct answer to the prompt either.
+        """
+        if self._looks_like_business_hours_question(text):
+            return False
+        if self._looks_like_cancel_request(text):
+            return False
+        if self._looks_like_fresh_booking_request(text):
+            return False
+        if not self.booking_service._reschedule_offer_still_engaged(text):
+            return False
+        return not self._has_reschedule_target_residual_content(text)
+
+    def _has_reschedule_target_residual_content(self, text: str) -> bool:
+        """True if, after stripping the recognized date/day/time wording and
+        common connector words, meaningful content remains -- meaning the
+        date/time was incidental to some other statement rather than a bare
+        answer to "which day and time?".
+        """
+        normalized = self.booking_service._normalize_booking_text(text.strip().lower())
+        for marker in list(self.booking_service._weekday_map().keys()) + list(
+            self.booking_service._ukrainian_month_map().keys()
+        ):
+            normalized = re.sub(rf"\b{re.escape(marker)}\b", " ", normalized)
+        normalized = re.sub(r"\bперенес\w*\b", " ", normalized)
+        normalized = re.sub(
+            r"\b(?:у|в|на|щодо|до|через|після|о|об|го|ого|сьогодні|завтра|післязавтра|"
+            r"пізніше|раніше|ввечері|вранці|вдень|зранку|давайте|давай|можна|"
+            r"так|добре|підходить|today|tomorrow|at)\b",
+            " ",
+            normalized,
+        )
+        normalized = re.sub(r"[^\w\sа-яіїєґё]", " ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\d+", " ", normalized)
+        return bool(re.search(r"[a-zа-яіїєґ]{2,}", normalized, flags=re.IGNORECASE))
+
+    def _invalidate_stale_pending_reschedule(self, sender_id: str, message_text: str) -> None:
+        """Drop the open-ended reschedule intent (`pending_reschedule`) the
+        moment a message arrives that doesn't plausibly continue it. The
+        flag has no expiry of its own -- without this, it survives every
+        unrelated message indefinitely, and a later message that merely
+        happens to parse as a date/time (an FAQ, a new booking, small talk)
+        could resurrect it and mutate the existing confirmed booking's
+        Calendar event.
+        """
+        if self.memory_service is None:
+            return
+        if not self.memory_service.get_context(sender_id).get("pending_reschedule"):
+            return
+        if self._looks_like_pending_reschedule_target(message_text):
+            return
+        self.memory_service.update_context(sender_id, pending_reschedule=None)
+
     def _handle_confirmed_booking_message(self, message: NormalizedMessage) -> Dict[str, Any] | None:
         language = self.reply_service.detect_user_language(message.user_message)
 
-        if self._looks_like_reschedule_request(message.user_message):
+        if self._looks_like_reschedule_request(
+            message.user_message
+        ) or self._is_pending_reschedule_continuation(message.sender_id):
             booking_result = self.booking_service.handle_reschedule_request(
                 sender_id=message.sender_id,
                 message_text=message.user_message,
             )
+            if self.memory_service is not None:
+                # Keep remembering "we're mid-reschedule" only while the
+                # reply is still just asking for a day/time -- once a
+                # concrete window offer or a terminal outcome happens, the
+                # booking-state machine (or the completed booking itself)
+                # is the source of truth for the next turn.
+                self.memory_service.update_context(
+                    message.sender_id,
+                    pending_reschedule=True if booking_result.get("status") == "reschedule_prompt" else None,
+                )
             return self._build_booking_reply_result(
                 message=message,
                 reply_text=booking_result["reply_text"],
@@ -2413,6 +2678,14 @@ class MessageProcessor:
         booking_state = self.booking_service.get_booking_state(message.sender_id)
         logger.info("Booking state: %s", booking_state.value)
 
+        if booking_state == BookingState.WAITING_FOR_TIME:
+            self.booking_service.invalidate_stale_reschedule_offer(
+                message.sender_id, message.user_message
+            )
+            self.booking_service.invalidate_stale_busy_alternative(
+                message.sender_id, message.user_message
+            )
+
         if booking_state != BookingState.NONE:
             active_service_id, active_service_name = self._get_pending_front_desk_service_context(
                 message.sender_id
@@ -2452,14 +2725,30 @@ class MessageProcessor:
             if self._looks_like_capability_question(message.user_message):
                 return self._build_capability_question_result(message)
 
-            if self._looks_like_explicit_fresh_booking_request(message.user_message):
+            if self._looks_like_explicit_fresh_booking_request(
+                message.user_message
+            ) and not self._has_active_pending_booking_awaiting_contact(
+                message.sender_id, message.user_message
+            ):
+                unknown_detail_reply = self._unknown_service_detail_reply_for_booking(
+                    message.sender_id,
+                    message.user_message,
+                )
+                if unknown_detail_reply is not None:
+                    return self._build_direct_reply_result(
+                        message=message,
+                        reply_text=unknown_detail_reply,
+                        intent_value="front_desk_safe_fallback",
+                        routing_category="safe_handoff",
+                        intent_for_policy=IntentType.GENERAL_QUESTION,
+                    )
                 booking_service_id, booking_service_name = self._service_context_for_booking(
                     message.sender_id,
                     message.user_message,
                     fallback_service_id=active_service_id,
                     fallback_service_name=active_service_name,
                 )
-                booking_result = self.booking_service.start_booking_flow(
+                booking_result = self._start_front_desk_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
@@ -2566,15 +2855,22 @@ class MessageProcessor:
                     fallback_service_name=active_service_name,
                 )
 
-            if self._has_active_booking_payload(message.user_message):
+            pending_for_alternative_check = (
+                self.booking_service._get_pending_confirmation(message.sender_id) or {}
+            )
+            rejects_busy_alternative = bool(
+                pending_for_alternative_check.get("busy_alternative")
+                and self.booking_service._is_rejection(message.user_message)
+            )
+            if self._has_active_booking_payload(message.user_message) or rejects_busy_alternative:
                 service = self._find_configured_front_desk_service(message.user_message)
-                pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
+                pending = pending_for_alternative_check
                 booking_service_id = active_service_id
                 booking_service_name = active_service_name
                 if service and service.get("id"):
                     booking_service_id = str(service["id"])
                     booking_service_name = str(service.get("name") or "")
-                    pending["current_service_id"] = booking_service_id
+                    pending["current_service_id"] = self._effective_booking_service_id(booking_service_id)
                     if booking_service_name:
                         pending["current_service_name"] = booking_service_name
                     self.booking_service._save_pending_confirmation(message.sender_id, pending)
@@ -2594,7 +2890,7 @@ class MessageProcessor:
                         requested_dt_override = None
 
                 if requested_dt_override is not None:
-                    booking_result = self.booking_service.start_booking_flow(
+                    booking_result = self._start_front_desk_booking_flow(
                         sender_id=message.sender_id,
                         message_text=message.user_message,
                         source_channel=message.platform,
@@ -2621,11 +2917,34 @@ class MessageProcessor:
             grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)
             if grounded_reply:
                 pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
-                self._restore_pending_front_desk_service_context(
-                    message.sender_id,
-                    pending.get("current_service_id"),
-                    pending.get("current_service_name"),
+                context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
+                remembered_service_id = context.get("current_service_id")
+                pending_service_id = pending.get("current_service_id")
+                resolved_service = self._find_configured_front_desk_service(message.user_message)
+                resolved_service_id = (
+                    str(resolved_service["id"])
+                    if resolved_service and resolved_service.get("id")
+                    else None
                 )
+                keep_topic_identity = bool(
+                    (
+                        remembered_service_id
+                        and pending_service_id
+                        and remembered_service_id != pending_service_id
+                        and self._effective_booking_service_id(str(remembered_service_id)) == pending_service_id
+                    )
+                    or (
+                        resolved_service_id
+                        and remembered_service_id == resolved_service_id
+                        and resolved_service_id != pending_service_id
+                    )
+                )
+                if not keep_topic_identity:
+                    self._restore_pending_front_desk_service_context(
+                        message.sender_id,
+                        pending_service_id,
+                        pending.get("current_service_name"),
+                    )
                 return self._build_direct_reply_result(
                     message=message,
                     reply_text=grounded_reply,
@@ -2775,12 +3094,26 @@ class MessageProcessor:
             booking_state == BookingState.NONE
             and self.booking_service.has_confirmed_booking(message.sender_id)
         ):
+            self._invalidate_stale_pending_reschedule(message.sender_id, message.user_message)
+
             if self._looks_like_fresh_booking_request(message.user_message):
+                unknown_detail_reply = self._unknown_service_detail_reply_for_booking(
+                    message.sender_id,
+                    message.user_message,
+                )
+                if unknown_detail_reply is not None:
+                    return self._build_direct_reply_result(
+                        message=message,
+                        reply_text=unknown_detail_reply,
+                        intent_value="front_desk_safe_fallback",
+                        routing_category="safe_handoff",
+                        intent_for_policy=IntentType.GENERAL_QUESTION,
+                    )
                 booking_service_id, booking_service_name = self._service_context_for_booking(
                     message.sender_id,
                     message.user_message,
                 )
-                booking_result = self.booking_service.start_booking_flow(
+                booking_result = self._start_front_desk_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
@@ -2836,7 +3169,7 @@ class MessageProcessor:
             context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
             service_id = context.get("current_service_id")
             if service_id:
-                booking_result = self.booking_service.start_booking_flow(
+                booking_result = self._start_front_desk_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
@@ -2912,11 +3245,23 @@ class MessageProcessor:
                 or self._looks_like_booking_message(message.user_message)
                 or self._looks_like_datetime_only_message(message.user_message)
             ):
+                unknown_detail_reply = self._unknown_service_detail_reply_for_booking(
+                    message.sender_id,
+                    message.user_message,
+                )
+                if unknown_detail_reply is not None:
+                    return self._build_direct_reply_result(
+                        message=message,
+                        reply_text=unknown_detail_reply,
+                        intent_value="front_desk_safe_fallback",
+                        routing_category="safe_handoff",
+                        intent_for_policy=IntentType.GENERAL_QUESTION,
+                    )
                 booking_service_id, booking_service_name = self._service_context_for_booking(
                     message.sender_id,
                     message.user_message,
                 )
-                booking_result = self.booking_service.start_booking_flow(
+                booking_result = self._start_front_desk_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
@@ -3320,11 +3665,23 @@ class MessageProcessor:
         if intent == IntentType.BOOKING_REQUEST:
             logger.info("Detected booking intent: %s", intent.value)
             logger.info("Calling start_booking_flow for sender_id=%s", message.sender_id)
+            unknown_detail_reply = self._unknown_service_detail_reply_for_booking(
+                message.sender_id,
+                message.user_message,
+            )
+            if unknown_detail_reply is not None:
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=unknown_detail_reply,
+                    intent_value="front_desk_safe_fallback",
+                    routing_category="safe_handoff",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
             booking_service_id, booking_service_name = self._service_context_for_booking(
                 message.sender_id,
                 message.user_message,
             )
-            booking_result = self.booking_service.start_booking_flow(
+            booking_result = self._start_front_desk_booking_flow(
                 sender_id=message.sender_id,
                 message_text=message.user_message,
                 source_channel=message.platform,

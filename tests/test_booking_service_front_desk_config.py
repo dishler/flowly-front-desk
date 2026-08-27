@@ -193,7 +193,7 @@ def test_exact_time_booking_rejects_closed_sunday_before_calendar_check(tmp_path
     assert result["status"] == "outside_business_hours"
     assert "клініка не працює" in result["reply_text"].lower()
     assert calendar.checked == []
-    assert service.get_booking_state("user-1").value == "NONE"
+    assert service.get_booking_state("user-1").value == "WAITING_FOR_TIME"
 
 
 def test_exact_time_booking_checks_calendar_for_open_monday(tmp_path):

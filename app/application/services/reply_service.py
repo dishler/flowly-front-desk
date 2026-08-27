@@ -214,8 +214,8 @@ class ReplyService:
             if self.knowledge_service
             else None
         )
-        if service is None:
-            service = self._find_bounded_consultation_service(normalized)
+        if service is None and self.knowledge_service:
+            service = self.knowledge_service.find_bounded_consultation_service(normalized)
         price_requested = (
             self._looks_like_price_query(normalized)
             or intent == IntentType.PRICE
@@ -223,7 +223,35 @@ class ReplyService:
         )
         service_context_id = context.get("current_service_id")
 
+        if self._looks_like_anesthesia_question(normalized) and (
+            self._looks_like_price_query(normalized) or self._looks_like_how_much_marker(normalized)
+        ):
+            # "скільки анестезія?" asks anesthesia's own price, not whether
+            # some other procedure uses it -- if the KB has a dedicated
+            # anesthesia-topic entry with a real price, answer with that
+            # instead of the generic per-procedure deflection below. Found
+            # generically (by re-running the same anesthesia-question check
+            # against each service's own text), not by a hardcoded id, so
+            # any KB that models an anesthesia topic benefits the same way.
+            # (Checked directly rather than via price_requested, which
+            # requires an already-matched `service` -- circular here, since
+            # the anesthesia topic deliberately has no bare alias to match.)
+            anesthesia_service = self._find_anesthesia_topic_service()
+            if anesthesia_service is not None:
+                anesthesia_price_reply = self._format_price_options_reply(anesthesia_service)
+                if anesthesia_price_reply is None and anesthesia_service.get("price_note"):
+                    anesthesia_price_reply = str(anesthesia_service["price_note"])
+                if anesthesia_price_reply is not None:
+                    # Deliberately does not call _remember_front_desk_context
+                    # here: asking anesthesia's price is a tangent, not a
+                    # topic switch -- the procedure actually being discussed
+                    # (if any) must stay the remembered context.
+                    return anesthesia_price_reply
+
         if self._looks_like_anesthesia_question(normalized):
+            # "це з анестезією?" -- asking whether a *procedure* uses
+            # anesthesia -- defers to the dentist, referencing whatever
+            # procedure was last discussed.
             target_service = service
             if target_service is None and service_context_id:
                 target_service = self.knowledge_service.get_service_by_id(str(service_context_id))
@@ -249,9 +277,13 @@ class ReplyService:
             )
 
         if self._looks_like_directions_origin(normalized, context):
-            return self._reply_with_directions_origin(message.sender_id, text)
+            origin = self._extract_directions_origin(text) or text
+            return self._reply_with_directions_origin(message.sender_id, origin)
 
         if self._looks_like_directions_question(normalized):
+            origin = self._extract_directions_origin(text)
+            if origin:
+                return self._reply_with_directions_origin(message.sender_id, origin)
             self._remember_front_desk_context(
                 message.sender_id,
                 question_context="directions",
@@ -259,7 +291,34 @@ class ReplyService:
             return "Звідки вам зручно їхати? Напишіть орієнтир або станцію метро, і я підкажу в межах наявної інформації."
 
         if service is None and self._looks_like_service_availability_question(normalized):
-            return "Потрібно уточнити у клініки, чи ця послуга доступна. Можу допомогти записати вас на консультацію, щоб адміністратор або лікар підтвердили деталі."
+            return "Не хочу дати вам неточну інформацію. Це краще підтвердити з адміністратором або лікарем. Можу допомогти записатися на консультацію або передати питання."
+
+        if self._looks_like_business_fact_question(normalized):
+            fact_reply = self._get_business_fact_reply(normalized, language)
+            if fact_reply:
+                self._remember_front_desk_context(
+                    message.sender_id,
+                    question_context="services" if self._looks_like_services_question(normalized) else "faq",
+                )
+                return fact_reply
+
+        contextual_followup = self._reply_with_contextual_service_followup(
+            message.sender_id,
+            normalized=normalized,
+            language=language,
+            remembered_service_id=str(service_context_id) if service_context_id else None,
+            resolved_service=service,
+        )
+        if contextual_followup is not None:
+            return contextual_followup
+
+        unknown_detail_reply = self.get_unknown_service_detail_reply(
+            message.sender_id,
+            normalized,
+            service,
+        )
+        if unknown_detail_reply is not None:
+            return unknown_detail_reply
 
         if service is not None and price_requested:
             return self._reply_with_service_price(message.sender_id, service)
@@ -271,6 +330,16 @@ class ReplyService:
             context_service = self.knowledge_service.get_service_by_id(str(service_context_id))
             if context_service is not None:
                 return self._reply_with_service_price(message.sender_id, context_service)
+
+        if service is not None and self._looks_like_option_list_question(normalized):
+            option_reply = self._format_price_options_reply(service)
+            if option_reply is not None:
+                self._remember_front_desk_context(
+                    message.sender_id,
+                    current_service_id=str(service.get("id") or ""),
+                    question_context="services",
+                )
+                return option_reply
 
         if service is not None and context.get("question_context") == "services":
             return self._reply_with_service_summary(message.sender_id, service)
@@ -516,8 +585,24 @@ class ReplyService:
         if not compact or len(compact.split()) > 4:
             return None
 
+        if re.fullmatch(r"доросл\w*", compact):
+            # A bare "adult" follow-up is a modifier on whatever pediatric
+            # topic is currently active, not a service name of its own --
+            # resolving it via the generic matcher below would match
+            # unrelated services whose description text happens to mention
+            # "дорослим" in passing (e.g. braces).
+            context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
+            pediatric_service_id = context.get("current_service_id")
+            adult_service = (
+                self.knowledge_service.get_adult_counterpart_service(str(pediatric_service_id))
+                if pediatric_service_id
+                else None
+            )
+            if adult_service is not None:
+                return self._reply_with_service_price(message.sender_id, adult_service)
+
         service = self.knowledge_service.find_service(compact)
-        if service and service.get("price_note"):
+        if service and (service.get("price_note") or service.get("price_options")):
             return self._reply_with_service_price(message.sender_id, service)
 
         faq_answer = self.knowledge_service.find_faq_answer(
@@ -547,24 +632,83 @@ class ReplyService:
     def _looks_like_anesthesia_question(self, normalized: str) -> bool:
         return any(marker in normalized for marker in ["анестез", "знебол", "обезбол"])
 
+    def _find_anesthesia_topic_service(self) -> dict[str, Any] | None:
+        """Finds whichever KB service is itself about anesthesia, by
+        re-using _looks_like_anesthesia_question against each service's own
+        name/description/aliases -- no hardcoded service id, so it works for
+        any KB that happens to model an anesthesia-like topic."""
+        if self.knowledge_service is None:
+            return None
+        for candidate in self.knowledge_service.get_services():
+            combined = " ".join(
+                str(part) for part in (
+                    candidate.get("name"),
+                    candidate.get("description"),
+                    *candidate.get("aliases", []),
+                )
+                if part
+            ).lower()
+            if self._looks_like_anesthesia_question(combined):
+                return candidate
+        return None
+
     def _looks_like_directions_question(self, normalized: str) -> bool:
         markers = [
             "як до вас добрати",
+            "як до вас доїх",
+            "як до вас діст",
             "як добрати",
             "як доїхати",
             "як дістатися",
+            "дорогу до клінік",
+            "дорога до клінік",
             "маршрут",
             "route",
             "directions",
         ]
         return any(marker in normalized for marker in markers)
 
+    def _extract_directions_origin(self, text: str) -> str | None:
+        normalized = " ".join(text.strip().split())
+        patterns = [
+            r"\bвід\s+(.+?)(?:[?.!…]+)?$",
+            r"\bз\s+(.+?)(?:[?.!…]+)?$",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                origin = match.group(1).strip(" ,;:-")
+                if origin:
+                    return origin
+        return None
+
     def _looks_like_directions_origin(self, normalized: str, context: dict[str, Any]) -> bool:
         if context.get("question_context") != "directions":
             return False
         if self._looks_like_directions_question(normalized):
             return False
+        if (
+            self._looks_like_price_query(normalized)
+            or self._looks_like_booking_message_like_text(normalized)
+            or self.knowledge_service.find_confident_service(normalized) is not None
+            or self.knowledge_service.find_bounded_consultation_service(normalized) is not None
+        ):
+            return False
         return bool(normalized) and len(normalized.split()) <= 5
+
+    def _looks_like_booking_message_like_text(self, normalized: str) -> bool:
+        return any(
+            marker in normalized
+            for marker in [
+                "хочу запис",
+                "запишіть",
+                "записатися",
+                "записатись",
+                "на чистку",
+                "на консультац",
+                "брон",
+            ]
+        )
 
     def _looks_like_service_availability_question(self, normalized: str) -> bool:
         has_question = any(
@@ -577,23 +721,11 @@ class ReplyService:
         )
         return has_question and has_service_like_object
 
-    def _find_bounded_consultation_service(self, normalized: str) -> dict[str, Any] | None:
-        if self.knowledge_service is None:
-            return None
-        compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
-        standalone = compact in {"огляд", "огляду"}
-        dental_qualified = bool(
-            re.search(r"\bогляд\s+стоматолог", compact)
-            or re.search(r"\bстоматологічн\w*\s+огляд\b", compact)
-        )
-        if not standalone and not dental_qualified:
-            return None
-        return self.knowledge_service.get_service_by_id("dental_consultation")
-
     def _reply_with_directions_origin(self, sender_id: str, origin_text: str) -> str:
         business = self.knowledge_service.get_business() if self.knowledge_service else {}
         location = business.get("location") or "адресу клініки потрібно уточнити."
-        self._remember_front_desk_context(sender_id, question_context="directions")
+        if self.memory_service is not None:
+            self.memory_service.update_context(sender_id, question_context=None)
         return (
             f"Ви їдете від: {origin_text.strip()}. Точного маршруту в базі немає, "
             f"але адреса клініки: {location}. Для найзручнішого маршруту краще звірити дорогу в навігаторі або уточнити в адміністратора."
@@ -603,9 +735,92 @@ class ReplyService:
         markers = ["скільки", "сколько", "how much"]
         return any(marker in normalized for marker in markers)
 
+    def _reply_with_contextual_service_followup(
+        self,
+        sender_id: str,
+        *,
+        normalized: str,
+        language: str,
+        remembered_service_id: str | None,
+        resolved_service: dict[str, Any] | None,
+    ) -> Optional[str]:
+        if self.knowledge_service is None or not remembered_service_id:
+            return None
+
+        if self._looks_like_cancellation_or_time_only_followup(normalized):
+            return None
+        match = self.knowledge_service.find_contextual_service_followup(
+            normalized,
+            remembered_service_id=remembered_service_id,
+            resolved_service=resolved_service,
+            language=language,
+        )
+        if match is None:
+            return None
+
+        service = match["service"]
+        kind = match["kind"]
+
+        if kind == "faq":
+            self._remember_front_desk_context(
+                sender_id,
+                current_service_id=remembered_service_id,
+                question_context="services",
+            )
+            return str(match["answer"])
+
+        if kind == "price_options":
+            reply_text = self._format_price_options_reply(service, price_options=match["price_options"])
+            if reply_text is not None:
+                self._remember_front_desk_context(
+                    sender_id,
+                    current_service_id=remembered_service_id,
+                    question_context="pricing",
+                )
+                return reply_text
+
+        if kind == "price":
+            return self._reply_with_service_price(sender_id, service)
+
+        if kind == "summary":
+            return self._reply_with_service_summary(sender_id, service)
+
+        return None
+
+    def _looks_like_cancellation_or_time_only_followup(self, normalized: str) -> bool:
+        if any(marker in normalized for marker in ["скасу", "не треба", "не хочу", "передум"]):
+            return True
+        if re.fullmatch(
+            r"(?:а|тоді|краще|давайте|давай|можна)?\s*(?:о|на)?\s*\d{1,2}(?::\d{2})?\??",
+            normalized,
+        ):
+            return True
+        return False
+
     def _looks_like_services_question(self, normalized: str) -> bool:
         markers = ["які послуги", "послуги у вас", "послуги", "services"]
         return any(marker in normalized for marker in markers)
+
+    def _looks_like_option_list_question(self, normalized: str) -> bool:
+        return any(marker in normalized for marker in ["які", "яка", "варіанти", "види"]) and any(
+            marker in normalized for marker in ["є", "бува", "маєте", "пропонуєте"]
+        )
+
+    def _looks_like_business_fact_question(self, normalized: str) -> bool:
+        return any(
+            marker in normalized
+            for marker in [
+                "де ви",
+                "адрес",
+                "локац",
+                "графік",
+                "години",
+                "працюєте",
+                "контакт",
+                "телефон",
+                "номер",
+            ]
+        )
 
     def _remember_front_desk_context(
         self,
@@ -624,17 +839,45 @@ class ReplyService:
         if values:
             self.memory_service.update_context(sender_id, **values)
 
-    def _reply_with_service_price(self, sender_id: str, service: dict[str, Any]) -> Optional[str]:
-        price_note = service.get("price_note")
-        if not price_note:
+    def _format_price_options_reply(
+        self,
+        service: dict[str, Any],
+        *,
+        price_options: list[dict[str, Any]] | None = None,
+    ) -> Optional[str]:
+        price_options = price_options if price_options is not None else service.get("price_options")
+        if not isinstance(price_options, list) or not price_options:
             return None
+        variants = [
+            f"{option['label']} — {option['price_note']}"
+            for option in price_options
+            if isinstance(option, dict) and option.get("label") and option.get("price_note")
+        ]
+        if not variants:
+            return None
+        name = service.get("name")
+        prefix = f"{name}: " if name else ""
+        return prefix + "; ".join(variants) + "."
+
+    def _reply_with_service_price(self, sender_id: str, service: dict[str, Any]) -> Optional[str]:
+        # price_options (multiple priced variants of one topic, e.g. crown
+        # materials) takes priority when present; absent/empty/malformed
+        # falls straight through to the existing single price_note reply,
+        # so a service without price_options behaves exactly as before.
+        reply_text = self._format_price_options_reply(service)
+        if reply_text is None:
+            price_note = service.get("price_note")
+            if not price_note:
+                return None
+            reply_text = str(price_note)
+
         service_id = service.get("id")
         self._remember_front_desk_context(
             sender_id,
             current_service_id=str(service_id) if service_id else None,
             question_context="pricing",
         )
-        return str(price_note)
+        return reply_text
 
     def _reply_with_service_summary(self, sender_id: str, service: dict[str, Any]) -> Optional[str]:
         description = service.get("description")
@@ -650,6 +893,32 @@ class ReplyService:
             question_context="services",
         )
         return " ".join(parts)
+
+    def get_unknown_service_detail_reply(
+        self,
+        sender_id: str,
+        normalized: str,
+        service: dict[str, Any] | None,
+    ) -> Optional[str]:
+        if service is None or self.knowledge_service is None:
+            return None
+        unknown_tokens = self.knowledge_service.unknown_detail_tokens_for_service(
+            normalized,
+            service,
+        )
+        if not unknown_tokens:
+            return None
+        service_id = service.get("id")
+        self._remember_front_desk_context(
+            sender_id,
+            current_service_id=str(service_id) if service_id else None,
+            question_context="services",
+        )
+        service_name = service.get("name") or "цієї послуги"
+        return (
+            f"Щодо «{service_name}»: у базі немає підтвердження саме цієї деталі або варіанту. "
+            "Краще уточнити це з адміністратором або лікарем перед записом."
+        )
 
     def _get_channel_reply(self, text: str, language: str) -> Optional[str]:
         _ = text
