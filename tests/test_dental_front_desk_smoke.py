@@ -6292,6 +6292,50 @@ async def test_dental_pending_date_merges_evening_daypart(phrase):
 
 
 @pytest.mark.asyncio
+async def test_dental_saturday_evening_refinement_explains_working_hours():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 29, 10),
+        _kyiv_dt(2026, 8, 29, 10, 30),
+        _kyiv_dt(2026, 8, 29, 11),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у суботу"))
+    offered = await processor.process(_message("коли є час?"))
+    evening = await processor.process(_message("А ввечері?"))
+
+    assert "10:00, 10:30 або 11:00" in offered["reply_text"]
+    assert evening["booking_result"]["status"] == "outside_business_hours"
+    assert "суботу" in evening["reply_text"]
+    assert "з 10:00 до 16:00" in evening["reply_text"]
+    assert "ввечері не підходить" in evening["reply_text"]
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_saturday_after_15_refinement_explains_hours_when_no_slots():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 29, 10),
+        _kyiv_dt(2026, 8, 29, 10, 30),
+        _kyiv_dt(2026, 8, 29, 11),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у суботу"))
+    await processor.process(_message("коли є час?"))
+    result = await processor.process(_message("З 15 немає слотів?"))
+
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert result["booking_result"]["suggested_slots"] == []
+    assert "після 15:00 не бачу вільних слотів" in result["reply_text"]
+    assert "з 10:00 до 16:00" in result["reply_text"]
+    assert "на котру годину" not in result["reply_text"]
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_one_turn_date_evening_refinement_checks_evening_only():
     calendar = SelectiveConfiguredCalendarService([
         _kyiv_dt(2026, 8, 27, 12),

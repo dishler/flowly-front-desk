@@ -447,7 +447,69 @@ class BookingService:
     def _build_availability_check_failed_reply(self, language: str) -> str:
         return "Не вдалося перевірити доступність цього часу. Напишіть, будь ласка, бажаний день і час, і ми перевіримо запис."
 
-    def _build_outside_business_hours_reply(self, language: str) -> str:
+    def _build_business_hours_sentence_for_date(
+        self,
+        language: str,
+        requested_date: date | None,
+        requested_day_label: str | None = None,
+    ) -> str | None:
+        if requested_date is None:
+            return None
+        status, window = self._business_hours_status_for_date(requested_date)
+        day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language)
+        if language != "uk":
+            if status == "open" and window is not None:
+                return (
+                    f"The clinic works from {self._format_time_window_time(window[0])} "
+                    f"to {self._format_time_window_time(window[1])} on {day_label or 'that day'}."
+                )
+            if status == "closed":
+                return f"The clinic is closed on {day_label or 'that day'}."
+            return None
+
+        weekday_labels = {
+            0: "понеділок",
+            1: "вівторок",
+            2: "середу",
+            3: "четвер",
+            4: "п’ятницю",
+            5: "суботу",
+            6: "неділю",
+        }
+        weekday_label = weekday_labels.get(requested_date.weekday(), "цей день")
+        if day_label in {"сьогодні", "завтра", "післязавтра"}:
+            day_part = f"{day_label.capitalize()}, у {weekday_label},"
+        else:
+            day_part = f"У {day_label or weekday_label}"
+
+        if status == "open" and window is not None:
+            return (
+                f"{day_part} клініка працює з {self._format_time_window_time(window[0])} "
+                f"до {self._format_time_window_time(window[1])}."
+            )
+        if status == "closed":
+            return f"{day_part} клініка не працює."
+        return None
+
+    def _build_outside_business_hours_reply(
+        self,
+        language: str,
+        *,
+        requested_date: date | None = None,
+        requested_day_label: str | None = None,
+        requested_label: str | None = None,
+    ) -> str:
+        schedule_sentence = self._build_business_hours_sentence_for_date(
+            language,
+            requested_date,
+            requested_day_label,
+        )
+        if schedule_sentence:
+            label = requested_label or "цей час"
+            return (
+                f"{schedule_sentence} На цей час клініка не працює, тому {label} не підходить. "
+                "Підкажіть, будь ласка, інший день або час?"
+            )
         return "На цей час клініка не працює. Підкажіть, будь ласка, інший день або час?"
 
     def _display_slots(self, slots: list[datetime]) -> list[datetime]:
@@ -498,6 +560,16 @@ class BookingService:
         times = self._format_slot_times(self._display_slots(slots), language)
         if times:
             return f"{day_prefix} {day_label} {window_label} можу запропонувати {times}. Який час вам зручніший?"
+        schedule_sentence = self._build_business_hours_sentence_for_date(
+            language,
+            requested_date,
+            requested_day_label,
+        )
+        if schedule_sentence:
+            return (
+                f"{day_prefix} {day_label} {window_label} не бачу вільних слотів. "
+                f"{schedule_sentence} Підкажіть інший час або день?"
+            )
         return f"{day_prefix} {day_label} {window_label} не бачу вільних слотів. Підкажіть інший час?"
 
     def _build_name_and_contact_request(self, language: str) -> str:
@@ -972,6 +1044,11 @@ class BookingService:
         match = re.search(rf"\bпісля\s+{time_pattern}\b", normalized)
         if not match:
             match = re.search(rf"\bз\s+{time_pattern}\s+годин[иу]?\b", normalized)
+        if not match:
+            match = re.search(
+                rf"\bз\s+{time_pattern}\b(?!\s*(?:р(?:ок(?:и|ів|у)?)?\.?|рок(?:и|ів|у)?))",
+                normalized,
+            )
         if match:
             start = self._parse_window_time(match.group(1), match.group(2))
             if start is not None:
@@ -1079,7 +1156,12 @@ class BookingService:
             self._save_pending_confirmation(sender_id, pending)
             return {
                 "status": "outside_business_hours",
-                "reply_text": self._build_outside_business_hours_reply(language),
+                "reply_text": self._build_outside_business_hours_reply(
+                    language,
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
+                    requested_label=daypart["label"],
+                ),
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "requested_date": requested_date.isoformat(),
@@ -1167,7 +1249,12 @@ class BookingService:
             self._save_pending_confirmation(sender_id, pending)
             return {
                 "status": "outside_business_hours",
-                "reply_text": self._build_outside_business_hours_reply(language),
+                "reply_text": self._build_outside_business_hours_reply(
+                    language,
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
+                    requested_label=time_window["label"],
+                ),
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "requested_date": requested_date.isoformat(),
@@ -4418,7 +4505,15 @@ class BookingService:
                     self._clear_pending_confirmation(sender_id)
             return {
                 "status": "outside_business_hours",
-                "reply_text": self._build_outside_business_hours_reply(language),
+                "reply_text": self._build_outside_business_hours_reply(
+                    language,
+                    requested_date=requested_dt.date(),
+                    requested_day_label=self._format_date_label_for_reply(
+                        requested_dt.date(),
+                        language,
+                    ),
+                    requested_label=self._format_scheduled_time_for_reply(requested_dt, language),
+                ),
                 "requires_confirmation": False,
                 "booking_state": (
                     BookingState.WAITING_FOR_TIME.value
