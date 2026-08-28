@@ -502,6 +502,14 @@ class ReplyService:
             ]
         )
 
+    def _looks_like_contextual_pronoun_availability_question(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:робите|ставите|лікуєте|видаляєте)\s+(?:це|таке|цю\s+процедуру|цю\s+послугу)\b",
+                normalized,
+            )
+        )
+
     def evaluate_escalation(self, user_text: str, history: List[str]) -> Tuple[bool, str]:
         """
         Escalate only for non-standard / complex cases. Standard FAQ intents are handled
@@ -939,7 +947,7 @@ class ReplyService:
             return self._reply_with_service_summary(
                 sender_id,
                 service,
-                availability_confirmation=self._looks_like_known_service_availability_question(normalized),
+                availability_confirmation=self._looks_like_contextual_pronoun_availability_question(normalized),
             )
 
         return None
@@ -1060,8 +1068,14 @@ class ReplyService:
             question_context="services",
         )
         reply_text = " ".join(parts)
-        if availability_confirmation and name:
-            return f"Так, {str(name).lower()} є в Smile Dental Clinic. {reply_text}"
+        if availability_confirmation:
+            availability_reply = service.get("availability_reply")
+            if availability_reply:
+                return str(availability_reply)
+            if description:
+                return f"Так, така послуга є в Smile Dental Clinic. {description}"
+            if name:
+                return f"Так, {str(name).lower()} є в Smile Dental Clinic."
         return reply_text
 
     def get_unknown_service_detail_reply(

@@ -1356,7 +1356,7 @@ async def test_dental_veneers_contextual_followups_use_remembered_topic():
     trimming = await processor.process(_message("а треба обточувати?"))
     context = processor.memory_service.get_context("patient-1")
 
-    assert "Вініри" in service["reply_text"]
+    assert "встановлюють керамічні вініри" in service["reply_text"]
     assert "12000 грн" in price["reply_text"]
     assert "ортопед" in trimming["reply_text"]
     assert context["current_service_id"] == "veneers"
@@ -1408,7 +1408,7 @@ async def test_dental_braces_contextual_followups_do_not_switch_to_crowns():
     duration = await processor.process(_message("скільки носити?"))
     context = processor.memory_service.get_context("patient-1")
 
-    assert "Брекети" in service["reply_text"]
+    assert "ортодонтичне лікування брекетами" in service["reply_text"]
     assert "19000 грн" in metal["reply_text"]
     assert "щелепу" in metal["reply_text"]
     assert "Термін лікування залежить" in duration["reply_text"]
@@ -1426,12 +1426,39 @@ async def test_dental_supported_service_question_answers_directly_and_pronoun_fo
     context = processor.memory_service.get_context("patient-1")
 
     assert service["intent"] == "front_desk_contextual_answer"
-    assert service["reply_text"].startswith("Так, брекети є")
-    assert "Брекети" in service["reply_text"]
+    assert service["reply_text"].startswith("Так, у нас можна пройти ортодонтичне лікування брекетами.")
+    assert "консультація ортодонта" in service["reply_text"]
     assert followup["intent"] == "front_desk_contextual_answer"
-    assert "Брекети" in followup["reply_text"]
+    assert followup["reply_text"].startswith("Так, у нас можна пройти ортодонтичне лікування брекетами.")
     assert "Що саме ви маєте на увазі" not in followup["reply_text"]
     assert context["current_service_id"] == "braces"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "question, expected_phrase",
+    [
+        ("ви робите чистку?", "можна зробити професійну гігієну"),
+        ("ви лікуєте карієс?", "лікують карієс"),
+        ("ви ставите вініри?", "встановлюють керамічні вініри"),
+        ("ви ставите коронки?", "ставлять коронки"),
+        ("ви робите імпланти?", "встановлюють зубні імпланти"),
+        ("ви лікуєте канали?", "лікують кореневі канали"),
+        ("ви видаляєте зуби мудрості?", "видаляють зуби мудрості"),
+    ],
+)
+async def test_dental_supported_service_availability_replies_are_direct_and_natural(question, expected_phrase):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(question))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert result["reply_text"].startswith(("Так,", "Седація"))
+    assert expected_phrase in result["reply_text"]
+    assert "у базі немає підтвердження" not in result["reply_text"].lower()
+    assert "Що саме ви маєте на увазі" not in result["reply_text"]
     assert calendar.checked == []
     assert calendar.created == []
 
@@ -1463,7 +1490,7 @@ async def test_dental_root_canal_contextual_followups_stay_safe():
     diagnosis = await processor.process(_message("це точно пульпіт?"))
     context = processor.memory_service.get_context("patient-1")
 
-    assert "4500 грн" in service["reply_text"]
+    assert "лікують кореневі канали" in service["reply_text"]
     assert "мікроскопом" in microscope["reply_text"]
     assert diagnosis["intent"] == "diagnosis_request"
     assert "Не можу поставити діагноз" in diagnosis["reply_text"]
@@ -1531,7 +1558,7 @@ async def test_dental_aligners_comparison_followups_do_not_hijack_to_braces():
     price = await processor.process(_message("а по ціні сильно дорожче?"))
     context = processor.memory_service.get_context("patient-1")
 
-    assert "Елайнери" in service["reply_text"]
+    assert "ортодонтичне лікування елайнерами" in service["reply_text"]
     assert "Елайнери" in comparison["reply_text"]
     assert "60000 грн" in price["reply_text"]
     assert context["current_service_id"] == "aligners"
@@ -5749,7 +5776,7 @@ async def test_dental_active_booking_specialty_faq_then_consultation_redirects_t
     veneers = await processor.process(_message("а вініри робите?"))
     booking = await processor.process(_message("хочу записатися на консультацію"))
 
-    assert "Вініри" in veneers["reply_text"]
+    assert "встановлюють керамічні вініри" in veneers["reply_text"]
     assert booking["booking_result"]["status"] == "waiting_for_time"
     pending = processor.booking_service._get_pending_confirmation("patient-1")
     assert pending["current_service_id"] == "prosthetics_consultation"
@@ -5990,7 +6017,7 @@ async def test_dental_pediatric_caries_child_cleaning_followup_still_pediatric()
     await processor.process(_message("дитині треба лікувати карієс"))
     result = await processor.process(_message("а чистку дітям робите?"))
 
-    assert "1200" in result["reply_text"]
+    assert "дитячу профілактичну чистку" in result["reply_text"]
 
 
 async def test_dental_pediatric_caries_adult_cleaning_followup_still_switches():
@@ -5999,7 +6026,7 @@ async def test_dental_pediatric_caries_adult_cleaning_followup_still_switches():
     await processor.process(_message("дитині треба лікувати карієс"))
     result = await processor.process(_message("а дорослим чистку робите?"))
 
-    assert "1800" in result["reply_text"]
+    assert "професійну гігієну" in result["reply_text"]
 
 
 @pytest.mark.asyncio
