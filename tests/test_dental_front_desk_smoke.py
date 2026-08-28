@@ -5108,6 +5108,20 @@ async def test_dental_pain_mention_with_booking_intent_starts_booking_flow():
     assert calendar.checked == []
 
 
+@pytest.mark.asyncio
+async def test_dental_generic_dentist_booking_asks_for_service_before_time():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("Привіт, хочу записатись до стоматолога"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["booking_result"]["status"] == "waiting_for_service"
+    assert "На яку послугу" in result["reply_text"]
+    assert pending.get("current_service_id") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
 async def test_dental_pain_diagnosis_question_still_blocked():
     """Matrix 8: asking the bot to confirm a specific diagnosis must still
     be refused by the existing diagnosis-safety guard, unaffected by the
@@ -6648,6 +6662,18 @@ async def test_dental_bounded_oglyad_resolves_consultation(text):
 
 
 @pytest.mark.asyncio
+async def test_dental_oglyad_price_question_resolves_consultation_price():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("скільки у вас коштує огляд?"))
+
+    assert "700 грн" in result["reply_text"]
+    assert "Консультація стоматолога" in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "text",
     ["огляд машини", "технічний огляд", "огляд квартири", "огляд документів"],
@@ -6679,6 +6705,71 @@ async def test_dental_active_booking_koly_means_availability_not_hours():
     assert booking["booking_result"]["status"] == "waiting_for_time"
     assert availability["intent"] == "booking_availability_question"
     assert "Працюємо Пн-Пт" not in availability["reply_text"]
+    assert pending["current_service_id"] == "dental_consultation"
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_tomorrow_can_offers_verified_slots(monkeypatch):
+    class FridayDentalSmokeDatetime(FixedDentalSmokeDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 28, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(booking_service_module, "datetime", FridayDentalSmokeDatetime)
+    processor, calendar = _build_dental_processor(
+        calendar_service=SelectiveConfiguredCalendarService([
+            _kyiv_dt(2026, 8, 29, 10),
+            _kyiv_dt(2026, 8, 29, 10, 30),
+            _kyiv_dt(2026, 8, 29, 11),
+        ])
+    )
+
+    await processor.process(_message("огляд"))
+    await processor.process(_message("Ага"))
+    availability = await processor.process(_message("А завтра можна?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert availability["intent"] == "booking_availability_question"
+    assert availability["booking_result"]["status"] == "time_window_slots_suggested"
+    assert "10:00" in availability["reply_text"]
+    assert "10:30" in availability["reply_text"]
+    assert "11:00" in availability["reply_text"]
+    assert pending["current_service_id"] == "dental_consultation"
+    assert pending["requested_date"] == "2026-08-29"
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_active_booking_later_no_slots_does_not_cancel(monkeypatch):
+    class FridayDentalSmokeDatetime(FixedDentalSmokeDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 28, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(booking_service_module, "datetime", FridayDentalSmokeDatetime)
+    processor, calendar = _build_dental_processor(
+        calendar_service=SelectiveConfiguredCalendarService([
+            _kyiv_dt(2026, 8, 29, 10),
+            _kyiv_dt(2026, 8, 29, 10, 30),
+            _kyiv_dt(2026, 8, 29, 11),
+        ])
+    )
+
+    await processor.process(_message("огляд"))
+    await processor.process(_message("Ага"))
+    await processor.process(_message("А завтра можна?"))
+    later = await processor.process(_message("А пізніше нема?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert later["booking_result"]["status"] == "time_window_slots_suggested"
+    assert "не бачу вільних слотів" in later["reply_text"]
+    assert "суботу" in later["reply_text"]
+    assert "10:00 до 16:00" in later["reply_text"]
+    assert "не бронюю" not in later["reply_text"].lower()
+    assert processor.booking_service.get_booking_state("patient-1").value == "WAITING_FOR_TIME"
     assert pending["current_service_id"] == "dental_consultation"
     assert calendar.created == []
 

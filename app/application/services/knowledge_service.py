@@ -81,7 +81,14 @@ class KnowledgeService:
             or re.search(r"\bстоматологічн\w*\s+огляд\b", normalized)
         )
         bare_dental_reference = bool(re.search(r"(?:^|\bна\s+)огляд[ау]?$", normalized))
-        if not (dental_qualified or bare_dental_reference):
+        dental_price_or_booking_reference = bool(
+            re.search(r"\bогляд[ау]?\b", normalized)
+            and re.search(
+                r"\b(?:скільки|коштує|вартість|ціна|ціну|прайс|записа\w*|запиш\w*|прийом)\b",
+                normalized,
+            )
+        )
+        if not (dental_qualified or bare_dental_reference or dental_price_or_booking_reference):
             return None
         return self.get_service_by_id("dental_consultation")
 

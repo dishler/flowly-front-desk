@@ -835,6 +835,12 @@ class MessageProcessor:
         has_date = self.booking_service._extract_requested_date(text) is not None
         if has_date and "що є" in normalized:
             return True
+        has_exact_time = (
+            self.booking_service._parse_time_only(text) is not None
+            or self.booking_service._parse_requested_datetime(text) is not None
+        )
+        if has_date and not has_exact_time and "можна" in normalized:
+            return True
 
         return "підлаштуюсь" in normalized and "що є" in normalized
 
