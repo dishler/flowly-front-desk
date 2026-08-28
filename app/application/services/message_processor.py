@@ -266,11 +266,7 @@ class MessageProcessor:
 
         service = self._find_configured_front_desk_service(text)
         if service and service.get("id"):
-            context_service_id, context_service_name = self._remembered_service_context_for_booking(
-                sender_id,
-                fallback_service_id=fallback_service_id,
-                fallback_service_name=fallback_service_name,
-            )
+            context_service_id, context_service_name = self._remembered_service_context_for_booking(sender_id)
             if self._should_keep_specialty_context_for_generic_consultation(
                 text,
                 matched_service_id=str(service["id"]),
@@ -708,6 +704,16 @@ class MessageProcessor:
         suggested_slots = pending.get("suggested_slots")
         return isinstance(suggested_slots, list) and len(suggested_slots) == 1
 
+    def _unknown_detail_booking_switch_text(self, text: str) -> str:
+        normalized = self._normalize_for_booking_keywords(text)
+        normalized = re.sub(
+            r"^(?:(?:гаразд|добре|окей|ок|так|давайте|давай|звісно)[,;:\s]+)+",
+            "",
+            normalized,
+        ).strip()
+        normalized = re.sub(r"^(?:тоді|то|краще)[,;:\s]+", "", normalized).strip()
+        return normalized or text
+
     def _unknown_detail_booking_switch_service(self, sender_id: str, text: str) -> dict[str, Any] | None:
         if self.memory_service is None:
             return None
@@ -717,10 +723,11 @@ class MessageProcessor:
             or context.get("unknown_detail_booking_intent") is not True
         ):
             return None
-        service = self._find_configured_front_desk_service(text)
+        switch_text = self._unknown_detail_booking_switch_text(text)
+        service = self._find_configured_front_desk_service(switch_text)
         if service is None:
             return None
-        normalized = self._normalize_for_booking_keywords(text)
+        normalized = self._normalize_for_booking_keywords(switch_text)
         if self._looks_like_service_faq_request(normalized) and not self._has_service_booking_action_signal(normalized):
             return None
         if not (
@@ -728,7 +735,7 @@ class MessageProcessor:
             or re.search(r"\b(?:тоді|то|краще)?\s*на\s+\w+", normalized)
         ):
             return None
-        if self._unknown_service_detail_reply_for_booking(sender_id, text) is not None:
+        if self._unknown_service_detail_reply_for_booking(sender_id, switch_text) is not None:
             return None
         return service
 
@@ -767,6 +774,8 @@ class MessageProcessor:
             "вільні години",
             "доступні слоти",
             "які слоти",
+            "які є години",
+            "які години",
             "який є вільний час",
             "які є варіанти",
             "варіанти по часу",
@@ -802,6 +811,8 @@ class MessageProcessor:
             "години вільні",
             "доступні слоти",
             "які слоти",
+            "які є години",
+            "які години",
             "які є варіанти",
             "варіанти по часу",
             "коли є",
@@ -852,6 +863,10 @@ class MessageProcessor:
         return bool(
             re.search(rf"\bпісля\s+{time_pattern}\b", normalized)
             or re.search(rf"\bдо\s+{time_pattern}\b", normalized)
+            or re.search(
+                rf"\bз\s+{time_pattern}\b(?!\s*(?:р(?:ок(?:и|ів|у)?)?\.?|рок(?:и|ів|у)?))",
+                normalized,
+            )
             or re.search(rf"\bз\s+{time_pattern}(?:\s+годин[иу]?)?\s+до\s+{time_pattern}\b", normalized)
             or re.search(rf"\bміж\s+{time_pattern}\s+(?:і|та)\s+{time_pattern}\b", normalized)
             or re.search(rf"\b{time_pattern}\s*-\s*{time_pattern}\b", normalized)
@@ -2873,8 +2888,8 @@ class MessageProcessor:
                     reply_text=booking_result["reply_text"],
                     intent_value="booking_request",
                     booking_result=booking_result,
-                    fallback_service_id=active_service_id,
-                    fallback_service_name=active_service_name,
+                    fallback_service_id=booking_service_id,
+                    fallback_service_name=booking_service_name,
                 )
 
             if booking_state == BookingState.WAITING_FOR_CONTACT:
@@ -3007,6 +3022,16 @@ class MessageProcessor:
                 if service and service.get("id"):
                     booking_service_id = str(service["id"])
                     booking_service_name = str(service.get("name") or "")
+                    context_service_id, context_service_name = self._remembered_service_context_for_booking(
+                        message.sender_id,
+                    )
+                    if self._should_keep_specialty_context_for_generic_consultation(
+                        message.user_message,
+                        matched_service_id=booking_service_id,
+                        context_service_id=context_service_id,
+                    ):
+                        booking_service_id = str(context_service_id)
+                        booking_service_name = context_service_name
                     pending["current_service_id"] = self._effective_booking_service_id(booking_service_id)
                     if booking_service_name:
                         pending["current_service_name"] = booking_service_name

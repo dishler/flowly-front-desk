@@ -291,6 +291,107 @@ class ReplyService:
                 )
                 return fact_reply
 
+        compact = re.sub(r"[?!.,…]+", " ", normalized)
+        compact = " ".join(compact.split())
+        compact = re.sub(r"^(а\s+по|а|по|і|и)\s+", "", compact).strip()
+        compact = re.sub(r"^(?:для|у|в)\s+", "", compact).strip()
+        if compact.startswith("доросл"):
+            pricing_followup_reply = self._get_contextual_pricing_followup_reply(
+                message,
+                language,
+                normalized,
+            )
+            if pricing_followup_reply is not None:
+                return pricing_followup_reply
+
+        if service_context_id:
+            context_service = self.knowledge_service.get_service_by_id(str(service_context_id))
+            same_resolved_service = (
+                service is not None
+                and service.get("id") == context_service.get("id") if context_service else False
+            )
+            different_weak_detail_match = (
+                service is not None
+                and context_service is not None
+                and service.get("id") != context_service.get("id")
+                and bool(self.knowledge_service.unknown_detail_tokens_for_service(normalized, service))
+                and not self.knowledge_service._is_explicit_service_switch(
+                    normalized,
+                    context_service,
+                    service,
+                )
+            )
+            if different_weak_detail_match:
+                unknown_detail_reply = self.get_unknown_service_detail_reply(
+                    message.sender_id,
+                    normalized,
+                    service,
+                )
+                if unknown_detail_reply is not None:
+                    return unknown_detail_reply
+
+            unknown_context_detail = False
+            short_variant_question = False
+            if context_service is not None:
+                if same_resolved_service:
+                    unknown_context_detail = self._looks_like_service_availability_question(normalized)
+                elif service is None:
+                    service_like_unknown = any(
+                        marker in normalized
+                        for marker in ["зуб", "зуби", "лікування", "процедур", "брекет", "імплант", "коронк"]
+                    )
+                    relation_followup = any(
+                        marker in normalized
+                        for marker in ["входить", "включ", "можна поставити", "давно немає"]
+                    )
+                    scheduling_followup = any(
+                        marker in normalized
+                        for marker in ["зранку", "вранці", "ввечері", "увечері", "після", "до "]
+                    )
+                    short_variant_question = (
+                        len(normalized.split()) <= 4
+                        and "?" in text
+                        and bool(
+                            re.search(r"(?<![A-Za-zА-Яа-яІіЇїЄєҐґ])є(?![A-Za-zА-Яа-яІіЇїЄєҐґ])", normalized)
+                            or "робите" in normalized
+                            or "ставите" in normalized
+                        )
+                        and bool(
+                            self.knowledge_service.unknown_detail_tokens_for_service(
+                                normalized,
+                                context_service,
+                            )
+                        )
+                    )
+                    unknown_context_detail = (
+                        (service_like_unknown or short_variant_question)
+                        and "?" in text
+                        and not relation_followup
+                        and not scheduling_followup
+                    )
+
+            if unknown_context_detail:
+                if service is None and not short_variant_question:
+                    if self.memory_service is not None:
+                        self.memory_service.update_context(
+                            message.sender_id,
+                            question_context="unknown_detail_pending",
+                            current_service_id=None,
+                            current_service_name=None,
+                        )
+                    return (
+                        f"Щодо «{text}»: у базі немає підтвердження саме цієї послуги або деталі. "
+                        "Краще уточнити це з адміністратором або лікарем перед записом."
+                    )
+                else:
+                    unknown_detail_reply = self.get_unknown_service_detail_reply(
+                        message.sender_id,
+                        normalized,
+                        context_service,
+                    )
+                    if unknown_detail_reply is not None:
+                        return unknown_detail_reply
+
         contextual_followup = self._reply_with_contextual_service_followup(
             message.sender_id,
             normalized=normalized,
@@ -571,10 +672,11 @@ class ReplyService:
         compact = re.sub(r"[?!.,…]+", " ", normalized)
         compact = " ".join(compact.split())
         compact = re.sub(r"^(а\s+по|а|по|і|и)\s+", "", compact).strip()
+        compact = re.sub(r"^(?:для|у|в)\s+", "", compact).strip()
         if not compact or len(compact.split()) > 4:
             return None
 
-        if re.fullmatch(r"доросл\w*", compact):
+        if re.fullmatch(r"доросл\w*(?:\s+(?:скільки|ціна|вартість|коштує))?", compact):
             # A bare "adult" follow-up is a modifier on whatever pediatric
             # topic is currently active, not a service name of its own --
             # resolving it via the generic matcher below would match

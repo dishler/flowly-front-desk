@@ -364,7 +364,7 @@ class BookingService:
             "підходить", "підходе",
         }
         confirmation_actions = {
-            "давай", "давайте", "бронюй", "записуй", "підходить", "підтверджую",
+            "давай", "давайте", "бронюй", "записуй", "записуйте", "підходить", "підтверджую",
         }
         return words[0] in confirmation_starts and any(word in confirmation_actions for word in words[1:])
 

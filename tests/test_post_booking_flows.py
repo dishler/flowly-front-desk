@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -2341,7 +2341,9 @@ async def test_fresh_booking_after_abandoned_reschedule_offer_does_not_reschedul
 
     assert result["booking_result"]["status"] != "rescheduled"
     assert calendar_service.rescheduled_events == []
-    assert result["booking_result"]["start_dt"] == "2026-08-29T12:00:00+03:00"
+    expected_dt = datetime.now(booking_service.timezone) + timedelta(days=2)
+    expected_dt = expected_dt.replace(hour=12, minute=0, second=0, microsecond=0)
+    assert result["booking_result"]["start_dt"] == expected_dt.isoformat()
 
 
 async def test_pending_reschedule_valid_continuation_reschedules_once(processor_factory):

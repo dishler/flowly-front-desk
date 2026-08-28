@@ -5322,6 +5322,159 @@ async def test_dental_unsupported_booking_then_supported_service_switch_starts_b
     assert calendar.created == []
 
 
+async def test_dental_unsupported_booking_then_acknowledged_supported_service_switch_starts_booking():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    unsupported = await processor.process(_message("хочу записатися на лазерне відбілювання"))
+    switched = await processor.process(_message("гаразд, тоді на чистку"))
+
+    assert "у базі немає підтвердження" in unsupported["reply_text"]
+    assert switched["booking_result"]["status"] == "waiting_for_time"
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_unknown_detail_ack_without_service_still_retains_subject():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу записатися на лазерне відбілювання"))
+    result = await processor.process(_message("гаразд, уточніть"))
+
+    assert result["intent"] == "unknown_detail_followup"
+    assert "Відбілювання зубів" in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_pediatric_cleaning_adult_price_followup_switches_to_adult():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("дитині 7 років треба чистку"))
+    child_price = await processor.process(_message("скільки?"))
+    adult_price = await processor.process(_message("а дорослим скільки?"))
+
+    assert "1200 грн" in child_price["reply_text"]
+    assert "1800 грн" in adult_price["reply_text"]
+    assert "1200 грн" not in adult_price["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_pediatric_cleaning_for_adult_followup_switches_to_adult():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("дитині треба чистку"))
+    await processor.process(_message("скільки?"))
+    adult_price = await processor.process(_message("а для дорослого?"))
+
+    assert "1800 грн" in adult_price["reply_text"]
+    assert "1200 грн" not in adult_price["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_unknown_detail_after_context_does_not_repeat_old_service():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    sedation = await processor.process(_message("робите седацію?"))
+    laser = await processor.process(_message("а лазерне лікування зубів?"))
+
+    assert "Седація" in sedation["reply_text"]
+    assert "у базі немає підтвердження" in laser["reply_text"]
+    assert "лазерне лікування зубів" in laser["reply_text"]
+    assert "Седація" not in laser["reply_text"]
+    assert "лазер" not in sedation["reply_text"].lower()
+    assert laser["reply_text"] != sedation["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_unsupported_variant_after_broader_context_is_contained():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("ставите брекети?"))
+    sapphire = await processor.process(_message("ставите сапфірові брекети?"))
+
+    assert "у базі немає підтвердження" in sapphire["reply_text"]
+    assert "Брекети" in sapphire["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_short_unsupported_variant_after_broader_context_is_contained():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("брекети ставите?"))
+    sapphire = await processor.process(_message("сапфірові є?"))
+
+    assert "у базі немає підтвердження" in sapphire["reply_text"]
+    assert "Брекети" in sapphire["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_active_booking_specialty_faq_then_consultation_redirects_to_specialty():
+    calendar = RecordingConfiguredCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    veneers = await processor.process(_message("а вініри робите?"))
+    booking = await processor.process(_message("хочу записатися на консультацію"))
+
+    assert "Вініри" in veneers["reply_text"]
+    assert booking["booking_result"]["status"] == "waiting_for_time"
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert pending["current_service_id"] == "prosthetics_consultation"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_active_booking_natural_hours_question_offers_slots(monkeypatch):
+    class FridayDentalSmokeDatetime(FixedDentalSmokeDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 28, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(booking_service_module, "datetime", FridayDentalSmokeDatetime)
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 29, 10),
+        _kyiv_dt(2026, 8, 29, 10, 30),
+        _kyiv_dt(2026, 8, 29, 11),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("пломби ставите?"))
+    await processor.process(_message("ок, хочу записатися"))
+    result = await processor.process(_message("завтра які є години?"))
+
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert "10:00, 10:30 або 11:00" in result["reply_text"]
+    assert calendar.created == []
+
+
+async def test_dental_nearest_slot_polite_acceptance_progresses_to_contact():
+    calendar = SelectiveConfiguredCalendarService([_kyiv_dt(2026, 8, 29, 10)])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    offered = await processor.process(_message("болить зуб, коли найближче?"))
+    accepted = await processor.process(_message("ок записуйте"))
+
+    assert offered["booking_result"]["status"] == "nearest_availability_suggested"
+    assert accepted["booking_result"]["status"] == "waiting_for_contact"
+    assert accepted["booking_result"]["start_dt"] == "2026-08-29T10:00:00+03:00"
+    assert calendar.created == []
+
+
 # ---------------------------------------------------------------------------
 # Conversational understanding fix: contextual uncertainty follow-up (D16-D17)
 # ---------------------------------------------------------------------------
