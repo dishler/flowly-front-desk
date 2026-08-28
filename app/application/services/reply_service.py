@@ -1057,6 +1057,17 @@ class ReplyService:
         *,
         availability_confirmation: bool = False,
     ) -> Optional[str]:
+        summary_reply = service.get("summary_reply")
+        if isinstance(summary_reply, str) and summary_reply.strip():
+            service_id = service.get("id")
+            self._remember_front_desk_context(
+                sender_id,
+                current_service_id=str(service_id) if service_id else None,
+                question_context="services",
+            )
+            if not availability_confirmation:
+                return summary_reply.strip()
+
         description = service.get("description")
         price_note = service.get("price_note")
         name = service.get("name")

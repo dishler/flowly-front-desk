@@ -8178,11 +8178,14 @@ async def test_dental_braces_price_and_jaw_followup_are_natural():
 
     availability = await processor.process(_message("ви ставите брекети?"))
     price = await processor.process(_message("А яка вартість?"))
+    better = await processor.process(_message("А які кращі?"))
     jaw = await processor.process(_message("це за щелепу чи за дві?"))
 
     assert "Так, у нас можна пройти ортодонтичне лікування брекетами" in availability["reply_text"]
     assert price["reply_text"].startswith("Вартість брекетів:")
     assert "за щелепу" not in price["reply_text"].lower()
+    assert "Дистанційно не можемо сказати" in better["reply_text"]
+    assert "підбирає ортодонт після огляду" in better["reply_text"]
     assert "верхня і нижня щелепа рахуються окремо" in jaw["reply_text"]
     assert calendar.checked == []
     assert calendar.created == []
