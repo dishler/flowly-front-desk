@@ -675,6 +675,13 @@ class MessageProcessor:
             return False
         if self._looks_like_cancel_request(text) or self._looks_like_reschedule_request(text):
             return True
+        suggested_time_rejection = getattr(
+            self.booking_service,
+            "_looks_like_suggested_time_rejection",
+            None,
+        )
+        if callable(suggested_time_rejection) and suggested_time_rejection(text):
+            return True
         if self._message_has_valid_contact_data(text):
             return True
         if self._looks_like_offered_slot_ordinal_reply(text):

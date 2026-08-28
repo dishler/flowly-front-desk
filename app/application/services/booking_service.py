@@ -502,6 +502,7 @@ class BookingService:
         requested_date: date | None = None,
         requested_day_label: str | None = None,
         requested_label: str | None = None,
+        latest_available_slot: datetime | None = None,
     ) -> str:
         schedule_sentence = self._build_business_hours_sentence_for_date(
             language,
@@ -510,8 +511,27 @@ class BookingService:
         )
         if schedule_sentence:
             label = requested_label or "цей час"
+            if latest_available_slot is not None:
+                if label == "ввечері":
+                    day_reference = requested_day_label or "цей день"
+                    if day_reference == "сьогодні":
+                        unavailable_sentence = "Вечірніх слотів на сьогодні, на жаль, немає."
+                    elif day_reference == "завтра":
+                        unavailable_sentence = "Вечірніх слотів на завтра, на жаль, немає."
+                    elif day_reference == "післязавтра":
+                        unavailable_sentence = "Вечірніх слотів на післязавтра, на жаль, немає."
+                    else:
+                        unavailable_sentence = "Вечірніх слотів цього дня, на жаль, немає."
+                else:
+                    unavailable_sentence = f"На {label} записів немає, бо це поза графіком."
+                return (
+                    f"{schedule_sentence} {unavailable_sentence} "
+                    f"Найпізніший вільний час цього дня бачу о "
+                    f"{self._format_time_window_time(latest_available_slot.timetz().replace(tzinfo=None))}. "
+                    "Підійде, чи краще подивитися інший день?"
+                )
             return (
-                f"{schedule_sentence} На цей час клініка не працює, тому {label} не підходить. "
+                f"{schedule_sentence} У цей час клініка не працює, це поза графіком. "
                 "Підкажіть, будь ласка, інший день або час?"
             )
         return "На цей час клініка не працює. Підкажіть, будь ласка, інший день або час?"
@@ -643,9 +663,17 @@ class BookingService:
     def _build_idempotent_already_confirmed_reply(self, language: str, start_dt: datetime) -> str:
         return f"У вас уже є підтверджений {self._appointment_label()} на {self._format_scheduled_time_for_reply(start_dt, language)}."
 
-    def _build_missing_service_reply(self, language: str, *, pain_mentioned: bool = False) -> str:
+    def _build_missing_service_reply(
+        self,
+        language: str,
+        *,
+        pain_mentioned: bool = False,
+        include_greeting: bool = False,
+    ) -> str:
         if pain_mentioned:
             return self._pain_acknowledgement_sentence() + "На яку послугу хочете записатися?"
+        if include_greeting:
+            return "Вітаю! На яку послугу хочете записатися?"
         return "На яку послугу хочете записатися?"
 
     def _build_cancelled_reply(self, language: str) -> str:
@@ -653,6 +681,10 @@ class BookingService:
 
     def _build_alternative_rejected_reply(self, language: str) -> str:
         return "Добре. Напишіть, будь ласка, інший зручний час або день."
+
+    def _looks_like_suggested_time_rejection(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        return "не підход" in normalized or "не зручно" in normalized or "незручно" in normalized
 
     def _build_confirmed_cancelled_reply(self, language: str) -> str:
         return f"Добре, я скасував ваш {self._appointment_label()}. Якщо буде актуально — можемо запланувати інший час."
@@ -836,6 +868,30 @@ class BookingService:
                 self._booking_duration_minutes(),
             ):
                 return next_dt
+        return None
+
+    def _find_latest_available_slot_on_date(self, requested_date: date) -> datetime | None:
+        status, window = self._business_hours_status_for_date(requested_date)
+        if status != "open" or window is None:
+            return None
+
+        duration = self._booking_duration_minutes()
+        cursor = datetime.combine(requested_date, window[1], tzinfo=self.timezone) - timedelta(
+            minutes=duration
+        )
+        day_start = datetime.combine(requested_date, window[0], tzinfo=self.timezone)
+        while cursor >= day_start:
+            if self._is_within_business_hours(cursor, duration):
+                try:
+                    if self.calendar_service.check_specific_time_availability(
+                        cursor,
+                        duration_minutes=duration,
+                    ):
+                        return cursor
+                except Exception:
+                    logger.exception("latest-slot availability check failed start_dt=%s", cursor.isoformat())
+                    return None
+            cursor -= timedelta(minutes=30)
         return None
 
     def _looks_like_nearest_availability_request(self, text: str) -> bool:
@@ -1159,6 +1215,7 @@ class BookingService:
         )
 
         if status != "open":
+            latest_available_slot = self._find_latest_available_slot_on_date(requested_date)
             self._save_booking_state(
                 sender_id,
                 state=BookingState.WAITING_FOR_TIME,
@@ -1174,6 +1231,15 @@ class BookingService:
             if current_service_name:
                 pending["current_service_name"] = current_service_name
             pending["availability_context"] = True
+            if latest_available_slot is not None:
+                pending["busy_alternative"] = True
+                pending["suggested_slots"] = [
+                    {
+                        "day_key": "selected_day",
+                        "start_dt": self._serialize_pending_start_dt(latest_available_slot),
+                    }
+                ]
+                pending["last_suggested_day"] = "selected_day"
             self._save_pending_confirmation(sender_id, pending)
             return {
                 "status": "outside_business_hours",
@@ -1182,10 +1248,12 @@ class BookingService:
                     requested_date=requested_date,
                     requested_day_label=requested_day_label,
                     requested_label=daypart["label"],
+                    latest_available_slot=latest_available_slot,
                 ),
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "requested_date": requested_date.isoformat(),
+                "suggested_slots": pending.get("suggested_slots", []),
             }
 
         early_contact_details = self._extract_trailing_contact_details(message_text)
@@ -1252,6 +1320,7 @@ class BookingService:
         )
 
         if status != "open":
+            latest_available_slot = self._find_latest_available_slot_on_date(requested_date)
             self._save_booking_state(
                 sender_id,
                 state=BookingState.WAITING_FOR_TIME,
@@ -1267,6 +1336,15 @@ class BookingService:
             if current_service_name:
                 pending["current_service_name"] = current_service_name
             pending["availability_context"] = True
+            if latest_available_slot is not None:
+                pending["busy_alternative"] = True
+                pending["suggested_slots"] = [
+                    {
+                        "day_key": "selected_day",
+                        "start_dt": self._serialize_pending_start_dt(latest_available_slot),
+                    }
+                ]
+                pending["last_suggested_day"] = "selected_day"
             self._save_pending_confirmation(sender_id, pending)
             return {
                 "status": "outside_business_hours",
@@ -1275,10 +1353,12 @@ class BookingService:
                     requested_date=requested_date,
                     requested_day_label=requested_day_label,
                     requested_label=time_window["label"],
+                    latest_available_slot=latest_available_slot,
                 ),
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "requested_date": requested_date.isoformat(),
+                "suggested_slots": pending.get("suggested_slots", []),
             }
 
         early_contact_details = self._extract_trailing_contact_details(message_text)
@@ -2309,6 +2389,7 @@ class BookingService:
         if (
             self._is_confirmation_text(message_text)
             or self._is_rejection(message_text)
+            or self._looks_like_suggested_time_rejection(message_text)
             or self._looks_like_another_time_request(message_text)
         ):
             # These are fixed-phrase markers ("так", "інший час", "раніше"),
@@ -4012,6 +4093,68 @@ class BookingService:
             "start_dt": next_slot.isoformat(),
         }
 
+    def _offer_verified_alternative_after_final_recheck(
+        self,
+        *,
+        sender_id: str,
+        pending: dict[str, Any],
+        language: str,
+        source_channel: str | None,
+        requested_dt: datetime,
+    ) -> Dict[str, Any] | None:
+        try:
+            next_slot = self._find_next_available_slot(requested_dt)
+        except Exception:
+            logger.exception(
+                "booking final-recheck alternative lookup failed sender_id=%s start_dt=%s",
+                sender_id,
+                requested_dt.isoformat(),
+            )
+            return None
+        if next_slot is None:
+            return None
+
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel or pending.get("source_channel"),
+            context_summary=pending.get("context_summary"),
+            requested_date=next_slot.date(),
+            requested_day_label=self._format_date_label_for_reply(next_slot.date(), language),
+            customer_name=pending.get("customer_name"),
+            contact_email=pending.get("contact_email"),
+            contact_phone=pending.get("contact_phone"),
+        )
+        refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+        if pending.get("current_service_id"):
+            refreshed_pending["current_service_id"] = pending.get("current_service_id")
+        if pending.get("current_service_name"):
+            refreshed_pending["current_service_name"] = pending.get("current_service_name")
+        refreshed_pending["availability_context"] = True
+        refreshed_pending["busy_alternative"] = True
+        refreshed_pending["suggested_slots"] = [
+            {
+                "day_key": "selected_day",
+                "start_dt": self._serialize_pending_start_dt(next_slot),
+            }
+        ]
+        refreshed_pending["last_suggested_day"] = "selected_day"
+        self._save_pending_confirmation(sender_id, refreshed_pending)
+
+        return {
+            "status": "slot_suggested",
+            "reply_text": (
+                f"На жаль, {self._format_scheduled_time_for_reply(requested_dt, language)} "
+                f"вже зайнятий. Як щодо {self._format_scheduled_time_for_reply(next_slot, language)}?"
+            ),
+            "event_created": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+            "requires_contact": False,
+            "suggested_slots": refreshed_pending["suggested_slots"],
+            "start_dt": next_slot.isoformat(),
+        }
+
     def _merge_booking_correction(
         self,
         *,
@@ -4282,6 +4425,7 @@ class BookingService:
         requested_day_label: str | None = None,
         contact_details: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        had_pending_before = bool(self._get_pending_confirmation(sender_id))
         contact_details = contact_details or self._empty_contact_details()
         preserved_date = requested_date or (requested_dt.date() if requested_dt else None)
         self._save_booking_state(
@@ -4303,7 +4447,9 @@ class BookingService:
         return {
             "status": "waiting_for_service",
             "reply_text": self._build_missing_service_reply(
-                language, pain_mentioned=self._looks_like_dental_pain_mention(message_text)
+                language,
+                pain_mentioned=self._looks_like_dental_pain_mention(message_text),
+                include_greeting=not had_pending_before,
             ),
             "requires_confirmation": False,
             "event_created": False,
@@ -5026,9 +5172,16 @@ class BookingService:
         # already handled as a refinement request, not a flat rejection,
         # and "пізніше" is also (confusingly) one of the _is_rejection
         # markers for the unrelated "not now" postponement sense.
+        rejects_suggested_time = self._looks_like_suggested_time_rejection(message_text)
         rejects_busy_alternative = (
-            bool(pending.get("busy_alternative"))
-            and self._is_rejection(message_text)
+            (
+                bool(pending.get("busy_alternative"))
+                or (
+                    bool(pending.get("availability_context"))
+                    and rejects_suggested_time
+                )
+            )
+            and (self._is_rejection(message_text) or rejects_suggested_time)
             and not alternative_time_request
         )
         if rejects_busy_alternative:
@@ -5476,12 +5629,41 @@ class BookingService:
             }
 
         if not still_available:
-            self._clear_pending_confirmation(sender_id)
+            alternative_result = self._offer_verified_alternative_after_final_recheck(
+                sender_id=sender_id,
+                pending=pending,
+                language=language,
+                source_channel=source_channel,
+                requested_dt=start_dt,
+            )
+            if alternative_result is not None:
+                return alternative_result
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_TIME,
+                language=language,
+                source_channel=source_channel or pending.get("source_channel"),
+                context_summary=pending.get("context_summary"),
+                requested_date=start_dt.date(),
+                requested_day_label=self._format_date_label_for_reply(start_dt.date(), language),
+                customer_name=pending.get("customer_name"),
+                contact_email=pending.get("contact_email"),
+                contact_phone=pending.get("contact_phone"),
+            )
+            refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+            if pending.get("current_service_id"):
+                refreshed_pending["current_service_id"] = pending.get("current_service_id")
+            if pending.get("current_service_name"):
+                refreshed_pending["current_service_name"] = pending.get("current_service_name")
+            self._save_pending_confirmation(sender_id, refreshed_pending)
             return {
                 "status": "unavailable",
-                "reply_text": self._build_unavailable_reply(language),
+                "reply_text": (
+                    "На цей час слот уже зайнятий. "
+                    "Напишіть, будь ласка, інший зручний час або день."
+                ),
                 "event_created": False,
-                "booking_state": BookingState.NONE.value,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
             }
 
         calendar_configured = bool(
