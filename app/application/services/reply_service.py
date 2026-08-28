@@ -1278,7 +1278,12 @@ class ReplyService:
             "як це може працювати у вашому бізнесі."
         )
 
-    def _get_ai_fallback_reply(self, text: str, language: str) -> Optional[str]:
+    def _get_ai_fallback_reply(
+        self,
+        text: str,
+        language: str,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[str]:
         if self.ai_service is None:
             return None
 
@@ -1314,14 +1319,14 @@ class ReplyService:
         try:
             ai_result = self.ai_service.try_generate_reply(
                 user_message=text,
-                history=[],
+                history=history or [],
                 grounding_context=None,
                 system_instruction=system_instruction,
             )
         except TypeError:
             ai_result = self.ai_service.try_generate_reply(
                 user_message=text,
-                history=[],
+                history=history or [],
             )
         except Exception:
             logger.exception("AI fallback failed")
@@ -2194,7 +2199,11 @@ class ReplyService:
                     language=language,
                 )
 
-            ai_reply = self._get_ai_fallback_reply(text, language)
+            ai_reply = self._get_ai_fallback_reply(
+                text,
+                language,
+                history=self.memory_service.get_history(message.sender_id),
+            )
             if ai_reply:
                 return ai_reply
 
@@ -2285,7 +2294,11 @@ class ReplyService:
                 language=language,
             )
 
-        ai_reply = self._get_ai_fallback_reply(text, language)
+        ai_reply = self._get_ai_fallback_reply(
+            text,
+            language,
+            history=self.memory_service.get_history(message.sender_id),
+        )
         if ai_reply:
             return ai_reply
 
