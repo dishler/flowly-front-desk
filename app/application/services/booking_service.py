@@ -3249,10 +3249,10 @@ class BookingService:
         normalized = re.sub(r"[^\w\sа-яіїєґё:]", " ", normalized, flags=re.IGNORECASE)
         normalized = " ".join(normalized.split())
         acceptance_markers = r"(?:а|давайте|давай|тоді|можна|на|о|так|да|ок|окей|добре)"
-        acceptance_suffixes = r"(?:підійде|підходить|норм|нормально|добре|ок|окей)"
+        acceptance_suffixes = r"(?:підійде|підходить|норм|нормально|добре|ок|окей|супер)"
         patterns = [
             rf"^{acceptance_markers}\s+(\d{{1,2}})$",
-            rf"^(\d{{1,2}})\s+{acceptance_suffixes}$",
+            rf"^(\d{{1,2}})(?:\s+буде)?\s+{acceptance_suffixes}$",
             rf"^{acceptance_markers}\s+(\d{{1,2}})\s+{acceptance_suffixes}$",
         ]
         for pattern in patterns:
@@ -3324,7 +3324,7 @@ class BookingService:
         residual = re.sub(
             r"\b(?:годин\w*|год|буде|зручн\w*|давайте|давай|тоді|"
             r"можна|мені|хочу|на|о|об|так|да|ок|окей|добре|підходить|підійде|"
-            r"норм|нормально)\b",
+            r"норм|нормально|супер)\b",
             " ",
             residual,
         )

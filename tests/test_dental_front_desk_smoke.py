@@ -1410,7 +1410,7 @@ async def test_dental_braces_contextual_followups_do_not_switch_to_crowns():
 
     assert "ортодонтичне лікування брекетами" in service["reply_text"]
     assert "19000 грн" in metal["reply_text"]
-    assert "щелепу" in metal["reply_text"]
+    assert "за щелепу" not in metal["reply_text"]
     assert "Термін лікування залежить" in duration["reply_text"]
     assert context["current_service_id"] == "braces"
     assert calendar.created == []
@@ -1487,7 +1487,8 @@ async def test_dental_braces_jaw_price_unit_followup_does_not_hijack_to_xray():
     context = processor.memory_service.get_context("patient-1")
 
     assert result["intent"] == "front_desk_contextual_answer"
-    assert "окремо верхню або нижню щелепу" in result["reply_text"]
+    assert "верхня або нижня частина" in result["reply_text"]
+    assert "не всі зуби одразу" in result["reply_text"]
     assert "Рентген-діагностика" not in result["reply_text"]
     assert "у базі немає підтвердження" not in result["reply_text"].lower()
     assert context["current_service_id"] == "braces"
@@ -2852,7 +2853,7 @@ async def test_dental_suggested_slot_selection_rejects_unoffered_formats(text, e
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["15", "давайте 15"])
+@pytest.mark.parametrize("text", ["15", "давайте 15", "15 буде супер"])
 async def test_dental_suggested_slot_selection_keeps_hour_only_offered_selection(text):
     calendar = SelectiveConfiguredCalendarService([
         _kyiv_dt(2026, 8, 27, 15),
@@ -2868,6 +2869,25 @@ async def test_dental_suggested_slot_selection_keeps_hour_only_offered_selection
     assert parsed == time(15)
     assert selected["booking_result"]["status"] == "waiting_for_contact"
     assert selected["booking_result"]["start_dt"] == "2026-08-27T15:00:00+03:00"
+
+
+@pytest.mark.asyncio
+async def test_dental_suggested_slot_selection_accepts_super_suffix_for_offered_hour():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 25, 17),
+        _kyiv_dt(2026, 8, 25, 17, 30),
+        _kyiv_dt(2026, 8, 25, 18),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатися на консультацію ортодонта"))
+    await processor.process(_message("Давайте на вівторок"))
+    await processor.process(_message("А щось пізніше, ввечері?"))
+    selected = await processor.process(_message("18 буде супер"))
+
+    assert selected["booking_result"]["status"] == "waiting_for_contact"
+    assert selected["booking_result"]["start_dt"] == "2026-08-25T18:00:00+03:00"
+    assert calendar.created == []
 
 
 @pytest.mark.asyncio
