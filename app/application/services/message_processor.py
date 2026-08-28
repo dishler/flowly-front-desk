@@ -543,6 +543,49 @@ class MessageProcessor:
             and effective_context_id.endswith("_consultation")
         )
 
+    def _specialty_consultation_context_for_sender(
+        self,
+        sender_id: str,
+    ) -> tuple[str | None, str | None, str | None]:
+        context_service_id, context_service_name = self._remembered_service_context_for_booking(sender_id)
+        if not context_service_id:
+            return None, None, None
+        effective_service_id = self._effective_booking_service_id(context_service_id)
+        if (
+            not effective_service_id
+            or effective_service_id == "dental_consultation"
+            or not effective_service_id.endswith("_consultation")
+        ):
+            return None, None, None
+        return context_service_id, context_service_name, effective_service_id
+
+    def _front_desk_specialty_consultation_cta(self, sender_id: str) -> str | None:
+        _service_id, _service_name, effective_service_id = self._specialty_consultation_context_for_sender(sender_id)
+        if not effective_service_id:
+            return None
+
+        consultation_label = "консультацію"
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        effective_service = (
+            knowledge_service.get_service_by_id(effective_service_id)
+            if knowledge_service is not None
+            else None
+        )
+        if effective_service is not None:
+            service_name = str(effective_service.get("name") or "").strip().lower()
+            if service_name.startswith("консультація "):
+                consultation_label = "консультацію " + service_name.removeprefix("консультація ").strip()
+
+        return f"Можу допомогти записатися на {consultation_label}. Підібрати зручний час?"
+
+    def _looks_like_contextual_consultation_selection(self, sender_id: str, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        normalized = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        if normalized not in {"консультація", "консультацію", "на консультацію"}:
+            return False
+        _service_id, _service_name, effective_service_id = self._specialty_consultation_context_for_sender(sender_id)
+        return bool(effective_service_id)
+
     def _looks_like_generic_consultation_booking(self, text: str) -> bool:
         normalized = self._normalize_for_booking_keywords(text)
         has_consultation = bool(re.search(r"\b(?:консультац\w*|проконсульт\w*|consultation)\b", normalized))
@@ -2112,6 +2155,7 @@ class MessageProcessor:
             "окк",
             "окей",
             "добре",
+            "гаразд",
             "yes",
             "yep",
             "yeah",
@@ -2127,6 +2171,11 @@ class MessageProcessor:
             if item.startswith("assistant:")
         ]
         recent = " ".join(assistant_items[-4:])
+
+        if self._is_configured_front_desk_mode():
+            front_desk_cta = self._front_desk_specialty_consultation_cta(sender_id)
+            if front_desk_cta:
+                return front_desk_cta
 
         if self._has_recent_business_channel_context(sender_id):
             return self._get_business_channel_followup_reply("цікаво")
@@ -3499,6 +3548,16 @@ class MessageProcessor:
                     or self._get_niche_fit_reply(message.user_message) is not None
                 )
             ):
+                if self._is_short_affirmation(message.user_message):
+                    front_desk_cta = self._front_desk_specialty_consultation_cta(message.sender_id)
+                    if front_desk_cta:
+                        return self._build_direct_reply_result(
+                            message=message,
+                            reply_text=front_desk_cta,
+                            intent_value="contextual_affirmation",
+                            routing_category="answered_basic",
+                            intent_for_policy=IntentType.GENERAL_QUESTION,
+                        )
                 return self._build_front_desk_safe_fallback_result(message)
 
             if (
@@ -3910,7 +3969,13 @@ class MessageProcessor:
 
         if (
             self._is_configured_front_desk_mode()
-            and self._looks_like_generic_consultation_booking(message.user_message)
+            and (
+                self._looks_like_generic_consultation_booking(message.user_message)
+                or self._looks_like_contextual_consultation_selection(
+                    message.sender_id,
+                    message.user_message,
+                )
+            )
         ):
             remembered_service_id, remembered_service_name = self._remembered_service_context_for_booking(
                 message.sender_id,
@@ -4084,6 +4149,17 @@ class MessageProcessor:
                     intent_value="booking_request",
                     booking_result=booking_result,
                 )
+
+            if self._is_short_affirmation(message.user_message):
+                front_desk_cta = self._front_desk_specialty_consultation_cta(message.sender_id)
+                if front_desk_cta:
+                    return self._build_direct_reply_result(
+                        message=message,
+                        reply_text=front_desk_cta,
+                        intent_value="contextual_affirmation",
+                        routing_category="answered_basic",
+                        intent_for_policy=IntentType.GENERAL_QUESTION,
+                    )
 
             return self._build_front_desk_safe_fallback_result(message)
 

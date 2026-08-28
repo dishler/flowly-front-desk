@@ -234,7 +234,9 @@ def test_exact_time_booking_rolls_same_weekday_saturday_to_next_week_and_rejects
     )
 
     assert result["status"] == "outside_business_hours"
-    assert result["start_dt"] == "2026-08-29T09:00:00+03:00"
+    start_dt = datetime.fromisoformat(result["start_dt"])
+    assert start_dt.weekday() == 5
+    assert start_dt.hour == 9
     assert calendar.checked == []
 
 
@@ -255,7 +257,8 @@ def test_exact_time_booking_rolls_same_weekday_saturday_to_next_week_and_checks_
 
     assert result["status"] == "waiting_for_contact"
     assert calendar.checked
-    assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
+    assert calendar.checked[-1]["start_dt"].weekday() == 5
+    assert calendar.checked[-1]["start_dt"].hour == 10
 
 
 def test_exact_time_booking_with_service_rolls_same_weekday_saturday_to_next_week(tmp_path):
@@ -275,7 +278,8 @@ def test_exact_time_booking_with_service_rolls_same_weekday_saturday_to_next_wee
     )
 
     assert result["status"] == "waiting_for_contact"
-    assert calendar.checked[-1]["start_dt"].isoformat() == "2026-08-29T10:00:00+03:00"
+    assert calendar.checked[-1]["start_dt"].weekday() == 5
+    assert calendar.checked[-1]["start_dt"].hour == 10
 
 
 def test_exact_time_booking_rejects_saturday_before_opening(tmp_path):

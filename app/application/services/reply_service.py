@@ -1025,7 +1025,9 @@ class ReplyService:
         if not variants:
             return None
         name = service.get("name")
-        prefix = f"{name}: " if name else ""
+        prefix = service.get("price_options_reply_prefix")
+        if not isinstance(prefix, str):
+            prefix = f"{name}: " if name else ""
         return prefix + "; ".join(variants) + "."
 
     def _reply_with_service_price(self, sender_id: str, service: dict[str, Any]) -> Optional[str]:

@@ -1553,6 +1553,89 @@ class BookingService:
             "suggested_slots": pending["suggested_slots"],
         }
 
+    def _suggest_next_open_day_slots_after_closed_date(
+        self,
+        sender_id: str,
+        *,
+        language: str,
+        message_text: str,
+        source_channel: str | None,
+        closed_date: date,
+        closed_day_label: str | None,
+        current_service_id: str | None = None,
+        current_service_name: str | None = None,
+        horizon_days: int = 14,
+    ) -> Dict[str, Any]:
+        schedule_sentence = self._build_business_hours_sentence_for_date(
+            language,
+            closed_date,
+            closed_day_label,
+        )
+        full_day_window = {
+            "label": "вільний час",
+            "start": None,
+            "end": None,
+        }
+
+        for day_offset in range(1, horizon_days + 1):
+            candidate_date = closed_date + timedelta(days=day_offset)
+            status, _window = self._get_verified_time_window_slots(
+                requested_date=candidate_date,
+                time_window=full_day_window,
+            )
+            if status != "open" or not _window:
+                continue
+
+            candidate_label = self._format_date_label_for_reply(candidate_date, language)
+            result = self._suggest_time_window_slots(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel,
+                requested_date=candidate_date,
+                requested_day_label=candidate_label,
+                time_window=full_day_window,
+                current_service_id=current_service_id,
+                current_service_name=current_service_name,
+            )
+            if result.get("status") != "time_window_slots_suggested":
+                continue
+            prefix = schedule_sentence or "У цей день клініка не працює."
+            next_label = candidate_label or "найближчий робочий день"
+            result["reply_text"] = (
+                f"{prefix} Найближчий робочий день — {next_label}. "
+                f"{result['reply_text']}"
+            )
+            result["closed_requested_date"] = closed_date.isoformat()
+            return result
+
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel,
+            context_summary=message_text[:280],
+            requested_date=closed_date,
+            requested_day_label=closed_day_label,
+        )
+        pending = self._get_pending_confirmation(sender_id) or {}
+        if current_service_id:
+            pending["current_service_id"] = current_service_id
+        if current_service_name:
+            pending["current_service_name"] = current_service_name
+        self._save_pending_confirmation(sender_id, pending)
+        return {
+            "status": "outside_business_hours",
+            "reply_text": self._build_outside_business_hours_reply(
+                language,
+                requested_date=closed_date,
+                requested_day_label=closed_day_label,
+            ),
+            "requires_confirmation": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+            "requested_date": closed_date.isoformat(),
+        }
+
     def _extract_contact_details(self, text: str) -> Dict[str, Any]:
         emails = []
         seen_emails = set()
@@ -2375,6 +2458,21 @@ class BookingService:
         previous_pending = self._get_pending_confirmation(sender_id) or {}
         current_service_id = current_service_id or previous_pending.get("current_service_id")
         current_service_name = current_service_name or previous_pending.get("current_service_name")
+        partial_date = self._extract_requested_date(message_text)
+        if (
+            partial_date is not None
+            and self._business_hours_status_for_date(partial_date["date"])[0] == "closed"
+        ):
+            return self._suggest_next_open_day_slots_after_closed_date(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or previous_pending.get("source_channel"),
+                closed_date=partial_date["date"],
+                closed_day_label=partial_date.get("day_label"),
+                current_service_id=current_service_id,
+                current_service_name=current_service_name,
+            )
         requested_day_key = self._detect_requested_day_key(message_text)
         verified_slots_by_day = self._get_suggested_slots_by_day()
         if requested_day_key is not None:
@@ -2464,6 +2562,21 @@ class BookingService:
         if requested_date is None:
             return None
 
+        if (
+            not pending.get("reschedule_pending")
+            and self._business_hours_status_for_date(requested_date)[0] == "closed"
+        ):
+            return self._suggest_next_open_day_slots_after_closed_date(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or pending.get("source_channel"),
+                closed_date=requested_date,
+                closed_day_label=requested_day_label,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
+            )
+
         return self._suggest_time_window_slots(
             sender_id,
             language=language,
@@ -2476,6 +2589,8 @@ class BookingService:
                 "start": None,
                 "end": None,
             },
+            current_service_id=pending.get("current_service_id"),
+            current_service_name=pending.get("current_service_name"),
         )
 
     def cancel_confirmed_booking(self, sender_id: str, message_text: str) -> Dict[str, Any]:
@@ -3586,6 +3701,24 @@ class BookingService:
             if partial_date
             else pending.get("requested_day_label")
         )
+        if (
+            partial_date is not None
+            and requested_date is not None
+            and time_window is None
+            and daypart is None
+            and not pending.get("reschedule_pending")
+            and self._business_hours_status_for_date(requested_date)[0] == "closed"
+        ):
+            return self._suggest_next_open_day_slots_after_closed_date(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or pending.get("source_channel"),
+                closed_date=requested_date,
+                closed_day_label=requested_day_label,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
+            )
         candidate_slots = slots_by_day.get(preferred_day, [])
         if requested_day_key:
             pending["last_suggested_day"] = requested_day_key
@@ -5473,6 +5606,20 @@ class BookingService:
                     current_service_id=current_service_id,
                     current_service_name=current_service_name,
                 )
+            if (
+                requested_date is not None
+                and self._business_hours_status_for_date(requested_date)[0] == "closed"
+            ):
+                return self._suggest_next_open_day_slots_after_closed_date(
+                    sender_id,
+                    language=language,
+                    message_text=message_text,
+                    source_channel=source_channel or previous_pending.get("source_channel"),
+                    closed_date=requested_date,
+                    closed_day_label=requested_day_label,
+                    current_service_id=current_service_id or previous_pending.get("current_service_id"),
+                    current_service_name=current_service_name or previous_pending.get("current_service_name"),
+                )
             self._save_booking_state(
                 sender_id,
                 state=BookingState.WAITING_FOR_TIME,
@@ -6455,6 +6602,20 @@ class BookingService:
                 )
 
             if partial_date:
+                if (
+                    pending_requested_date is not None
+                    and self._business_hours_status_for_date(pending_requested_date)[0] == "closed"
+                ):
+                    return self._suggest_next_open_day_slots_after_closed_date(
+                        sender_id,
+                        language=language,
+                        message_text=message_text,
+                        source_channel=source_channel or pending.get("source_channel"),
+                        closed_date=pending_requested_date,
+                        closed_day_label=pending.get("requested_day_label"),
+                        current_service_id=pending.get("current_service_id"),
+                        current_service_name=pending.get("current_service_name"),
+                    )
                 return {
                     "status": "waiting_for_time",
                     "reply_text": self._build_missing_time_reply(
