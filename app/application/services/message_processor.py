@@ -2826,6 +2826,7 @@ class MessageProcessor:
             "прив",
             "привіт",
             "вітаю",
+            "ітаю",
             "доброго",
             "доброго дня",
             "добрий день",
@@ -2840,7 +2841,7 @@ class MessageProcessor:
     def _has_substantive_after_greeting(self, user_text: str) -> bool:
         normalized = " ".join(user_text.strip().lower().split())
         greeting_prefix = (
-            r"^(?:привіт|вітаю|доброго дня|доброго|добрий день|добрий вечір|"
+            r"^(?:привіт|вітаю|ітаю|доброго дня|доброго|добрий день|добрий вечір|"
             r"hello|hi|hey)[\s,!.-]*"
         )
         remainder = re.sub(greeting_prefix, "", normalized, count=1).strip()

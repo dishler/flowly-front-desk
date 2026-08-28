@@ -341,7 +341,7 @@ async def test_dental_english_greeting_is_short_and_uses_clinic_identity(dental_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["прив", "доброго"])
+@pytest.mark.parametrize("text", ["прив", "доброго", "ітаю"])
 async def test_dental_short_greeting_variants_use_clinic_identity(dental_processor, text):
     processor, _calendar = dental_processor
 
@@ -1432,6 +1432,20 @@ async def test_dental_supported_service_question_answers_directly_and_pronoun_fo
     assert followup["reply_text"].startswith("Так, у нас можна пройти ортодонтичне лікування брекетами.")
     assert "Що саме ви маєте на увазі" not in followup["reply_text"]
     assert context["current_service_id"] == "braces"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_supported_service_question_tolerates_polite_typo():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("ітаю"))
+    result = await processor.process(_message("Підажіть, ви ставите брекети?"))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert result["reply_text"].startswith("Так, у нас можна пройти ортодонтичне лікування брекетами.")
+    assert "у базі немає підтвердження" not in result["reply_text"].lower()
     assert calendar.checked == []
     assert calendar.created == []
 
