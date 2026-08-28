@@ -245,6 +245,11 @@
       "answer_en": "Yes, professional hygiene is possible with braces; the method is selected by the clinician."
     },
     {
+      "question": "За щелепу це за верхню чи нижню щелепу для брекетів?",
+      "answer_uk": "«За щелепу» означає окремо верхню або нижню щелепу. Якщо брекети потрібні на обидві щелепи, вартість рахується окремо для кожної; точний план ортодонт визначає після консультації.",
+      "answer_en": "Per jaw means separately for the upper or lower jaw. If braces are needed on both jaws, the price is calculated separately for each; the orthodontist confirms the exact plan after consultation."
+    },
+    {
       "question": "Чи треба робити КТ?",
       "answer_uk": "Залежить від процедури — потребу в КТ визначає лікар після оцінки ситуації.",
       "answer_en": "It depends on the procedure — the need for a CT scan is determined by the dentist after evaluation."

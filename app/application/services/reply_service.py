@@ -430,10 +430,18 @@ class ReplyService:
                 return option_reply
 
         if service is not None and context.get("question_context") == "services":
-            return self._reply_with_service_summary(message.sender_id, service)
+            return self._reply_with_service_summary(
+                message.sender_id,
+                service,
+                availability_confirmation=self._looks_like_known_service_availability_question(normalized),
+            )
 
         if service is not None:
-            return self._reply_with_service_summary(message.sender_id, service)
+            return self._reply_with_service_summary(
+                message.sender_id,
+                service,
+                availability_confirmation=self._looks_like_known_service_availability_question(normalized),
+            )
 
         if (
             service_context_id
@@ -475,6 +483,24 @@ class ReplyService:
             "окей",
             "добре",
         }
+
+    def _looks_like_known_service_availability_question(self, normalized: str) -> bool:
+        if self._looks_like_price_query(normalized):
+            return False
+        return any(
+            marker in normalized
+            for marker in [
+                "чи ",
+                "ви робите",
+                "робите",
+                "ставите",
+                "лікуєте",
+                "видаляєте",
+                "є у вас",
+                "можна зробити",
+                "можна поставити",
+            ]
+        )
 
     def evaluate_escalation(self, user_text: str, history: List[str]) -> Tuple[bool, str]:
         """
@@ -910,7 +936,11 @@ class ReplyService:
             return self._reply_with_service_summary(sender_id, service)
 
         if kind == "summary":
-            return self._reply_with_service_summary(sender_id, service)
+            return self._reply_with_service_summary(
+                sender_id,
+                service,
+                availability_confirmation=self._looks_like_known_service_availability_question(normalized),
+            )
 
         return None
 
@@ -1010,7 +1040,13 @@ class ReplyService:
         )
         return reply_text
 
-    def _reply_with_service_summary(self, sender_id: str, service: dict[str, Any]) -> Optional[str]:
+    def _reply_with_service_summary(
+        self,
+        sender_id: str,
+        service: dict[str, Any],
+        *,
+        availability_confirmation: bool = False,
+    ) -> Optional[str]:
         description = service.get("description")
         price_note = service.get("price_note")
         name = service.get("name")
@@ -1023,7 +1059,10 @@ class ReplyService:
             current_service_id=str(service_id) if service_id else None,
             question_context="services",
         )
-        return " ".join(parts)
+        reply_text = " ".join(parts)
+        if availability_confirmation and name:
+            return f"Так, {str(name).lower()} є в Smile Dental Clinic. {reply_text}"
+        return reply_text
 
     def get_unknown_service_detail_reply(
         self,

@@ -1418,6 +1418,43 @@ async def test_dental_braces_contextual_followups_do_not_switch_to_crowns():
 
 
 @pytest.mark.asyncio
+async def test_dental_supported_service_question_answers_directly_and_pronoun_followup_stays_contextual():
+    processor, calendar = _build_dental_processor()
+
+    service = await processor.process(_message("підкажіть, а ви ставите брекети?"))
+    followup = await processor.process(_message("а ви робите це?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert service["intent"] == "front_desk_contextual_answer"
+    assert service["reply_text"].startswith("Так, брекети є")
+    assert "Брекети" in service["reply_text"]
+    assert followup["intent"] == "front_desk_contextual_answer"
+    assert "Брекети" in followup["reply_text"]
+    assert "Що саме ви маєте на увазі" not in followup["reply_text"]
+    assert context["current_service_id"] == "braces"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_jaw_price_unit_followup_does_not_hijack_to_xray():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("ви ставите брекети?"))
+    await processor.process(_message("яка вартість?"))
+    result = await processor.process(_message("за щелепу то за всі зуби чи за верхню і нижню?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert "окремо верхню або нижню щелепу" in result["reply_text"]
+    assert "Рентген-діагностика" not in result["reply_text"]
+    assert "у базі немає підтвердження" not in result["reply_text"].lower()
+    assert context["current_service_id"] == "braces"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_root_canal_contextual_followups_stay_safe():
     processor, calendar = _build_dental_processor()
 

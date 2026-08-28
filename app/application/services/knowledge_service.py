@@ -437,7 +437,14 @@ class KnowledgeService:
             return None
 
         normalized = self._normalize_question_for_match(text)
-        if not normalized or not self._looks_like_short_service_followup(normalized):
+        is_relation_followup = self._looks_like_contextual_relation_followup(normalized)
+        if (
+            not normalized
+            or (
+                not self._looks_like_short_service_followup(normalized)
+                and not is_relation_followup
+            )
+        ):
             return None
         if self._is_explicit_service_switch(normalized, service, resolved_service):
             return None
@@ -498,6 +505,10 @@ class KnowledgeService:
             "видален",
             "пів року",
             "передні зуб",
+            "за щелеп",
+            "верхн",
+            "нижн",
+            "всі зуб",
             "вони мені",
             "перед ним",
             "перед цим",
@@ -539,6 +550,11 @@ class KnowledgeService:
             "разом",
             "один",
             "одиниц",
+            "за щелеп",
+            "щелеп",
+            "верхн",
+            "нижн",
+            "всі зуб",
             "кращ",
             "обточ",
             "мікроскоп",
@@ -570,6 +586,12 @@ class KnowledgeService:
             "спочатку потріб",
             "перед встановленням",
             "прийти до ортодонт",
+            "робите це",
+            "робите таке",
+            "ставите це",
+            "ставите таке",
+            "лікуєте це",
+            "лікуєте таке",
         ]
         if any(marker in normalized for marker in relation_markers):
             return True
@@ -624,6 +646,10 @@ class KnowledgeService:
                 "разом",
                 "кращ",
                 "обточ",
+                "щелеп",
+                "верхн",
+                "нижн",
+                "всі зуб",
                 "передні зуб",
                 "підійд",
                 "видален",
