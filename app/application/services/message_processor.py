@@ -278,6 +278,9 @@ class MessageProcessor:
         if fallback_service_id:
             return fallback_service_id, fallback_service_name
 
+        if self._looks_like_generic_dentist_booking_without_service(text):
+            return None, None
+
         remembered_service_id, remembered_service_name = self._remembered_service_context_for_booking(
             sender_id
         )
@@ -310,6 +313,91 @@ class MessageProcessor:
         normalized = self._normalize_for_booking_keywords(text)
         markers = ["до дантиста", "до стоматолога", "дантист", "стоматолог"]
         return any(marker in normalized for marker in markers)
+
+    def _looks_like_generic_dentist_booking_without_service(self, text: str) -> bool:
+        if self.booking_service._looks_like_nearest_availability_request(text):
+            return False
+        normalized = self._normalize_for_booking_keywords(text)
+        generic_dentist = bool(re.search(r"\bдо\s+(?:стоматолога|дантиста)\b", normalized))
+        if not generic_dentist:
+            return False
+        return self._has_service_booking_action_signal(normalized) or self._looks_like_booking_message(text)
+
+    def _pain_nearest_offer_followup_service(self, sender_id: str, text: str) -> tuple[str, str] | None:
+        if not self._is_configured_front_desk_mode() or self.memory_service is None:
+            return None
+        context = self.memory_service.get_context(sender_id)
+        if context.get("question_context") != "pain_nearest_offer":
+            return None
+        normalized = self._normalize_for_booking_keywords(text)
+        if not (
+            self.booking_service._is_confirmation_text(normalized)
+            or "передай адміністратор" in normalized
+            or "передайте адміністратор" in normalized
+            or "уточніть" in normalized
+            or "уточни" in normalized
+        ):
+            return None
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        service = (
+            knowledge_service.get_service_by_id("dental_consultation")
+            if knowledge_service is not None
+            else None
+        )
+        if service is None:
+            return None
+        return str(service["id"]), str(service.get("name") or "")
+
+    def _pain_nearest_offer_detail_reply(self, sender_id: str, text: str) -> str | None:
+        if not self._is_configured_front_desk_mode() or self.memory_service is None:
+            return None
+        context = self.memory_service.get_context(sender_id)
+        if context.get("question_context") != "pain_nearest_offer":
+            return None
+        normalized = self._normalize_for_booking_keywords(text)
+        if (
+            self._looks_like_booking_message(text)
+            or self._looks_like_fresh_booking_request(text)
+            or self._looks_like_availability_question(text)
+            or self._find_configured_front_desk_service(text) is not None
+            or self.booking_service._extract_requested_date(text) is not None
+            or self.booking_service._parse_time_only(text) is not None
+            or self.booking_service.PHONE_RE.search(text)
+            or self.booking_service.EMAIL_RE.search(text)
+        ):
+            return None
+        detail_markers = ["постій", "сильно", "ниє", "пульсу", "другий день", "давно", "не можу жувати"]
+        if not any(marker in normalized for marker in detail_markers):
+            return None
+        return (
+            "Зрозуміло. Якщо біль постійний, краще не відкладати огляд. "
+            "Можу подивитися найближчий вільний час у клініці."
+        )
+
+    def _service_from_missing_service_reply(self, text: str) -> dict[str, Any] | None:
+        booking_normalized = self._normalize_for_booking_keywords(text)
+        if self._looks_like_service_faq_request(booking_normalized) and not self._has_service_booking_action_signal(
+            booking_normalized
+        ):
+            return None
+        service = self._find_configured_front_desk_service(text)
+        if service is not None:
+            return service
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        if knowledge_service is None:
+            return None
+        normalized = self._normalize_for_conversation_matching(text)
+        compact = re.sub(
+            r"^(?:(?:та|ну|а|то|просто|мені|треба|потрібно|хочу|на|до)\s+)+",
+            "",
+            normalized,
+        ).strip()
+        if compact and compact != normalized:
+            return (
+                knowledge_service.find_confident_service(compact)
+                or knowledge_service.find_bounded_consultation_service(compact)
+            )
+        return None
 
     def _remembered_service_context_for_booking(
         self,
@@ -394,6 +482,8 @@ class MessageProcessor:
         service = self._find_configured_front_desk_service(text)
         service_id = str(service.get("id")) if service and service.get("id") else None
         service_name = str(service.get("name")) if service and service.get("name") else None
+        if service_id is None and self._looks_like_generic_dentist_booking_without_service(text):
+            return
         context_service_id, context_service_name = self._remembered_service_context_for_booking(
             sender_id,
             fallback_service_id=fallback_service_id,
@@ -586,6 +676,10 @@ class MessageProcessor:
         if self._looks_like_cancel_request(text) or self._looks_like_reschedule_request(text):
             return True
         if self._message_has_valid_contact_data(text):
+            return True
+        if self._looks_like_offered_slot_ordinal_reply(text):
+            return True
+        if self._service_from_missing_service_reply(text) is not None:
             return True
         service = self._find_configured_front_desk_service(text)
         normalized = self._normalize_for_booking_keywords(text)
@@ -829,6 +923,7 @@ class MessageProcessor:
             return True
 
         compact = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        compact = re.sub(r"^(?:а|ну|добре|ок|окей|ага|тоді)\s+", "", compact).strip()
         if compact == "коли":
             return True
 
@@ -843,6 +938,26 @@ class MessageProcessor:
             return True
 
         return "підлаштуюсь" in normalized and "що є" in normalized
+
+    def _looks_like_offered_slot_ordinal_reply(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        normalized = re.sub(
+            r"^(?:(?:а|ну|ок|окей|добре|ага|тоді|давай|давайте)\s+)+",
+            "",
+            normalized,
+        ).strip()
+        normalized = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        return normalized in {
+            "перше",
+            "перший",
+            "перша",
+            "друге",
+            "другий",
+            "друга",
+            "третє",
+            "третій",
+            "третя",
+        }
 
     def _looks_like_business_hours_question(self, text: str) -> bool:
         normalized = self._normalize_for_conversation_matching(text)
@@ -2799,6 +2914,7 @@ class MessageProcessor:
             active_service_id, active_service_name = self._get_pending_front_desk_service_context(
                 message.sender_id
             )
+
             if (
                 booking_state == BookingState.WAITING_FOR_TIME
                 and self._has_single_pending_verified_slot_offer(message.sender_id)
@@ -3021,8 +3137,12 @@ class MessageProcessor:
                 and self.booking_service._is_rejection(message.user_message)
             )
             if self._has_active_booking_payload(message.user_message) or rejects_busy_alternative:
-                service = self._find_configured_front_desk_service(message.user_message)
                 pending = pending_for_alternative_check
+                service = (
+                    self._service_from_missing_service_reply(message.user_message)
+                    if pending.get("missing_service")
+                    else self._find_configured_front_desk_service(message.user_message)
+                )
                 booking_service_id = active_service_id
                 booking_service_name = active_service_name
                 if service and service.get("id"):
@@ -3324,6 +3444,48 @@ class MessageProcessor:
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
 
+        pain_followup_service = self._pain_nearest_offer_followup_service(
+            message.sender_id,
+            message.user_message,
+        )
+        if pain_followup_service is not None:
+            service_id, service_name = pain_followup_service
+            booking_result = self.booking_service.handle_nearest_availability_request(
+                sender_id=message.sender_id,
+                message_text=message.user_message,
+                source_channel=message.platform,
+                current_service_id=service_id,
+                current_service_name=service_name,
+            )
+            if self.memory_service is not None:
+                self.memory_service.update_context(
+                    message.sender_id,
+                    question_context="services",
+                    current_service_id=service_id,
+                    current_service_name=service_name,
+                )
+            return self._build_booking_reply_result(
+                message=message,
+                reply_text=booking_result["reply_text"],
+                intent_value="booking_flow",
+                booking_result=booking_result,
+                fallback_service_id=service_id,
+                fallback_service_name=service_name,
+            )
+
+        pain_detail_reply = self._pain_nearest_offer_detail_reply(
+            message.sender_id,
+            message.user_message,
+        )
+        if pain_detail_reply is not None:
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=pain_detail_reply,
+                intent_value="pain_acknowledgement",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
         configured_handoff = self._detect_configured_handoff(message.user_message)
         if configured_handoff:
             reason, reply_text = configured_handoff
@@ -3424,6 +3586,12 @@ class MessageProcessor:
             and not self._looks_like_fresh_booking_request(message.user_message)
         ):
             language = self.reply_service.detect_user_language(message.user_message)
+            if self.memory_service is not None:
+                self.memory_service.update_context(
+                    message.sender_id,
+                    question_context="pain_nearest_offer",
+                    pain_context_summary=message.user_message[:280],
+                )
             return self._build_direct_reply_result(
                 message=message,
                 reply_text=self.booking_service.get_pain_acknowledgement_reply(language),
@@ -3439,6 +3607,22 @@ class MessageProcessor:
             context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
             service_id = context.get("current_service_id")
             if service_id:
+                if self._looks_like_active_booking_availability_question(
+                    message.user_message
+                ) or self._looks_like_availability_question(message.user_message):
+                    booking_result = self.booking_service.handle_availability_question(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        source_channel=message.platform,
+                    )
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_availability_question",
+                        booking_result=booking_result,
+                        fallback_service_id=str(service_id),
+                        fallback_service_name=context.get("current_service_name"),
+                    )
                 booking_result = self._start_front_desk_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,

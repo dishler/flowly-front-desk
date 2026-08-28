@@ -413,7 +413,10 @@ class BookingService:
             "зубний біль",
             "гострий біль",
         ]
-        return any(marker in normalized for marker in markers)
+        return any(marker in normalized for marker in markers) or bool(
+            re.search(r"\bзуб\w*(?:\s+\w+){0,3}\s+бол(?:ить|ять)\b", normalized)
+            or re.search(r"\bбол(?:ить|ять)(?:\s+\w+){0,3}\s+зуб\w*\b", normalized)
+        )
 
     def _pain_acknowledgement_sentence(self) -> str:
         return "Розумію, це неприємно. Якщо зуб болить, краще не відкладати огляд. "
@@ -421,7 +424,8 @@ class BookingService:
     def get_pain_acknowledgement_reply(self, language: str) -> str:
         return (
             self._pain_acknowledgement_sentence()
-            + "Можу допомогти підібрати найближчий вільний час, якщо хочете записатися."
+            + "Якщо є набряк, температура, гній, сильна кровотеча або важко ковтати чи дихати — краще звернутися по невідкладну допомогу. "
+            + "Якщо ні, можемо оперативно підібрати найближчий час у клініці. Подивитися найближчий запис?"
         )
 
     def _build_unclear_time_reply(self, language: str, *, pain_mentioned: bool = False) -> str:
@@ -620,6 +624,14 @@ class BookingService:
         customer_name: str | None = None,
     ) -> str:
         label = self._appointment_label()
+        if label == "візит":
+            if customer_name and start_dt:
+                return f"Супер, {customer_name}, підтвердили ваш візит на {self._format_scheduled_time_for_reply(start_dt, language)}. Чекатимемо на вас!"
+            if start_dt:
+                return f"Супер, підтвердили ваш візит на {self._format_scheduled_time_for_reply(start_dt, language)}. Чекатимемо на вас!"
+            if customer_name:
+                return f"Супер, {customer_name}, ваш візит підтвердили. Чекатимемо на вас!"
+            return "Супер, ваш візит підтвердили. Чекатимемо на вас!"
         if customer_name and start_dt:
             return f"Супер, {customer_name}, підтвердили {label} на {self._format_scheduled_time_for_reply(start_dt, language)} 🙌 Зв’яжемося з вами у цей час."
         if start_dt:
@@ -773,10 +785,14 @@ class BookingService:
                     completed_booking.get("start_dt"),
                 )
         if start_dt is not None:
+            if self._appointment_label() == "візит":
+                return f"Так, ваш візит підтверджено на {self._format_scheduled_time_for_reply(start_dt, language)}. Чекатимемо на вас!"
             return (
                 f"Так, {self._appointment_label()} підтверджено на {self._format_scheduled_time_for_reply(start_dt, language)} 🙌 "
                 "Зв’яжемося з вами у цей час."
             )
+        if self._appointment_label() == "візит":
+            return "Так, ваш візит підтверджено. Чекатимемо на вас!"
         return f"Так, {self._appointment_label()} підтверджено 🙌 Зв’яжемося з вами у домовлений час."
 
     def _build_email_confirmed_reply(
@@ -1003,7 +1019,12 @@ class BookingService:
         normalized = self._normalize_booking_text(text)
         if "зранку" in normalized or "вранці" in normalized:
             return {"label": "зранку", "start": time(9, 0), "end": time(12, 0)}
-        if "ввечері" in normalized or "увечері" in normalized or "вечір" in normalized:
+        if (
+            "ввечері" in normalized
+            or "увечері" in normalized
+            or "вечір" in normalized
+            or "після роботи" in normalized
+        ):
             return {"label": "ввечері", "start": time(17, 0), "end": time(19, 0)}
         if "після обіду" in normalized or "по обіді" in normalized:
             return {"label": "після обіду", "start": time(12, 0), "end": time(17, 0)}
@@ -2700,6 +2721,29 @@ class BookingService:
                     return time(hour=hour, minute=0)
 
         if candidate_slots:
+            normalized_choice = self._normalize_booking_text(text)
+            normalized_choice = re.sub(
+                r"^(?:(?:а|ну|ок|окей|добре|ага|тоді|давай|давайте)\s+)+",
+                "",
+                normalized_choice,
+            ).strip()
+            normalized_choice = re.sub(r"[?!.,…\s]+$", "", normalized_choice).strip()
+            ordinal_indexes = {
+                "перше": 0,
+                "перший": 0,
+                "перша": 0,
+                "друге": 1,
+                "другий": 1,
+                "друга": 1,
+                "третє": 2,
+                "третій": 2,
+                "третя": 2,
+            }
+            index = ordinal_indexes.get(normalized_choice)
+            if index is not None and index < len(candidate_slots):
+                slot = sorted(candidate_slots)[index]
+                return slot.timetz().replace(tzinfo=None)
+
             selected = self._extract_offered_slot_time(text, candidate_slots)
             if selected is not None:
                 return selected
