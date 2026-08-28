@@ -357,6 +357,9 @@ class KnowledgeService:
             "поки",
             "просто",
             "але",
+            "здравствуйте",
+            "здравствуй",
+            "привет",
             "do",
             "you",
             "offer",
@@ -395,6 +398,7 @@ class KnowledgeService:
             "показ",
             "кошт",
             "цікав",
+            "зуб",
         }
 
     def _token_matches_any(self, token: str, candidates: set[str]) -> bool:
@@ -662,7 +666,23 @@ class KnowledgeService:
             return False
         return any(
             marker in normalized
-            for marker in ["скільки", "сколько", "how much", "коштує", "ціна", "ціну", "ціни", "вартість", "прайс", "price", "cost"]
+            for marker in [
+                "скільки",
+                "сколько",
+                "how much",
+                "коштує",
+                "ціна",
+                "ціну",
+                "ціни",
+                "вартість",
+                "прайс",
+                "price",
+                "cost",
+                "дешевше",
+                "дешевший",
+                "дешевша",
+                "недорого",
+            ]
         )
 
     def _matching_price_options(self, service: dict[str, Any], normalized: str) -> list[dict[str, Any]]:

@@ -532,6 +532,8 @@ class BookingService:
 
     def _build_unavailable_reply(self, language: str) -> str:
         slots = self.calendar_service.get_available_slots(language)
+        if not slots:
+            slots = self.calendar_service.get_fallback_slots(language)
         return f"На цей час слот уже зайнятий. Можу запропонувати: {', '.join(slots)}."
 
     def _build_availability_check_failed_reply(self, language: str) -> str:
@@ -839,6 +841,12 @@ class BookingService:
 
     def _build_cancel_handoff_reply(self, language: str) -> str:
         return f"Добре, передам команді, щоб {self._appointment_label()} скасували без зайвих дій з вашого боку."
+
+    def get_no_active_booking_reply(self, language: str) -> str:
+        return (
+            "Наразі за вами не бачу активного запису, який можна скасувати чи перенести. "
+            "Хочете, запишу вас на новий час?"
+        )
 
     def _build_call_explanation_reply(self, language: str) -> str:
         if self.front_desk_config_service is None:
@@ -6741,6 +6749,17 @@ class BookingService:
                 }
 
             if pending_requested_date is not None:
+                if self._business_hours_status_for_date(pending_requested_date)[0] == "closed":
+                    return self._suggest_next_open_day_slots_after_closed_date(
+                        sender_id,
+                        language=language,
+                        message_text=message_text,
+                        source_channel=source_channel or pending.get("source_channel"),
+                        closed_date=pending_requested_date,
+                        closed_day_label=pending.get("requested_day_label"),
+                        current_service_id=pending.get("current_service_id"),
+                        current_service_name=pending.get("current_service_name"),
+                    )
                 return {
                     "status": "waiting_for_time",
                     "reply_text": self._build_missing_time_reply(

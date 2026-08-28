@@ -750,6 +750,7 @@ class MessageProcessor:
             "четвер",
             "п'ятниц",
             "п’ятниц",
+            "пятниц",
         ]
 
         has_consultation = any(
@@ -3732,6 +3733,21 @@ class MessageProcessor:
             confirmed_result = self._handle_confirmed_booking_message(message)
             if confirmed_result is not None:
                 return confirmed_result
+
+        if booking_state == BookingState.NONE and not self.booking_service.has_confirmed_booking(
+            message.sender_id
+        ) and not self._looks_like_service_booking_request(message.user_message) and (
+            self._looks_like_cancel_request(message.user_message)
+            or self._looks_like_reschedule_request(message.user_message)
+        ):
+            language = self.reply_service.detect_user_language(message.user_message)
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=self.booking_service.get_no_active_booking_reply(language),
+                intent_value="booking_no_active_booking",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
 
         if self._looks_like_language_request(message.user_message):
             language = self.reply_service.detect_user_language(message.user_message)
