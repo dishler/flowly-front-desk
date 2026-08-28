@@ -6986,6 +6986,96 @@ async def test_dental_short_when_and_second_selects_offered_slot(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dental_nearest_single_slot_allows_explicit_later_time_on_same_day(monkeypatch):
+    class MondayDentalSmokeDatetime(FixedDentalSmokeDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 24, 10, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(booking_service_module, "datetime", MondayDentalSmokeDatetime)
+    processor, calendar = _build_dental_processor(
+        calendar_service=SelectiveConfiguredCalendarService([
+            _kyiv_dt(2026, 8, 24, 16, 30),
+            _kyiv_dt(2026, 8, 24, 18),
+        ])
+    )
+
+    await processor.process(_message("Добрий день, зуб дуже болить другий день"))
+    await processor.process(_message("вже постійний"))
+    nearest = await processor.process(_message("давайте"))
+    later_time = await processor.process(_message("18"))
+
+    assert nearest["booking_result"]["status"] == "nearest_availability_suggested"
+    assert later_time["booking_result"]["status"] == "waiting_for_contact"
+    assert later_time["booking_result"]["start_dt"] == "2026-08-24T18:00:00+03:00"
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_selected_slot_date_switch_shows_new_day_slots(monkeypatch):
+    class WednesdayDentalSmokeDatetime(FixedDentalSmokeDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 26, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(booking_service_module, "datetime", WednesdayDentalSmokeDatetime)
+    processor, calendar = _build_dental_processor(
+        calendar_service=SelectiveConfiguredCalendarService([
+            _kyiv_dt(2026, 8, 27, 17),
+            _kyiv_dt(2026, 8, 28, 10, 30),
+            _kyiv_dt(2026, 8, 28, 15),
+            _kyiv_dt(2026, 8, 28, 18),
+        ])
+    )
+
+    await processor.process(_message("Хочу записатись на огляд завтра"))
+    await processor.process(_message("17"))
+    friday = await processor.process(_message("Стоп а в п’ятницю що є?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert friday["booking_result"]["status"] == "time_window_slots_suggested"
+    assert "10:30" in friday["reply_text"]
+    assert "15:00" in friday["reply_text"]
+    assert "18:00" in friday["reply_text"]
+    assert "залиште" not in friday["reply_text"].lower()
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["requested_date"] == "2026-08-28"
+    assert pending["current_service_id"] == "dental_consultation"
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_invalid_ordinal_after_single_slot_restates_offer_without_reset(monkeypatch):
+    class WednesdayDentalSmokeDatetime(FixedDentalSmokeDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 26, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(booking_service_module, "datetime", WednesdayDentalSmokeDatetime)
+    processor, calendar = _build_dental_processor(
+        calendar_service=SelectiveConfiguredCalendarService([
+            _kyiv_dt(2026, 8, 27, 12),
+        ])
+    )
+
+    await processor.process(_message("Скільки консультація?"))
+    await processor.process(_message("ок"))
+    await processor.process(_message("а коли"))
+    second = await processor.process(_message("друге"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert second["booking_result"]["status"] == "availability_time_not_offered"
+    assert "12:00" in second["reply_text"]
+    assert "який день і приблизний час" not in second["reply_text"]
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["current_service_id"] == "dental_consultation"
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_active_booking_explicit_hours_faq_preserves_state():
     processor, calendar = _build_dental_processor()
 

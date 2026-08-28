@@ -1831,6 +1831,41 @@ class BookingService:
         ]
         return any(marker in normalized for marker in markers)
 
+    def _looks_like_availability_followup_question(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        markers = [
+            "коли",
+            "що є",
+            "який час",
+            "які години",
+            "які слоти",
+            "є час",
+            "є вільний",
+            "можна",
+        ]
+        return "?" in text or any(marker in normalized for marker in markers)
+
+    def _suggested_slot_ordinal_index(self, text: str) -> int | None:
+        normalized = self._normalize_booking_text(text)
+        normalized = re.sub(
+            r"^(?:(?:а|ну|ок|окей|добре|ага|тоді|давай|давайте)\s+)+",
+            "",
+            normalized,
+        ).strip()
+        normalized = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        ordinal_indexes = {
+            "перше": 0,
+            "перший": 0,
+            "перша": 0,
+            "друге": 1,
+            "другий": 1,
+            "друга": 1,
+            "третє": 2,
+            "третій": 2,
+            "третя": 2,
+        }
+        return ordinal_indexes.get(normalized)
+
     def _match_suggested_slot_acceptance(self, text: str, pending: dict[str, Any]) -> datetime | None:
         try:
             suggested_start = self._get_pending_start_dt(pending)
@@ -2802,25 +2837,7 @@ class BookingService:
                     return time(hour=hour, minute=0)
 
         if candidate_slots:
-            normalized_choice = self._normalize_booking_text(text)
-            normalized_choice = re.sub(
-                r"^(?:(?:а|ну|ок|окей|добре|ага|тоді|давай|давайте)\s+)+",
-                "",
-                normalized_choice,
-            ).strip()
-            normalized_choice = re.sub(r"[?!.,…\s]+$", "", normalized_choice).strip()
-            ordinal_indexes = {
-                "перше": 0,
-                "перший": 0,
-                "перша": 0,
-                "друге": 1,
-                "другий": 1,
-                "друга": 1,
-                "третє": 2,
-                "третій": 2,
-                "третя": 2,
-            }
-            index = ordinal_indexes.get(normalized_choice)
+            index = self._suggested_slot_ordinal_index(text)
             if index is not None and index < len(candidate_slots):
                 slot = sorted(candidate_slots)[index]
                 return slot.timetz().replace(tzinfo=None)
@@ -3213,6 +3230,14 @@ class BookingService:
             message_text, candidate_slots=candidate_slots
         )
         if requested_time is None:
+            ordinal_index = self._suggested_slot_ordinal_index(message_text)
+            if ordinal_index is not None and candidate_slots:
+                return {
+                    "status": "availability_time_not_offered",
+                    "reply_text": self._build_day_slots_reply(language, preferred_day, candidate_slots),
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "suggested_slots": pending.get("suggested_slots", []),
+                }
             contact_details = (
                 self._extract_anchored_contact_details(message_text)
                 if self.PHONE_RE.search(message_text) or self.EMAIL_RE.search(message_text)
@@ -3278,7 +3303,17 @@ class BookingService:
             # anchored day at all (e.g. right after an explicit day switch
             # invalidated the previous suggestions) -- there is no stale
             # list to reject against, so check the named time directly.
-            if (pending.get("busy_alternative") or not candidate_slots) and requested_date is not None:
+            rejected_time_for_correction, _replacement_time, _wants_alternative = (
+                self._extract_negated_time_context(message_text)
+            )
+            if (
+                pending.get("busy_alternative")
+                or not candidate_slots
+                or (
+                    len(candidate_slots) == 1
+                    and rejected_time_for_correction is None
+                )
+            ) and requested_date is not None:
                 corrected_dt = self._combine_requested_date_and_time(
                     requested_date,
                     requested_time,
@@ -5440,6 +5475,24 @@ class BookingService:
             )
 
         if state == BookingState.WAITING_FOR_CONTACT:
+            partial_date = self._extract_requested_date(message_text)
+            if partial_date is not None and self._looks_like_availability_followup_question(message_text):
+                return self._suggest_time_window_slots(
+                    sender_id,
+                    language=language,
+                    message_text=message_text,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    requested_date=partial_date["date"],
+                    requested_day_label=partial_date.get("day_label"),
+                    time_window={
+                        "label": "вільний час",
+                        "start": None,
+                        "end": None,
+                    },
+                    current_service_id=pending.get("current_service_id"),
+                    current_service_name=pending.get("current_service_name"),
+                )
+
             accepted_start_dt = (
                 self._match_suggested_slot_acceptance(message_text, pending)
                 if pending.get("availability_context")
