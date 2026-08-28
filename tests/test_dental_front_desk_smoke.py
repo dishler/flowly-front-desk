@@ -7563,6 +7563,30 @@ async def test_dental_active_booking_next_week_asks_for_specific_day():
 
 
 @pytest.mark.asyncio
+async def test_dental_next_week_any_day_offers_first_available_working_day():
+    calendar = SelectiveConfiguredCalendarService([
+        _kyiv_dt(2026, 8, 24, 10),
+        _kyiv_dt(2026, 8, 24, 10, 30),
+        _kyiv_dt(2026, 8, 24, 11),
+    ])
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу записатися на професійну чистку"))
+    await processor.process(_message("коли є час наступного тижня?"))
+    result = await processor.process(_message("Будь який"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["booking_result"]["status"] == "time_window_slots_suggested"
+    assert "найближчі варіанти наступного тижня" in result["reply_text"]
+    assert "У понеділок вільний час" in result["reply_text"]
+    assert "10:00" in result["reply_text"]
+    assert pending["requested_date"] == "2026-08-24"
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert calendar.checked
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_greeting_without_active_offer_returns_clean_greeting():
     processor, calendar = _build_dental_processor()
 

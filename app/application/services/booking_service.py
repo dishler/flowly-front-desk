@@ -482,6 +482,13 @@ class BookingService:
             days_until_next_monday = 7
         return today + timedelta(days=days_until_next_monday + 7)
 
+    def _next_week_anchor_date(self) -> date:
+        today = datetime.now(self.timezone).date()
+        days_until_next_monday = (0 - today.weekday()) % 7
+        if days_until_next_monday == 0:
+            days_until_next_monday = 7
+        return today + timedelta(days=days_until_next_monday)
+
     def _looks_like_week_after_next_request(self, text: str) -> bool:
         normalized = self._normalize_booking_text(text)
         return bool(re.search(r"\b(?:через|за)\s+тиж(?:день|ня)\b", normalized))
@@ -493,6 +500,16 @@ class BookingService:
         return bool(
             re.search(
                 r"\b(?:на\s+)?(?:наступн(?:ого|ому|ий|ім)\s+тиж(?:ня|день|ні)|next\s+week)\b",
+                normalized,
+            )
+        )
+
+    def _looks_like_any_day_selection(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        normalized = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        return bool(
+            re.search(
+                r"\b(?:будь\s*який|будь-який|будь\s*коли|будь-коли|будь\s*якого|мені\s+все\s+одно|як\s+вам\s+зручно)\b",
                 normalized,
             )
         )
@@ -1586,7 +1603,20 @@ class BookingService:
             if status != "open" or not _window:
                 continue
 
-            candidate_label = self._format_date_label_for_reply(candidate_date, language)
+            weekday_labels = {
+                0: "понеділок",
+                1: "вівторок",
+                2: "середу",
+                3: "четвер",
+                4: "п’ятницю",
+                5: "суботу",
+                6: "неділю",
+            }
+            candidate_label = (
+                weekday_labels.get(candidate_date.weekday())
+                if language == "uk"
+                else self._format_date_label_for_reply(candidate_date, language)
+            )
             result = self._suggest_time_window_slots(
                 sender_id,
                 language=language,
@@ -5205,10 +5235,81 @@ class BookingService:
             refreshed_pending["current_service_id"] = pending["current_service_id"]
         if pending.get("current_service_name"):
             refreshed_pending["current_service_name"] = pending["current_service_name"]
+        refreshed_pending["week_anchor_date"] = self._next_week_anchor_date().isoformat()
         self._save_pending_confirmation(sender_id, refreshed_pending)
         return {
             "status": "waiting_for_next_week_day",
             "reply_text": self._build_next_week_day_prompt(language),
+            "event_created": False,
+            "requires_confirmation": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+        }
+
+    def _suggest_any_day_slots_for_pending_week(
+        self,
+        sender_id: str,
+        *,
+        message_text: str,
+        pending: dict[str, Any],
+        language: str,
+        source_channel: str | None,
+    ) -> Dict[str, Any] | None:
+        raw_anchor = pending.get("week_anchor_date")
+        if not raw_anchor:
+            return None
+        try:
+            anchor_date = date.fromisoformat(str(raw_anchor))
+        except ValueError:
+            pending.pop("week_anchor_date", None)
+            self._save_pending_confirmation(sender_id, pending)
+            return None
+
+        full_day_window = {
+            "label": "вільний час",
+            "start": None,
+            "end": None,
+        }
+        for day_offset in range(7):
+            candidate_date = anchor_date + timedelta(days=day_offset)
+            status, slots = self._get_verified_time_window_slots(
+                requested_date=candidate_date,
+                time_window=full_day_window,
+            )
+            if status != "open" or not slots:
+                continue
+
+            weekday_labels = {
+                0: "понеділок",
+                1: "вівторок",
+                2: "середу",
+                3: "четвер",
+                4: "п’ятницю",
+                5: "суботу",
+                6: "неділю",
+            }
+            candidate_label = (
+                weekday_labels.get(candidate_date.weekday())
+                if language == "uk"
+                else self._format_date_label_for_reply(candidate_date, language)
+            )
+            result = self._suggest_time_window_slots(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or pending.get("source_channel"),
+                requested_date=candidate_date,
+                requested_day_label=candidate_label,
+                time_window=full_day_window,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
+            )
+            if result.get("status") == "time_window_slots_suggested":
+                result["reply_text"] = "Добре, тоді подивлюся найближчі варіанти наступного тижня. " + result["reply_text"]
+                return result
+
+        return {
+            "status": "no_availability_for_week",
+            "reply_text": "На наступний тиждень поки не бачу вільних слотів. Підкажіть, будь ласка, інший день або тиждень?",
             "event_created": False,
             "requires_confirmation": False,
             "booking_state": BookingState.WAITING_FOR_TIME.value,
@@ -6350,6 +6451,17 @@ class BookingService:
                     language=language,
                     source_channel=source_channel,
                 )
+
+            if self._looks_like_any_day_selection(message_text):
+                any_day_result = self._suggest_any_day_slots_for_pending_week(
+                    sender_id,
+                    message_text=message_text,
+                    pending=pending,
+                    language=language,
+                    source_channel=source_channel,
+                )
+                if any_day_result is not None:
+                    return any_day_result
 
             if self._looks_like_weekend_availability_request(message_text):
                 return self._suggest_this_weekend_slots(
