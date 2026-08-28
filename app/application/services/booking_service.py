@@ -198,6 +198,13 @@ class BookingService:
         business_end = datetime.combine(local_start.date(), window[1], tzinfo=self.timezone)
         return business_start <= local_start and local_end <= business_end
 
+    def _is_future_booking_start(self, start_dt: datetime) -> bool:
+        now = datetime.now(self.timezone)
+        local_start = start_dt.astimezone(self.timezone)
+        if local_start.date() != now.date():
+            return True
+        return local_start > now
+
     def _required_contact_fields(self) -> list[str]:
         fields = self._booking_config().get("required_contact_fields")
         if isinstance(fields, list) and fields:
@@ -347,7 +354,7 @@ class BookingService:
         normalized = re.sub(r"([а-яіїєґ])\1+", r"\1", normalized)
         confirmations = {
             "yes", "y", "yeah", "yep", "sure", "ok", "okay", "confirm",
-            "так", "та", "ага", "добре", "ок", "окей", "підтверджую", "підтвердити",
+            "так", "та", "ага", "добре", "ок", "окей", "норм", "нормально", "підтверджую", "підтвердити",
             "підходить", "піідходить", "підходе", "так гуд", "good", "fine",
             "давай", "давайте", "так давай", "так давайте", "ок давай", "окей давай",
             "добре давай", "ага давай", "підходить давай",
@@ -360,7 +367,7 @@ class BookingService:
             return False
 
         confirmation_starts = {
-            "так", "та", "ага", "добре", "ок", "окей", "yes", "ok", "okay", "sure",
+            "так", "та", "ага", "добре", "ок", "окей", "норм", "нормально", "yes", "ok", "okay", "sure",
             "підходить", "підходе",
         }
         confirmation_actions = {
@@ -444,12 +451,80 @@ class BookingService:
             label = "післязавтра"
         return f"Добре, на {label}. Підкажіть, будь ласка, на котру годину вам зручно?"
 
+    def _day_reference_for_reply(self, day_label: str) -> str:
+        if re.match(r"^\d", day_label):
+            return day_label
+        day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
+        return f"{day_prefix} {day_label}"
+
+    def _build_booking_intent_reaffirmed_reply(self, language: str, day_label: str | None = None) -> str:
+        if day_label:
+            return (
+                f"Так, звісно. На {day_label} вже підбираємо час. "
+                "Підкажіть, будь ласка, на котру годину вам зручно?"
+            )
+        return "Так, звісно. Підкажіть, будь ласка, який день і час вам зручний?"
+
+    def _build_next_week_day_prompt(self, language: str) -> str:
+        if language == "en":
+            return "Yes, we can check next week. Which day next week would suit you?"
+        return "Так, можемо подивитися наступний тиждень. Підкажіть, будь ласка, який день наступного тижня вам зручний?"
+
+    def _build_week_after_next_day_prompt(self, language: str) -> str:
+        if language == "en":
+            return "Yes, we can check the week after next. Which day would suit you?"
+        return "Так, можемо подивитися через тиждень. Підкажіть, будь ласка, який день вам зручний?"
+
+    def _week_after_next_anchor_date(self) -> date:
+        today = datetime.now(self.timezone).date()
+        days_until_next_monday = (0 - today.weekday()) % 7
+        if days_until_next_monday == 0:
+            days_until_next_monday = 7
+        return today + timedelta(days=days_until_next_monday + 7)
+
+    def _looks_like_week_after_next_request(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        return bool(re.search(r"\b(?:через|за)\s+тиж(?:день|ня)\b", normalized))
+
+    def _looks_like_next_week_request(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if self._looks_like_week_after_next_request(normalized):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:на\s+)?(?:наступн(?:ого|ому|ий|ім)\s+тиж(?:ня|день|ні)|next\s+week)\b",
+                normalized,
+            )
+        )
+
+    def _looks_like_booking_intent_reaffirmation(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if not normalized:
+            return False
+        markers = [
+            "хочу тоді записатись",
+            "хочу тоді записатися",
+            "тоді хочу записатись",
+            "тоді хочу записатися",
+            "хочу записатись",
+            "хочу записатися",
+            "запишіть",
+            "запиши",
+        ]
+        return any(marker in normalized for marker in markers)
+
     def _build_unavailable_reply(self, language: str) -> str:
         slots = self.calendar_service.get_available_slots(language)
         return f"На цей час слот уже зайнятий. Можу запропонувати: {', '.join(slots)}."
 
     def _build_availability_check_failed_reply(self, language: str) -> str:
         return "Не вдалося перевірити доступність цього часу. Напишіть, будь ласка, бажаний день і час, і ми перевіримо запис."
+
+    def _build_past_time_reply(self, language: str, start_dt: datetime) -> str:
+        local_start = start_dt.astimezone(self.timezone)
+        if local_start.date() == datetime.now(self.timezone).date():
+            return "На цей час сьогодні вже не встигнемо. Підкажіть, будь ласка, інший час або день?"
+        return "Цей час уже минув. Підкажіть, будь ласка, інший день або час?"
 
     def _build_business_hours_sentence_for_date(
         self,
@@ -459,6 +534,20 @@ class BookingService:
     ) -> str | None:
         if requested_date is None:
             return None
+        english_relative_labels = {
+            "today": "сьогодні",
+            "tomorrow": "завтра",
+            "day after tomorrow": "післязавтра",
+            "day_after_tomorrow": "післязавтра",
+        }
+        if language != "uk" and requested_day_label in english_relative_labels:
+            requested_day_label = english_relative_labels[requested_day_label]
+            language = "uk"
+        elif language != "uk" and (
+            requested_day_label in {"сьогодні", "завтра", "післязавтра"}
+            or bool(re.search(r"[А-Яа-яІіЇїЄєҐґ]", requested_day_label or ""))
+        ):
+            language = "uk"
         status, window = self._business_hours_status_for_date(requested_date)
         day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language)
         if language != "uk":
@@ -483,6 +572,8 @@ class BookingService:
         weekday_label = weekday_labels.get(requested_date.weekday(), "цей день")
         if day_label in {"сьогодні", "завтра", "післязавтра"}:
             day_part = f"{day_label.capitalize()}, у {weekday_label},"
+        elif re.match(r"^\d", day_label or ""):
+            day_part = f"{day_label}"
         else:
             day_part = f"У {day_label or weekday_label}"
 
@@ -503,6 +594,7 @@ class BookingService:
         requested_day_label: str | None = None,
         requested_label: str | None = None,
         latest_available_slot: datetime | None = None,
+        requested_start_dt: datetime | None = None,
     ) -> str:
         schedule_sentence = self._build_business_hours_sentence_for_date(
             language,
@@ -511,6 +603,40 @@ class BookingService:
         )
         if schedule_sentence:
             label = requested_label or "цей час"
+            if requested_date is not None:
+                status, _window = self._business_hours_status_for_date(requested_date)
+                if status == "closed":
+                    return f"{schedule_sentence} Підкажіть, будь ласка, інший день або час?"
+            if requested_start_dt is not None:
+                local_start = requested_start_dt.astimezone(self.timezone)
+                status, window = self._business_hours_status_for_date(local_start.date())
+                duration = self._booking_duration_minutes()
+                if status == "open" and window is not None:
+                    business_end = datetime.combine(local_start.date(), window[1], tzinfo=self.timezone)
+                    if (
+                        local_start.timetz().replace(tzinfo=None) <= window[1]
+                        and local_start + timedelta(minutes=duration) > business_end
+                    ):
+                        return (
+                            f"{schedule_sentence} Візит на "
+                            f"{self._format_time_window_time(local_start.timetz().replace(tzinfo=None))} "
+                            "вже не встигаємо провести до закриття. "
+                            "Підкажіть, будь ласка, інший день або трохи раніший час?"
+                        )
+            elif requested_date is not None and requested_label:
+                requested_start_time = self._parse_time_only(requested_label)
+                status, window = self._business_hours_status_for_date(requested_date)
+                duration = self._booking_duration_minutes()
+                if status == "open" and window is not None and requested_start_time is not None:
+                    local_start = datetime.combine(requested_date, requested_start_time, tzinfo=self.timezone)
+                    business_end = datetime.combine(requested_date, window[1], tzinfo=self.timezone)
+                    if requested_start_time <= window[1] and local_start + timedelta(minutes=duration) > business_end:
+                        return (
+                            f"{schedule_sentence} Візит на "
+                            f"{self._format_time_window_time(requested_start_time)} "
+                            "вже не встигаємо провести до закриття. "
+                            "Підкажіть, будь ласка, інший день або трохи раніший час?"
+                        )
             if latest_available_slot is not None:
                 if label == "ввечері":
                     day_reference = requested_day_label or "цей день"
@@ -564,11 +690,11 @@ class BookingService:
         slots: list[datetime],
     ) -> str:
         day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language) or "цей день"
-        day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
+        day_reference = self._day_reference_for_reply(day_label)
         times = self._format_slot_times(self._display_slots(slots), language)
         if times:
-            return f"{day_prefix} {day_label} {daypart_label} можу запропонувати {times}. Який час вам зручніший?"
-        return f"{day_prefix} {day_label} {daypart_label} не бачу вільних слотів. Підкажіть інший день або час?"
+            return f"{day_reference} {daypart_label} можу запропонувати {times}. Який час вам зручніший?"
+        return f"{day_reference} {daypart_label} не бачу вільних слотів. Підкажіть інший день або час?"
 
     def _build_time_window_slots_reply(
         self,
@@ -580,10 +706,15 @@ class BookingService:
         slots: list[datetime],
     ) -> str:
         day_label = requested_day_label or self._format_date_label_for_reply(requested_date, language) or "цей день"
-        day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
+        day_reference = self._day_reference_for_reply(day_label)
         times = self._format_slot_times(self._display_slots(slots), language)
         if times:
-            return f"{day_prefix} {day_label} {window_label} можу запропонувати {times}. Який час вам зручніший?"
+            return f"{day_reference} {window_label} можу запропонувати {times}. Який час вам зручніший?"
+        no_slots_prefix = (
+            day_reference
+            if window_label == "вільний час"
+            else f"{day_reference} {window_label}"
+        )
         schedule_sentence = self._build_business_hours_sentence_for_date(
             language,
             requested_date,
@@ -591,10 +722,10 @@ class BookingService:
         )
         if schedule_sentence:
             return (
-                f"{day_prefix} {day_label} {window_label} не бачу вільних слотів. "
+                f"{no_slots_prefix} не бачу вільних слотів. "
                 f"{schedule_sentence} Підкажіть інший час або день?"
             )
-        return f"{day_prefix} {day_label} {window_label} не бачу вільних слотів. Підкажіть інший час?"
+        return f"{no_slots_prefix} не бачу вільних слотів. Підкажіть інший час?"
 
     def _build_name_and_contact_request(self, language: str) -> str:
         fields = set(self._required_contact_fields())
@@ -861,6 +992,8 @@ class BookingService:
     def _find_next_available_slot(self, requested_dt: datetime) -> datetime | None:
         for hours in [1, 2, 3, 4]:
             next_dt = requested_dt + timedelta(hours=hours)
+            if not self._is_future_booking_start(next_dt):
+                continue
             if not self._is_within_business_hours(next_dt, self._booking_duration_minutes()):
                 continue
             if self.calendar_service.check_specific_time_availability(
@@ -881,7 +1014,7 @@ class BookingService:
         )
         day_start = datetime.combine(requested_date, window[0], tzinfo=self.timezone)
         while cursor >= day_start:
-            if self._is_within_business_hours(cursor, duration):
+            if self._is_future_booking_start(cursor) and self._is_within_business_hours(cursor, duration):
                 try:
                     if self.calendar_service.check_specific_time_availability(
                         cursor,
@@ -1054,9 +1187,9 @@ class BookingService:
         self._save_pending_confirmation(sender_id, pending)
 
         day_label = requested_day_label or "цей день"
-        day_prefix = "На" if day_label in {"сьогодні", "завтра", "післязавтра"} else "У"
+        day_reference = self._day_reference_for_reply(day_label)
         time_label = self._format_slot_times([slot], language)
-        reply_text = f"{day_prefix} {day_label} найближчий вільний час {time_label}. Записати вас на цей час?"
+        reply_text = f"{day_reference} найближчий вільний час {time_label}. Записати вас на цей час?"
         if pain_mentioned:
             reply_text = self._pain_acknowledgement_sentence() + reply_text
 
@@ -1073,8 +1206,12 @@ class BookingService:
 
     def _extract_daypart(self, text: str) -> dict[str, Any] | None:
         normalized = self._normalize_booking_text(text)
+        normalized = re.sub(r"^добрий вечір[\s,!.-]*", "", normalized).strip()
+        normalized = re.sub(r"^доброго вечора[\s,!.-]*", "", normalized).strip()
         if "зранку" in normalized or "вранці" in normalized:
             return {"label": "зранку", "start": time(9, 0), "end": time(12, 0)}
+        if "до обіду" in normalized:
+            return {"label": "до обіду", "start": time(9, 0), "end": time(12, 0)}
         if (
             "ввечері" in normalized
             or "увечері" in normalized
@@ -1170,7 +1307,7 @@ class BookingService:
         slots: list[datetime] = []
 
         while cursor + timedelta(minutes=duration) <= end_dt:
-            if self._is_within_business_hours(cursor, duration):
+            if self._is_future_booking_start(cursor) and self._is_within_business_hours(cursor, duration):
                 try:
                     if self.calendar_service.check_specific_time_availability(
                         cursor,
@@ -1284,6 +1421,11 @@ class BookingService:
             for slot in slots
         ]
         pending["last_suggested_day"] = day_key
+        pending["time_window"] = {
+            "label": daypart["label"],
+            "start": daypart["start"].isoformat() if daypart.get("start") else None,
+            "end": daypart["end"].isoformat() if daypart.get("end") else None,
+        }
         self._save_pending_confirmation(sender_id, pending)
 
         return {
@@ -1831,6 +1973,233 @@ class BookingService:
         ]
         return any(marker in normalized for marker in markers)
 
+    def _looks_like_selected_slot_reconsideration(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if not normalized:
+            return False
+        faq_markers = [
+            "скільки",
+            "коштує",
+            "ціна",
+            "вартість",
+            "робите",
+            "чи робите",
+            "що входить",
+            "які ",
+        ]
+        if any(marker in normalized for marker in faq_markers):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:стоп|вибачте|переплутав|переплутала|помилився|помилилась)\b",
+                normalized,
+            )
+        )
+
+    def _looks_like_latest_offered_slot_question(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if (
+            "найпізніш" not in normalized
+            and "останн" not in normalized
+            and "чим пізніше" not in normalized
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:коли|котра|який|яка|час|слот|варіант|зранку|ранок|вранці|ранці|краще)\b",
+                normalized,
+            )
+        )
+
+    def _looks_like_relative_time_refinement_request(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if not re.search(r"\b(?:раніше|пізніше|пізнiше)\b", normalized) and "чим пізніше" not in normalized:
+            return False
+        if any(marker in normalized for marker in ["подумаю", "напишу пізніше", "давайте пізніше"]):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:є|щось|коли|час|слот|варіант|краще|зручно)\b",
+                normalized,
+            )
+            or "чим пізніше" in normalized
+        )
+
+    def _looks_like_current_offer_question(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if any(
+            marker in normalized
+            for marker in [
+                "найближче до цього часу",
+                "найближчий до цього часу",
+                "найближча до цього часу",
+                "близько до цього часу",
+            ]
+        ):
+            return True
+        compact = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        compact = re.sub(r"^(?:а|ну|добре|ок|окей|ага|тоді)\s+", "", compact).strip()
+        return compact in {
+            "що є",
+            "шо є",
+            "що у вас є",
+            "що є вільного",
+            "які є",
+            "які варіанти",
+        }
+
+    def _looks_like_last_offered_slot_selection(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        normalized = re.sub(r"[,;:]+", " ", normalized)
+        normalized = " ".join(normalized.split())
+        normalized = re.sub(
+            r"^(?:(?:а|ну|ок|окей|добре|ага|так|та|тоді|давай|давайте)\s+)+",
+            "",
+            normalized,
+        ).strip()
+        normalized = re.sub(r"\s+(?:тоді|будь\s+ласка)$", "", normalized).strip()
+        normalized = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        return bool(
+            re.fullmatch(
+                r"(?:останн(?:ій|ій\s+варіант|ій\s+слот|ій\s+час)|найпізніш(?:ий|е)(?:\s+варіант|\s+слот|\s+час)?)",
+                normalized,
+            )
+        )
+
+    def _looks_like_current_offered_slot_selection(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        normalized = re.sub(r"[,;:]+", " ", normalized)
+        normalized = " ".join(normalized.split())
+        normalized = re.sub(
+            r"^(?:(?:а|ну|ок|окей|добре|ага|так|та|тоді|давай|давайте)\s+)+",
+            "",
+            normalized,
+        ).strip()
+        normalized = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        return bool(
+            re.fullmatch(
+                r"(?:цей|оцей|о\s+цей|його|цей\s+час|цей\s+слот|цей\s+варіант|оцей\s+варіант|о\s+цей\s+варіант)(?:\s+(?:підійде|підходить|норм|нормально|ок|окей|добре))?",
+                normalized,
+            )
+        )
+
+    def _looks_like_ambiguous_current_offered_slot_selection(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        normalized = re.sub(r"[,;:]+", " ", normalized)
+        normalized = " ".join(normalized.split())
+        normalized = re.sub(
+            r"^(?:(?:а|ну|ок|окей|добре|ага|так|та|тоді|давай|давайте)\s+)+",
+            "",
+            normalized,
+        ).strip()
+        normalized = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        return bool(
+            re.fullmatch(
+                r"(?:цей|оцей|о\s+цей|цей\s+варіант|оцей\s+варіант|о\s+цей\s+варіант)(?:\s+(?:підійде|підходить|норм|нормально|ок|окей|добре))?",
+                normalized,
+            )
+        )
+
+    def _looks_like_weekend_availability_request(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        return "вихідн" in normalized and bool(
+            re.search(r"\b(?:є|щось|можна|час|слот|коли|запис)\b", normalized)
+        )
+
+    def _looks_like_earliest_slot_rejection_with_next_request(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        rejects_earliest = bool(
+            re.search(r"\b(?:не\s+)?найраніш(?:ий|е|ого)|перш(?:ий|е|а)\b", normalized)
+        )
+        wants_next = bool(re.search(r"\b(?:наступн(?:ий|е|а)|друг(?:ий|е|а))\b", normalized))
+        has_rejection = bool(re.search(r"\b(?:не|не\s+підходить|не\s+встигаю|незручно)\b", normalized))
+        return rejects_earliest and wants_next and has_rejection
+
+    def _looks_like_first_slot_rejection(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if not re.search(r"\b(?:перший|перше|перша)(?:\s+(?:варіант|слот|час))?\b", normalized):
+            return False
+        return bool(re.search(r"\b(?:не\s+встига\w*|не\s+встиг\w*|не\s+підходить|не\s+підійде|незручно|не\s+можу)\b", normalized))
+
+    def _looks_like_next_offered_slot_request(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        compact = re.sub(r"[?!.,…\s]+$", "", normalized).strip()
+        compact = re.sub(r"^(?:а|ну|добре|ок|окей|ага|тоді)\s+", "", compact).strip()
+        return compact in {"наступний", "наступний варіант", "наступний слот", "наступний час"}
+
+    def _build_latest_offered_slot_reply(
+        self,
+        language: str,
+        *,
+        requested_day_label: str | None,
+        window_label: str | None,
+        slot: datetime,
+    ) -> str:
+        day_label = requested_day_label or self._format_date_label_for_reply(slot.date(), language) or "цей день"
+        day_reference = self._day_reference_for_reply(day_label)
+        day_reference = day_reference[:1].lower() + day_reference[1:]
+        local_time = self._format_time_window_time(slot.timetz().replace(tzinfo=None))
+        if window_label:
+            return f"Найпізніше {window_label} {day_reference} бачу о {local_time}. Підійде?"
+        return f"Найпізніший вільний час {day_reference} бачу о {local_time}. Підійде?"
+
+    def _build_next_offered_slot_reply(
+        self,
+        language: str,
+        *,
+        requested_day_label: str | None,
+        slot: datetime,
+    ) -> str:
+        day_label = requested_day_label or self._format_date_label_for_reply(slot.date(), language) or "цей день"
+        day_reference = self._day_reference_for_reply(day_label)
+        day_reference = day_reference[:1].lower() + day_reference[1:]
+        local_time = self._format_time_window_time(slot.timetz().replace(tzinfo=None))
+        return f"Наступний варіант {day_reference} бачу о {local_time}. Підійде?"
+
+    def _looks_like_date_unavailable_message(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if self._extract_requested_date(normalized) is None:
+            return False
+        return bool(
+            re.search(
+                r"\b(?:не\s+зможу|не\s+можу|не\s+підходить|не\s+підійде|незручно)\b",
+                normalized,
+            )
+        )
+
+    def _handle_date_unavailable_message(
+        self,
+        *,
+        sender_id: str,
+        message_text: str,
+        pending: dict[str, Any],
+        language: str,
+        source_channel: str | None,
+    ) -> Dict[str, Any]:
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel or pending.get("source_channel"),
+            context_summary=pending.get("context_summary") or message_text[:280],
+            customer_name=pending.get("customer_name"),
+            contact_email=pending.get("contact_email"),
+            contact_phone=pending.get("contact_phone"),
+        )
+        refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+        if pending.get("current_service_id"):
+            refreshed_pending["current_service_id"] = pending["current_service_id"]
+        if pending.get("current_service_name"):
+            refreshed_pending["current_service_name"] = pending["current_service_name"]
+        self._save_pending_confirmation(sender_id, refreshed_pending)
+        return {
+            "status": "waiting_for_time",
+            "reply_text": "Добре, не ставлю цей день. Підкажіть, будь ласка, який інший день або час вам зручний?",
+            "event_created": False,
+            "requires_confirmation": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+        }
+
     def _looks_like_availability_followup_question(self, text: str) -> bool:
         normalized = self._normalize_booking_text(text)
         markers = [
@@ -1844,6 +2213,37 @@ class BookingService:
             "можна",
         ]
         return "?" in text or any(marker in normalized for marker in markers)
+
+    def _next_weekday_date(self, weekday: int) -> date:
+        today = datetime.now(self.timezone).date()
+        days_ahead = (weekday - today.weekday()) % 7
+        return today + timedelta(days=days_ahead)
+
+    def _suggest_this_weekend_slots(
+        self,
+        sender_id: str,
+        *,
+        language: str,
+        message_text: str,
+        pending: dict[str, Any],
+        source_channel: str | None,
+    ) -> Dict[str, Any]:
+        saturday = self._next_weekday_date(5)
+        return self._suggest_time_window_slots(
+            sender_id,
+            language=language,
+            message_text=message_text,
+            source_channel=source_channel or pending.get("source_channel"),
+            requested_date=saturday,
+            requested_day_label="суботу",
+            time_window={
+                "label": "вільний час",
+                "start": None,
+                "end": None,
+            },
+            current_service_id=pending.get("current_service_id"),
+            current_service_name=pending.get("current_service_name"),
+        )
 
     def _suggested_slot_ordinal_index(self, text: str) -> int | None:
         normalized = self._normalize_booking_text(text)
@@ -1864,7 +2264,22 @@ class BookingService:
             "третій": 2,
             "третя": 2,
         }
-        return ordinal_indexes.get(normalized)
+        direct_index = ordinal_indexes.get(normalized)
+        if direct_index is not None:
+            return direct_index
+
+        option_nouns = r"(?:варіант|варіанта|слот|час)"
+        acceptance_suffixes = r"(?:підійде|підходить|підходе|норм|нормально|ок|окей|добре)"
+        for ordinal, index in ordinal_indexes.items():
+            if re.fullmatch(
+                rf"{re.escape(ordinal)}(?:\s+{option_nouns})?(?:\s+{acceptance_suffixes})?",
+                normalized,
+            ):
+                return index
+        return None
+
+    def _looks_like_suggested_slot_ordinal_selection(self, text: str) -> bool:
+        return self._suggested_slot_ordinal_index(text) is not None
 
     def _match_suggested_slot_acceptance(self, text: str, pending: dict[str, Any]) -> datetime | None:
         try:
@@ -1953,8 +2368,13 @@ class BookingService:
         sender_id: str,
         message_text: str,
         source_channel: str | None = None,
+        current_service_id: str | None = None,
+        current_service_name: str | None = None,
     ) -> Dict[str, Any]:
         language = self._detect_language(message_text)
+        previous_pending = self._get_pending_confirmation(sender_id) or {}
+        current_service_id = current_service_id or previous_pending.get("current_service_id")
+        current_service_name = current_service_name or previous_pending.get("current_service_name")
         requested_day_key = self._detect_requested_day_key(message_text)
         verified_slots_by_day = self._get_suggested_slots_by_day()
         if requested_day_key is not None:
@@ -1974,6 +2394,12 @@ class BookingService:
 
         pending = self._get_pending_confirmation(sender_id) or {}
         pending["availability_context"] = True
+        if current_service_id:
+            pending["current_service_id"] = current_service_id
+        if current_service_name:
+            pending["current_service_name"] = current_service_name
+        if current_service_id or current_service_name:
+            pending["is_active"] = True
         pending["suggested_slots"] = [
             {
                 "day_key": day_key,
@@ -2837,9 +3263,15 @@ class BookingService:
                     return time(hour=hour, minute=0)
 
         if candidate_slots:
+            sorted_slots = sorted(candidate_slots)
+            if self._looks_like_last_offered_slot_selection(text):
+                return sorted_slots[-1].timetz().replace(tzinfo=None)
+            if len(sorted_slots) == 1 and self._looks_like_current_offered_slot_selection(text):
+                return sorted_slots[0].timetz().replace(tzinfo=None)
+
             index = self._suggested_slot_ordinal_index(text)
             if index is not None and index < len(candidate_slots):
-                slot = sorted(candidate_slots)[index]
+                slot = sorted_slots[index]
                 return slot.timetz().replace(tzinfo=None)
 
             selected = self._extract_offered_slot_time(text, candidate_slots)
@@ -2986,6 +3418,28 @@ class BookingService:
             return f"Добре, {day_label_uk} можемо запропонувати {times}. Який час вам зручніший?"
         return f"На {day_label_uk} вільного часу не бачу. Можете написати інший день або конкретний час, і я перевірю."
 
+    def _build_current_suggested_slots_reply(
+        self,
+        language: str,
+        *,
+        requested_date: date | None,
+        requested_day_label: str | None,
+        slots: list[datetime],
+        pending: dict[str, Any],
+    ) -> str:
+        if not slots:
+            return self._build_missing_time_reply(language, requested_day_label)
+        pending_window = pending.get("time_window")
+        if isinstance(pending_window, dict) and pending_window.get("label"):
+            return self._build_time_window_slots_reply(
+                language,
+                requested_date=requested_date or slots[0].date(),
+                requested_day_label=requested_day_label,
+                window_label=pending_window["label"],
+                slots=slots,
+            )
+        return self._build_day_slots_reply(language, pending.get("last_suggested_day") or "selected_day", slots)
+
     def handle_greeting_during_active_offer(
         self,
         sender_id: str,
@@ -3051,6 +3505,11 @@ class BookingService:
         normalized = message_text.strip().lower()
 
         partial_date = self._extract_requested_date(message_text)
+        partial_date = self._apply_pending_week_anchor_to_partial_date(
+            partial_date,
+            pending,
+            message_text,
+        )
         requested_day_key = self._detect_requested_day_key(message_text)
         if (
             partial_date is not None
@@ -3072,12 +3531,6 @@ class BookingService:
             pending["requested_day_label"] = partial_date.get("day_label")
             self._save_pending_confirmation(sender_id, pending)
 
-        slots_by_day = self._suggested_slots_from_pending(pending)
-        preferred_day = pending.get("last_suggested_day") or "tomorrow"
-        if requested_day_key:
-            preferred_day = requested_day_key
-        candidate_slots = slots_by_day.get(preferred_day, [])
-
         pending_requested_date = None
         if pending.get("requested_date"):
             try:
@@ -3086,6 +3539,43 @@ class BookingService:
                 )
             except Exception:
                 pending_requested_date = None
+        time_window = self._extract_time_window(message_text)
+        daypart = self._extract_daypart(message_text)
+        if (
+            pending_requested_date is not None
+            and (time_window is not None or daypart is not None)
+            and self._business_hours_status_for_date(pending_requested_date)[0] != "open"
+        ):
+            if time_window is not None:
+                return self._suggest_time_window_slots(
+                    sender_id,
+                    language=language,
+                    message_text=message_text,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    requested_date=pending_requested_date,
+                    requested_day_label=pending.get("requested_day_label"),
+                    time_window=time_window,
+                    current_service_id=pending.get("current_service_id"),
+                    current_service_name=pending.get("current_service_name"),
+                )
+            return self._suggest_daypart_slots(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or pending.get("source_channel"),
+                requested_date=pending_requested_date,
+                requested_day_label=pending.get("requested_day_label"),
+                daypart=daypart,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
+            )
+
+        slots_by_day = self._suggested_slots_from_pending(pending)
+        preferred_day = pending.get("last_suggested_day") or (
+            "selected_day" if pending_requested_date is not None else "tomorrow"
+        )
+        if requested_day_key:
+            preferred_day = requested_day_key
         requested_date = (
             partial_date.get("date")
             if partial_date
@@ -3096,12 +3586,256 @@ class BookingService:
             if partial_date
             else pending.get("requested_day_label")
         )
+        candidate_slots = slots_by_day.get(preferred_day, [])
         if requested_day_key:
             pending["last_suggested_day"] = requested_day_key
             self._save_pending_confirmation(sender_id, pending)
 
-        time_window = self._extract_time_window(message_text)
-        daypart = self._extract_daypart(message_text)
+        sorted_candidate_slots = sorted(candidate_slots)
+
+        if self._looks_like_weekend_availability_request(message_text):
+            return self._suggest_this_weekend_slots(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                pending=pending,
+                source_channel=source_channel,
+            )
+
+        if (
+            "зранку" in normalized
+            and re.search(
+                r"\b(?:не\s+можу|не\s+встигаю|не\s+підходить|не\s+підійде|незручно)\b",
+                normalized,
+            )
+            and sorted_candidate_slots
+        ):
+            after_morning_start = sorted_candidate_slots[-1] + timedelta(minutes=self._booking_duration_minutes())
+            result = self._suggest_time_window_slots(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or pending.get("source_channel"),
+                requested_date=requested_date or sorted_candidate_slots[-1].date(),
+                requested_day_label=requested_day_label,
+                time_window={
+                    "label": f"після {self._format_time_window_time(sorted_candidate_slots[-1].timetz().replace(tzinfo=None))}",
+                    "start": after_morning_start.timetz().replace(tzinfo=None),
+                    "end": None,
+                },
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
+            )
+            self._reapply_reschedule_pending_after_refinement(sender_id, was_reschedule_pending)
+            return result
+
+        if (
+            self._looks_like_latest_offered_slot_question(message_text)
+            and not candidate_slots
+            and requested_date is not None
+        ):
+            latest_slot = self._find_latest_available_slot_on_date(requested_date)
+            if latest_slot is not None:
+                pending["availability_context"] = True
+                pending["suggested_slots"] = [
+                    {
+                        "day_key": "selected_day",
+                        "start_dt": self._serialize_pending_start_dt(latest_slot),
+                    }
+                ]
+                pending["last_suggested_day"] = "selected_day"
+                self._save_pending_confirmation(sender_id, pending)
+                return {
+                    "status": "latest_offered_slot_answer",
+                    "reply_text": self._build_latest_offered_slot_reply(
+                        language,
+                        requested_day_label=requested_day_label,
+                        window_label=None,
+                        slot=latest_slot,
+                    ),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": requested_date.isoformat(),
+                    "suggested_slots": pending.get("suggested_slots", []),
+                }
+
+        if (
+            self._looks_like_relative_time_refinement_request(message_text)
+            and not candidate_slots
+            and requested_date is not None
+        ):
+            wants_earlier = "раніше" in normalized
+            fallback_window = (
+                {"label": "раніше", "start": None, "end": time(12, 0)}
+                if wants_earlier
+                else {"label": "ввечері", "start": time(17, 0), "end": None}
+            )
+            result = self._suggest_time_window_slots(
+                sender_id,
+                language=language,
+                message_text=message_text,
+                source_channel=source_channel or pending.get("source_channel"),
+                requested_date=requested_date,
+                requested_day_label=requested_day_label,
+                time_window=fallback_window,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
+            )
+            self._reapply_reschedule_pending_after_refinement(sender_id, was_reschedule_pending)
+            return result
+
+        if self._looks_like_current_offer_question(message_text) and candidate_slots:
+            return {
+                "status": "current_offer_repeated",
+                "reply_text": self._build_current_suggested_slots_reply(
+                    language,
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
+                    slots=sorted_candidate_slots,
+                    pending=pending,
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+                "suggested_slots": pending.get("suggested_slots", []),
+            }
+
+        if (
+            self._looks_like_ambiguous_current_offered_slot_selection(message_text)
+            and len(sorted_candidate_slots) > 1
+        ):
+            return {
+                "status": "current_offer_repeated",
+                "reply_text": self._build_current_suggested_slots_reply(
+                    language,
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
+                    slots=sorted_candidate_slots,
+                    pending=pending,
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+                "suggested_slots": pending.get("suggested_slots", []),
+            }
+
+        if (
+            self._looks_like_earliest_slot_rejection_with_next_request(message_text)
+            and len(sorted_candidate_slots) > 1
+        ):
+            next_slot = sorted_candidate_slots[1]
+            pending["availability_context"] = True
+            pending["suggested_slots"] = [
+                {
+                    "day_key": "selected_day",
+                    "start_dt": self._serialize_pending_start_dt(next_slot),
+                }
+            ]
+            pending["last_suggested_day"] = "selected_day"
+            self._save_pending_confirmation(sender_id, pending)
+            return {
+                "status": "next_offered_slot_answer",
+                "reply_text": self._build_next_offered_slot_reply(
+                    language,
+                    requested_day_label=requested_day_label,
+                    slot=next_slot,
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+                "suggested_slots": pending.get("suggested_slots", []),
+            }
+
+        if self._looks_like_first_slot_rejection(message_text) and len(sorted_candidate_slots) > 1:
+            remaining_slots = sorted_candidate_slots[1:]
+            pending["availability_context"] = True
+            pending["suggested_slots"] = [
+                {
+                    "day_key": "selected_day",
+                    "start_dt": self._serialize_pending_start_dt(slot),
+                }
+                for slot in remaining_slots
+            ]
+            pending["last_suggested_day"] = "selected_day"
+            self._save_pending_confirmation(sender_id, pending)
+            return {
+                "status": "offered_slot_rejected",
+                "reply_text": self._build_current_suggested_slots_reply(
+                    language,
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
+                    slots=remaining_slots,
+                    pending=pending,
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+                "suggested_slots": pending.get("suggested_slots", []),
+            }
+
+        if self._looks_like_next_offered_slot_request(message_text) and sorted_candidate_slots:
+            next_slot = sorted_candidate_slots[0]
+            pending["availability_context"] = True
+            pending["suggested_slots"] = [
+                {
+                    "day_key": "selected_day",
+                    "start_dt": self._serialize_pending_start_dt(next_slot),
+                }
+            ]
+            pending["last_suggested_day"] = "selected_day"
+            self._save_pending_confirmation(sender_id, pending)
+            return {
+                "status": "next_offered_slot_answer",
+                "reply_text": self._build_next_offered_slot_reply(
+                    language,
+                    requested_day_label=requested_day_label,
+                    slot=next_slot,
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+                "suggested_slots": pending.get("suggested_slots", []),
+            }
+
+        if self._looks_like_latest_offered_slot_question(message_text) and candidate_slots:
+            pending_window_label = (
+                pending.get("time_window", {}).get("label")
+                if isinstance(pending.get("time_window"), dict)
+                else None
+            )
+            latest_slot = sorted_candidate_slots[-1]
+            pending["availability_context"] = True
+            pending["suggested_slots"] = [
+                {
+                    "day_key": "selected_day",
+                    "start_dt": self._serialize_pending_start_dt(latest_slot),
+                }
+            ]
+            pending["last_suggested_day"] = "selected_day"
+            self._save_pending_confirmation(sender_id, pending)
+            return {
+                "status": "latest_offered_slot_answer",
+                "reply_text": self._build_latest_offered_slot_reply(
+                    language,
+                    requested_day_label=requested_day_label,
+                    window_label=pending_window_label
+                    or (daypart.get("label") if isinstance(daypart, dict) else None)
+                    or (time_window.get("label") if isinstance(time_window, dict) else None),
+                    slot=latest_slot,
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+                "suggested_slots": pending.get("suggested_slots", []),
+            }
+
         if time_window is not None and requested_date is not None:
             result = self._suggest_time_window_slots(
                 sender_id,
@@ -3111,6 +3845,8 @@ class BookingService:
                 requested_date=requested_date,
                 requested_day_label=requested_day_label,
                 time_window=time_window,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
             )
             self._reapply_reschedule_pending_after_refinement(sender_id, was_reschedule_pending)
             return result
@@ -3123,6 +3859,8 @@ class BookingService:
                 requested_date=requested_date,
                 requested_day_label=requested_day_label,
                 daypart=daypart,
+                current_service_id=pending.get("current_service_id"),
+                current_service_name=pending.get("current_service_name"),
             )
             self._reapply_reschedule_pending_after_refinement(sender_id, was_reschedule_pending)
             return result
@@ -3495,7 +4233,7 @@ class BookingService:
             target = self._next_calendar_date(day=day, month=month, explicit_year=explicit_year)
             if target is None:
                 return None
-            return {"date": target, "day_label": f"{day} {month_label}"}
+            return {"date": target, "day_label": f"{day}-го {month_label}"}
 
         numeric_match = re.search(
             r"(?<!\d)(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?!\d)",
@@ -4310,6 +5048,108 @@ class BookingService:
 
         return None
 
+    def _handle_next_week_request(
+        self,
+        *,
+        sender_id: str,
+        message_text: str,
+        pending: dict[str, Any],
+        language: str,
+        source_channel: str | None,
+    ) -> Dict[str, Any]:
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel or pending.get("source_channel"),
+            context_summary=pending.get("context_summary") or message_text[:280],
+            customer_name=pending.get("customer_name"),
+            contact_email=pending.get("contact_email"),
+            contact_phone=pending.get("contact_phone"),
+        )
+        refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+        if pending.get("current_service_id"):
+            refreshed_pending["current_service_id"] = pending["current_service_id"]
+        if pending.get("current_service_name"):
+            refreshed_pending["current_service_name"] = pending["current_service_name"]
+        self._save_pending_confirmation(sender_id, refreshed_pending)
+        return {
+            "status": "waiting_for_next_week_day",
+            "reply_text": self._build_next_week_day_prompt(language),
+            "event_created": False,
+            "requires_confirmation": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+        }
+
+    def _handle_week_after_next_request(
+        self,
+        *,
+        sender_id: str,
+        message_text: str,
+        pending: dict[str, Any],
+        language: str,
+        source_channel: str | None,
+    ) -> Dict[str, Any]:
+        self._save_booking_state(
+            sender_id,
+            state=BookingState.WAITING_FOR_TIME,
+            language=language,
+            source_channel=source_channel or pending.get("source_channel"),
+            context_summary=pending.get("context_summary") or message_text[:280],
+            customer_name=pending.get("customer_name"),
+            contact_email=pending.get("contact_email"),
+            contact_phone=pending.get("contact_phone"),
+        )
+        refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+        if pending.get("current_service_id"):
+            refreshed_pending["current_service_id"] = pending["current_service_id"]
+        if pending.get("current_service_name"):
+            refreshed_pending["current_service_name"] = pending["current_service_name"]
+        refreshed_pending["week_anchor_date"] = self._week_after_next_anchor_date().isoformat()
+        self._save_pending_confirmation(sender_id, refreshed_pending)
+        return {
+            "status": "waiting_for_specific_day",
+            "reply_text": self._build_week_after_next_day_prompt(language),
+            "event_created": False,
+            "requires_confirmation": False,
+            "booking_state": BookingState.WAITING_FOR_TIME.value,
+        }
+
+    def _apply_pending_week_anchor_to_partial_date(
+        self,
+        partial_date: dict[str, Any] | None,
+        pending: dict[str, Any],
+        message_text: str,
+    ) -> dict[str, Any] | None:
+        if partial_date is None or not pending.get("week_anchor_date"):
+            return partial_date
+        normalized = self._normalize_booking_text(message_text)
+        if (
+            self._extract_absolute_calendar_date(normalized) is not None
+            or "сьогодні" in normalized
+            or "завтра" in normalized
+            or "післязавтра" in normalized
+            or "today" in normalized
+            or "tomorrow" in normalized
+            or "day after tomorrow" in normalized
+        ):
+            return partial_date
+        if self._find_weekday_marker(normalized) is None:
+            return partial_date
+        try:
+            anchor = date.fromisoformat(str(pending["week_anchor_date"]))
+        except ValueError:
+            pending.pop("week_anchor_date", None)
+            return partial_date
+
+        target = partial_date["date"]
+        while target < anchor:
+            target += timedelta(days=7)
+        return {
+            **partial_date,
+            "date": target,
+        }
+
     def _parse_requested_datetime(self, text: str) -> datetime | None:
         now = datetime.now(self.timezone)
         normalized = self._normalize_booking_text(text)
@@ -4674,6 +5514,71 @@ class BookingService:
         previous_pending = self._get_pending_confirmation(sender_id)
         duration_minutes = self._booking_duration_minutes()
 
+        if (
+            self._is_within_business_hours(requested_dt, duration_minutes)
+            and not self._is_future_booking_start(requested_dt)
+        ):
+            preserved_requested_date = None
+            if previous_pending or current_service_id:
+                self._save_booking_state(
+                    sender_id,
+                    state=BookingState.WAITING_FOR_TIME,
+                    language=language,
+                    source_channel=source_channel or (
+                        previous_pending.get("source_channel") if previous_pending else None
+                    ),
+                    context_summary=(
+                        previous_pending.get("context_summary")
+                        if previous_pending
+                        else message_text[:280]
+                    ),
+                    requested_date=requested_dt.date(),
+                    requested_day_label=self._format_date_label_for_reply(
+                        requested_dt.date(),
+                        language,
+                    ),
+                    customer_name=(
+                        previous_pending.get("customer_name") if previous_pending else None
+                    ),
+                    contact_email=(
+                        previous_pending.get("contact_email") if previous_pending else None
+                    ),
+                    contact_phone=(
+                        previous_pending.get("contact_phone") if previous_pending else None
+                    ),
+                )
+                pending = self._get_pending_confirmation(sender_id) or {}
+                if current_service_id:
+                    pending["current_service_id"] = current_service_id
+                elif previous_pending and previous_pending.get("current_service_id"):
+                    pending["current_service_id"] = previous_pending["current_service_id"]
+                if current_service_name:
+                    pending["current_service_name"] = current_service_name
+                elif previous_pending and previous_pending.get("current_service_name"):
+                    pending["current_service_name"] = previous_pending["current_service_name"]
+                if pending.get("current_service_id") or pending.get("current_service_name"):
+                    self._save_pending_confirmation(sender_id, pending)
+                preserved_requested_date = requested_dt.date()
+            else:
+                self._clear_pending_confirmation(sender_id)
+            return {
+                "status": "past_time",
+                "reply_text": self._build_past_time_reply(language, requested_dt),
+                "requires_confirmation": False,
+                "event_created": False,
+                "booking_state": (
+                    BookingState.WAITING_FOR_TIME.value
+                    if preserved_requested_date is not None
+                    else BookingState.NONE.value
+                ),
+                "start_dt": requested_dt.isoformat(),
+                "requested_date": (
+                    preserved_requested_date.isoformat()
+                    if preserved_requested_date is not None
+                    else None
+                ),
+            }
+
         if not self._is_within_business_hours(requested_dt, duration_minutes):
             preserved_requested_date = None
             if requested_dt_override is not None:
@@ -4738,6 +5643,7 @@ class BookingService:
                         language,
                     ),
                     requested_label=self._format_scheduled_time_for_reply(requested_dt, language),
+                    requested_start_dt=requested_dt,
                 ),
                 "requires_confirmation": False,
                 "booking_state": (
@@ -5196,6 +6102,36 @@ class BookingService:
         if correction_result is not None:
             return correction_result
 
+        if (
+            state == BookingState.WAITING_FOR_TIME
+            and (
+                pending.get("availability_context")
+                or pending.get("requested_date")
+                or pending.get("suggested_slots")
+            )
+            and (
+                self._looks_like_relative_time_refinement_request(message_text)
+                or self._looks_like_latest_offered_slot_question(message_text)
+                or self._looks_like_current_offer_question(message_text)
+                or self._looks_like_last_offered_slot_selection(message_text)
+                or self._looks_like_current_offered_slot_selection(message_text)
+                or self._looks_like_suggested_slot_ordinal_selection(message_text)
+                or self._extract_daypart(message_text) is not None
+                or self._extract_time_window(message_text) is not None
+                or self._looks_like_earliest_slot_rejection_with_next_request(message_text)
+                or self._looks_like_first_slot_rejection(message_text)
+                or self._looks_like_next_offered_slot_request(message_text)
+            )
+        ):
+            availability_result = self._process_availability_followup(
+                sender_id=sender_id,
+                message_text=message_text,
+                pending=pending,
+                source_channel=source_channel,
+            )
+            if availability_result is not None:
+                return availability_result
+
         alternative_time_request = pending.get("availability_context") and self._looks_like_another_time_request(
             message_text
         )
@@ -5241,6 +6177,42 @@ class BookingService:
             }
 
         if state == BookingState.WAITING_FOR_TIME:
+            if self._looks_like_date_unavailable_message(message_text):
+                return self._handle_date_unavailable_message(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    pending=pending,
+                    language=language,
+                    source_channel=source_channel,
+                )
+
+            if self._looks_like_week_after_next_request(message_text):
+                return self._handle_week_after_next_request(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    pending=pending,
+                    language=language,
+                    source_channel=source_channel,
+                )
+
+            if self._looks_like_next_week_request(message_text):
+                return self._handle_next_week_request(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    pending=pending,
+                    language=language,
+                    source_channel=source_channel,
+                )
+
+            if self._looks_like_weekend_availability_request(message_text):
+                return self._suggest_this_weekend_slots(
+                    sender_id,
+                    language=language,
+                    message_text=message_text,
+                    pending=pending,
+                    source_channel=source_channel,
+                )
+
             if (
                 not pending.get("reschedule_pending")
                 and not pending.get("busy_alternative")
@@ -5288,6 +6260,11 @@ class BookingService:
                 self._save_pending_confirmation(sender_id, pending)
 
             partial_date = self._extract_requested_date(message_text)
+            partial_date = self._apply_pending_week_anchor_to_partial_date(
+                partial_date,
+                pending,
+                message_text,
+            )
             rejected_time, negation_replacement_time, _wants_alternative = (
                 self._extract_negated_time_context(message_text)
             )
@@ -5326,8 +6303,30 @@ class BookingService:
             ):
                 requested_time = self._extract_suggested_slot_selection_time(message_text)
 
+            if (
+                requested_time is None
+                and rejected_time is None
+                and partial_date is None
+                and daypart is None
+                and time_window is None
+                and pending_requested_date is not None
+                and self._looks_like_booking_intent_reaffirmation(message_text)
+            ):
+                return {
+                    "status": "waiting_for_time",
+                    "reply_text": self._build_booking_intent_reaffirmed_reply(
+                        language,
+                        pending.get("requested_day_label"),
+                    ),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": pending.get("requested_date"),
+                }
+
             if partial_date:
                 pending_requested_date = partial_date["date"]
+                pending.pop("week_anchor_date", None)
                 if (
                     self._detect_requested_day_key(message_text) is None
                     and pending.get("requested_date") != pending_requested_date.isoformat()
@@ -5387,6 +6386,29 @@ class BookingService:
                         if pending_requested_date is not None
                         else pending.get("requested_date")
                     ),
+                }
+
+            if (
+                pending_requested_date is not None
+                and pending.get("missing_service")
+                and requested_time is None
+                and rejected_time is None
+                and partial_date is None
+                and daypart is None
+                and time_window is None
+                and self._business_hours_status_for_date(pending_requested_date)[0] != "open"
+            ):
+                return {
+                    "status": "outside_business_hours",
+                    "reply_text": self._build_outside_business_hours_reply(
+                        language,
+                        requested_date=pending_requested_date,
+                        requested_day_label=pending.get("requested_day_label"),
+                    ),
+                    "requires_confirmation": False,
+                    "event_created": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": pending_requested_date.isoformat(),
                 }
 
             if time_window is None and partial_date and pending.get("time_window"):
@@ -5475,7 +6497,39 @@ class BookingService:
             )
 
         if state == BookingState.WAITING_FOR_CONTACT:
+            if self._looks_like_date_unavailable_message(message_text):
+                return self._handle_date_unavailable_message(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    pending=pending,
+                    language=language,
+                    source_channel=source_channel,
+                )
+
+            if self._looks_like_week_after_next_request(message_text):
+                return self._handle_week_after_next_request(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    pending=pending,
+                    language=language,
+                    source_channel=source_channel,
+                )
+
+            if self._looks_like_next_week_request(message_text):
+                return self._handle_next_week_request(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    pending=pending,
+                    language=language,
+                    source_channel=source_channel,
+                )
+
             partial_date = self._extract_requested_date(message_text)
+            partial_date = self._apply_pending_week_anchor_to_partial_date(
+                partial_date,
+                pending,
+                message_text,
+            )
             if partial_date is not None and self._looks_like_availability_followup_question(message_text):
                 return self._suggest_time_window_slots(
                     sender_id,
@@ -5492,6 +6546,49 @@ class BookingService:
                     current_service_id=pending.get("current_service_id"),
                     current_service_name=pending.get("current_service_name"),
                 )
+
+            time_window = self._extract_time_window(message_text)
+            daypart = self._extract_daypart(message_text)
+            if partial_date is None and (time_window is not None or daypart is not None):
+                requested_date = None
+                requested_day_label = pending.get("requested_day_label")
+                try:
+                    selected_start_dt = self._deserialize_pending_start_dt(pending.get("start_dt"))
+                    requested_date = selected_start_dt.date()
+                    requested_day_label = requested_day_label or self._format_date_label_for_reply(
+                        requested_date,
+                        language,
+                    )
+                except Exception:
+                    logger.warning(
+                        "selected slot date lookup failed for time refinement sender_id=%s raw_start_dt=%r",
+                        sender_id,
+                        pending.get("start_dt"),
+                    )
+                if requested_date is not None:
+                    if time_window is not None:
+                        return self._suggest_time_window_slots(
+                            sender_id,
+                            language=language,
+                            message_text=message_text,
+                            source_channel=source_channel or pending.get("source_channel"),
+                            requested_date=requested_date,
+                            requested_day_label=requested_day_label,
+                            time_window=time_window,
+                            current_service_id=pending.get("current_service_id"),
+                            current_service_name=pending.get("current_service_name"),
+                        )
+                    return self._suggest_daypart_slots(
+                        sender_id,
+                        language=language,
+                        message_text=message_text,
+                        source_channel=source_channel or pending.get("source_channel"),
+                        requested_date=requested_date,
+                        requested_day_label=requested_day_label,
+                        daypart=daypart,
+                        current_service_id=pending.get("current_service_id"),
+                        current_service_name=pending.get("current_service_name"),
+                    )
 
             accepted_start_dt = (
                 self._match_suggested_slot_acceptance(message_text, pending)
@@ -5539,6 +6636,50 @@ class BookingService:
                     requested_date=requested_date,
                     requested_day_label=requested_day_label,
                 )
+                return {
+                    "status": "waiting_for_time",
+                    "reply_text": self._build_another_time_reply(language, requested_day_label),
+                    "event_created": False,
+                    "requires_confirmation": False,
+                    "booking_state": BookingState.WAITING_FOR_TIME.value,
+                    "requested_date": requested_date.isoformat() if requested_date else None,
+                }
+
+            if self._looks_like_selected_slot_reconsideration(message_text):
+                requested_date = None
+                requested_day_label = pending.get("requested_day_label")
+                try:
+                    selected_start_dt = self._deserialize_pending_start_dt(pending.get("start_dt"))
+                    requested_date = selected_start_dt.date()
+                    requested_day_label = requested_day_label or self._format_date_label_for_reply(
+                        requested_date,
+                        language,
+                    )
+                except Exception:
+                    logger.warning(
+                        "selected slot date preservation failed sender_id=%s raw_start_dt=%r",
+                        sender_id,
+                        pending.get("start_dt"),
+                    )
+                self._save_booking_state(
+                    sender_id,
+                    state=BookingState.WAITING_FOR_TIME,
+                    language=language,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    context_summary=pending.get("context_summary"),
+                    requested_date=requested_date,
+                    requested_day_label=requested_day_label,
+                    customer_name=pending.get("customer_name"),
+                    contact_email=pending.get("contact_email"),
+                    contact_phone=pending.get("contact_phone"),
+                )
+                refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+                if pending.get("current_service_id"):
+                    refreshed_pending["current_service_id"] = pending["current_service_id"]
+                if pending.get("current_service_name"):
+                    refreshed_pending["current_service_name"] = pending["current_service_name"]
+                refreshed_pending["availability_context"] = True
+                self._save_pending_confirmation(sender_id, refreshed_pending)
                 return {
                     "status": "waiting_for_time",
                     "reply_text": self._build_another_time_reply(language, requested_day_label),
@@ -5657,6 +6798,36 @@ class BookingService:
                 "requires_contact": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "start_dt": start_dt.isoformat(),
+            }
+
+        if not self._is_future_booking_start(start_dt):
+            self._save_booking_state(
+                sender_id,
+                state=BookingState.WAITING_FOR_TIME,
+                language=language,
+                source_channel=source_channel or pending.get("source_channel"),
+                context_summary=pending.get("context_summary"),
+                requested_date=start_dt.date(),
+                requested_day_label=self._format_date_label_for_reply(start_dt.date(), language),
+                customer_name=customer_name,
+                contact_email=contact_email,
+                contact_phone=contact_phone,
+            )
+            refreshed_pending = self._get_pending_confirmation(sender_id) or {}
+            if pending.get("current_service_id"):
+                refreshed_pending["current_service_id"] = pending["current_service_id"]
+            if pending.get("current_service_name"):
+                refreshed_pending["current_service_name"] = pending["current_service_name"]
+            if refreshed_pending.get("current_service_id") or refreshed_pending.get("current_service_name"):
+                self._save_pending_confirmation(sender_id, refreshed_pending)
+            return {
+                "status": "past_time",
+                "reply_text": self._build_past_time_reply(language, start_dt),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "start_dt": start_dt.isoformat(),
+                "requested_date": start_dt.date().isoformat(),
             }
 
         try:

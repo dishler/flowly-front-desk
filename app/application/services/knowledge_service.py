@@ -141,6 +141,11 @@ class KnowledgeService:
                     matched_query_tokens.add(matched_query_token)
                     score += 1
                     specificity = max(specificity, 1)
+                    if re.search(rf"\b(?:саме|а\s+саме)\s+{re.escape(alias_token)}\w*\b", normalized):
+                        score += 2
+                        specificity = max(specificity, 2)
+                    if re.search(rf"\bне\s+{re.escape(alias_token)}\w*\b", normalized):
+                        score -= 2
 
             if score > best_score or (score == best_score and specificity > best_specificity):
                 best_score = score
@@ -312,6 +317,7 @@ class KnowledgeService:
             for token in self._service_query_tokens(text)
             if token not in self._service_action_exact_tokens()
             and not any(stem in token for stem in self._service_action_stems())
+            and not re.search(rf"\bне\s+{re.escape(token)}\w*\b", self._normalize_question_for_match(text))
         }
         if not query_tokens:
             return set()
@@ -336,6 +342,21 @@ class KnowledgeService:
             "тоді",
             "для",
             "день",
+            "мене",
+            "мені",
+            "мій",
+            "моя",
+            "моє",
+            "мої",
+            "вже",
+            "ним",
+            "саме",
+            "напевно",
+            "приблизно",
+            "орієнтовно",
+            "поки",
+            "просто",
+            "але",
             "do",
             "you",
             "offer",
@@ -363,12 +384,14 @@ class KnowledgeService:
             "дитин",
             "дорослим",
             "дорослих",
+            "заваж",
             "прив",
             "добр",
             "скаж",
             "підкаж",
             "розкаж",
             "поясн",
+            "показ",
             "кошт",
             "цікав",
         }
@@ -419,10 +442,21 @@ class KnowledgeService:
         if self._is_explicit_service_switch(normalized, service, resolved_service):
             return None
 
+        consultation_service = self._contextual_consultation_service(service, normalized)
+        if consultation_service is not None:
+            if self._looks_like_price_query(normalized):
+                return {"kind": "price", "service": consultation_service}
+            return {"kind": "consultation_summary", "service": consultation_service}
+
         if self._should_try_contextual_faq_before_price(normalized):
             faq_answer = self._find_contextual_faq_answer(service, normalized, language)
             if faq_answer is not None:
                 return {"kind": "faq", "answer": faq_answer, "service": service}
+
+        if self._looks_like_contextual_option_list_question(normalized):
+            price_options = self._valid_price_options(service)
+            if price_options:
+                return {"kind": "price_options", "price_options": price_options, "service": service}
 
         if self._looks_like_price_query(normalized):
             price_options = self._matching_price_options(service, normalized)
@@ -435,6 +469,9 @@ class KnowledgeService:
             return {"kind": "faq", "answer": faq_answer, "service": service}
 
         if self._message_matches_service_text(normalized, service):
+            return {"kind": "summary", "service": service}
+
+        if self._looks_like_contextual_relation_followup(normalized):
             return {"kind": "summary", "service": service}
 
         return None
@@ -454,8 +491,31 @@ class KnowledgeService:
             "мікроскоп",
             "носити",
             "можна поставити",
+            "окрем",
+            "разом",
+            "замість",
+            "процес",
+            "видален",
+            "пів року",
+            "передні зуб",
+            "вони мені",
+            "перед ним",
+            "перед цим",
+            "перед встановлен",
+            "спочатку треба",
+            "прийти до ортодонт",
+            "не повністю",
+            "виліз",
+            "проріз",
         ]
         return token_count <= 8 and any(marker in compact for marker in followup_markers)
+
+    def _looks_like_contextual_option_list_question(self, normalized: str) -> bool:
+        compact = re.sub(r"^(?:а|і|и|тоді|то)\s+", "", normalized).strip()
+        return bool(
+            re.search(r"\b(?:які|який|яка)\b", compact)
+            and any(marker in compact for marker in ["є", "саме", "варіант"])
+        )
 
     def _is_explicit_service_switch(
         self,
@@ -466,21 +526,79 @@ class KnowledgeService:
         if resolved_service is None or resolved_service.get("id") == remembered_service.get("id"):
             return False
 
+        if self._looks_like_contextual_relation_followup(normalized):
+            return False
+
+        return self._mentions_service_identity(normalized, resolved_service)
+
+    def _looks_like_contextual_relation_followup(self, normalized: str) -> bool:
         relation_markers = [
             "входить",
             "включ",
+            "окрем",
+            "разом",
             "один",
             "одиниц",
             "кращ",
             "обточ",
             "мікроскоп",
             "носити",
+            "замість",
+            "альтернатив",
+            "типу",
+            "порівн",
+            "дорожч",
+            "дешевш",
+            "скільки часу",
+            "як довго",
+            "процес",
             "давно немає",
+            "немає зуб",
+            "зуб вже видален",
+            "видален",
+            "пів року",
+            "передні зуб",
+            "перед ним",
+            "перед цим",
+            "не повністю",
+            "виліз",
+            "проріз",
+            "така консультац",
+            "таку консультац",
+            "такої консультац",
+            "спочатку треба",
+            "спочатку потріб",
+            "перед встановленням",
+            "прийти до ортодонт",
         ]
         if any(marker in normalized for marker in relation_markers):
-            return False
+            return True
+        return bool(
+            re.search(r"\b(?:вони|він|вона|це)\s+мені\s+підійд", normalized)
+            or re.search(r"\bмені\s+.*\bпідійд", normalized)
+        )
 
-        return self._mentions_service_identity(normalized, resolved_service)
+    def _contextual_consultation_service(
+        self,
+        service: dict[str, Any],
+        normalized: str,
+    ) -> Optional[dict[str, Any]]:
+        has_consultation_reference = bool(
+            re.search(r"\bконсультац\w*\b", normalized)
+            or re.search(r"\bприйти\s+до\s+ортодонт", normalized)
+            or "перед встановлен" in normalized
+        )
+        if not has_consultation_reference:
+            return None
+        if not any(
+            marker in normalized
+            for marker in ["така", "таку", "цей", "цю", "по цій", "перед", "спочатку", "встановлен"]
+        ):
+            return None
+        booking_service_id = service.get("booking_service_id")
+        if not booking_service_id or booking_service_id == service.get("id"):
+            return None
+        return self.get_service_by_id(str(booking_service_id))
 
     def _mentions_service_identity(self, normalized: str, service: dict[str, Any]) -> bool:
         parts = [service.get("name"), *(service.get("aliases") or [])]
@@ -495,28 +613,51 @@ class KnowledgeService:
         return False
 
     def _should_try_contextual_faq_before_price(self, normalized: str) -> bool:
-        return any(marker in normalized for marker in ["носити", "візит", "входить", "включ", "кращ", "обточ"])
+        return any(
+            marker in normalized
+            for marker in [
+                "носити",
+                "візит",
+                "входить",
+                "включ",
+                "окрем",
+                "разом",
+                "кращ",
+                "обточ",
+                "передні зуб",
+                "підійд",
+                "видален",
+            ]
+        )
 
     def _looks_like_price_query(self, normalized: str) -> bool:
+        if any(marker in normalized for marker in ["скільки часу", "як довго", "скільки трива"]):
+            return False
         return any(
             marker in normalized
             for marker in ["скільки", "сколько", "how much", "коштує", "ціна", "ціну", "ціни", "вартість", "прайс", "price", "cost"]
         )
 
     def _matching_price_options(self, service: dict[str, Any], normalized: str) -> list[dict[str, Any]]:
-        price_options = service.get("price_options")
-        if not isinstance(price_options, list):
-            return []
+        price_options = self._valid_price_options(service)
 
         query_tokens = self._service_query_tokens(normalized)
         matches = []
         for option in price_options:
-            if not isinstance(option, dict) or not option.get("label") or not option.get("price_note"):
-                continue
             label_tokens = self._service_query_tokens(str(option["label"]))
             if any(self._token_matches_any(query_token, label_tokens) for query_token in query_tokens):
                 matches.append(option)
         return matches
+
+    def _valid_price_options(self, service: dict[str, Any]) -> list[dict[str, Any]]:
+        price_options = service.get("price_options")
+        if not isinstance(price_options, list):
+            return []
+        return [
+            option
+            for option in price_options
+            if isinstance(option, dict) and option.get("label") and option.get("price_note")
+        ]
 
     def _find_contextual_faq_answer(
         self,

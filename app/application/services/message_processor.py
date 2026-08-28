@@ -226,6 +226,8 @@ class MessageProcessor:
             return False
 
         normalized = self._normalize_for_booking_keywords(text)
+        if "поки" in normalized and "цікав" in normalized:
+            return False
         has_action = self._has_service_booking_action_signal(normalized)
         has_scheduling = self._has_service_scheduling_signal(normalized)
         if self._looks_like_service_faq_request(normalized) and not has_action:
@@ -313,6 +315,110 @@ class MessageProcessor:
         normalized = self._normalize_for_booking_keywords(text)
         markers = ["до дантиста", "до стоматолога", "дантист", "стоматолог"]
         return any(marker in normalized for marker in markers)
+
+    def _dental_consultation_service(self) -> tuple[str, str] | None:
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        service = (
+            knowledge_service.get_service_by_id("dental_consultation")
+            if knowledge_service is not None
+            else None
+        )
+        if service is None:
+            return None
+        return str(service["id"]), str(service.get("name") or "")
+
+    def _looks_like_unclear_dental_triage_request(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        return bool(
+            re.search(r"\bне\s+зна\w*\s+до\s+кого\b", normalized)
+            or re.search(r"\bне\s+зна\w*\s+що\s+(?:треба|потрібно|робити)\b", normalized)
+        )
+
+    def _looks_like_dental_exam_booking_request(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        has_exam_target = bool(
+            re.search(r"\b(?:лікар|стоматолог)\w*\s+(?:подив|глян)", normalized)
+            or re.search(r"\bпоказати\s+зуб", normalized)
+            or re.search(r"\bподивитися\s+зуб", normalized)
+            or re.search(r"\bщоб\s+(?:лікар|стоматолог)\w*\s+(?:подив|глян)", normalized)
+        )
+        if not has_exam_target:
+            return False
+        return (
+            self._has_service_booking_action_signal(normalized)
+            or self._looks_like_booking_message(text)
+            or self._has_service_scheduling_signal(normalized)
+        )
+
+    def _looks_like_consultation_requirement_question(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        if "?" not in text and not any(marker in normalized for marker in ["чи ", "перед", "треба", "потрібн"]):
+            return False
+        return bool(
+            re.search(r"\b(?:треба|потрібн\w*)\s+консультац", normalized)
+            or re.search(r"\bперед\s+(?:ним|цим|процедур\w*)\s+(?:треба|потрібн\w*)\s+консультац", normalized)
+            or (
+                "перед встановлен" in normalized
+                and re.search(r"\b(?:прийти|потрапити|записатись|записатися)\b", normalized)
+            )
+            or re.search(r"\bспочатку\s+(?:треба|потрібн\w*)\s+(?:на\s+)?консультац", normalized)
+        )
+
+    def _get_dental_triage_reply(self, sender_id: str, text: str) -> str | None:
+        if not self._is_configured_front_desk_mode():
+            return None
+        normalized = self._normalize_for_booking_keywords(text)
+        if "біліш" in normalized and not any(
+            marker in normalized for marker in ["відбілю", "чистк", "гігієн"]
+        ):
+            if self.memory_service is not None:
+                self.memory_service.update_context(sender_id, question_context="dental_triage")
+            return (
+                "Можемо зорієнтувати. Професійна чистка прибирає наліт і камінь, "
+                "а відбілювання саме освітлює емаль. Ви маєте на увазі чистку чи відбілювання?"
+            )
+        if not (
+            self._looks_like_unclear_dental_triage_request(text)
+            or re.search(r"\bзуб\w*\s+став\w*\s+темн", normalized)
+            or re.search(r"\bтемн\w*\s+зуб", normalized)
+        ):
+            return None
+        if self.memory_service is not None:
+            service_context = self._dental_consultation_service()
+            update_values = {"question_context": "dental_triage"}
+            if service_context is not None:
+                update_values["current_service_id"] = service_context[0]
+                update_values["current_service_name"] = service_context[1]
+            self.memory_service.update_context(sender_id, **update_values)
+        if re.search(r"\bзуб\w*\s+став\w*\s+темн", normalized) or re.search(r"\bтемн\w*\s+зуб", normalized):
+            return (
+                "Таке краще оцінити на огляді стоматолога: без огляду не ставимо діагноз. "
+                "Можу допомогти підібрати час на консультацію."
+            )
+        return (
+            "Звичайно. Розкажіть коротко, що турбує або що хочете перевірити, "
+            "і я зорієнтую щодо консультації чи запису."
+        )
+
+    def _get_dental_triage_service_clarification_reply(
+        self,
+        message: NormalizedMessage,
+    ) -> str | None:
+        if not self._is_configured_front_desk_mode() or self.memory_service is None:
+            return None
+        context = self.memory_service.get_context(message.sender_id)
+        if context.get("question_context") != "dental_triage":
+            return None
+        normalized = self._normalize_for_booking_keywords(message.user_message)
+        explicit_booking = bool(
+            re.search(r"\b(?:записа\w*|запиш\w*|прийти|прийом|візит)\b", normalized)
+        )
+        if self._has_service_scheduling_signal(normalized) or explicit_booking:
+            return None
+        service = self._find_configured_front_desk_service(message.user_message)
+        if service is None:
+            return None
+        return self.reply_service.get_contextual_front_desk_reply(message)
 
     def _looks_like_generic_dentist_booking_without_service(self, text: str) -> bool:
         if self.booking_service._looks_like_nearest_availability_request(text):
@@ -439,7 +545,7 @@ class MessageProcessor:
 
     def _looks_like_generic_consultation_booking(self, text: str) -> bool:
         normalized = self._normalize_for_booking_keywords(text)
-        has_consultation = bool(re.search(r"\b(?:консультац\w*|consultation)\b", normalized))
+        has_consultation = bool(re.search(r"\b(?:консультац\w*|проконсульт\w*|consultation)\b", normalized))
         has_booking_action = self._has_service_booking_action_signal(normalized) or self._looks_like_booking_message(text)
         return has_consultation and has_booking_action
 
@@ -920,7 +1026,11 @@ class MessageProcessor:
             "коли можна",
             "коли вільно",
             "коли вільні",
+            "є час",
             "що є віль",
+            "найпізніше",
+            "найпізніший",
+            "останній",
             "вільно",
             "free slots",
             "free time",
@@ -2916,17 +3026,56 @@ class MessageProcessor:
                         intent_value="greeting_during_active_offer",
                         booking_result=greeting_result,
                     )
+                reply_text = self.reply_service.generate_reply(message, IntentType.GENERAL_QUESTION)
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=reply_text,
+                    intent_value="greeting",
+                )
 
         if booking_state != BookingState.NONE:
             active_service_id, active_service_name = self._get_pending_front_desk_service_context(
                 message.sender_id
             )
 
+            if self._looks_like_consultation_requirement_question(message.user_message):
+                grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)
+                if grounded_reply:
+                    pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
+                    self._restore_pending_front_desk_service_context(
+                        message.sender_id,
+                        pending.get("current_service_id"),
+                        pending.get("current_service_name"),
+                    )
+                    return self._build_direct_reply_result(
+                        message=message,
+                        reply_text=grounded_reply,
+                        intent_value="booking_grounded_question",
+                        routing_category="answered_basic",
+                        intent_for_policy=IntentType.GENERAL_QUESTION,
+                    )
+
             if (
                 booking_state == BookingState.WAITING_FOR_TIME
                 and self._has_single_pending_verified_slot_offer(message.sender_id)
                 and self.booking_service._is_confirmation_text(message.user_message)
             ):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
+            if self.booking_service._looks_like_date_unavailable_message(message.user_message):
                 booking_result = self.booking_service.process_booking_message(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
@@ -2958,7 +3107,55 @@ class MessageProcessor:
                         fallback_service_name=active_service_name,
                     )
 
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and (
+                    self._looks_like_time_window_constraint(message.user_message)
+                    or self.booking_service._extract_daypart(message.user_message) is not None
+                    or self.booking_service._looks_like_weekend_availability_request(message.user_message)
+                    or self.booking_service._looks_like_relative_time_refinement_request(message.user_message)
+                    or self.booking_service._looks_like_current_offer_question(message.user_message)
+                    or self.booking_service._looks_like_latest_offered_slot_question(message.user_message)
+                    or self.booking_service._looks_like_last_offered_slot_selection(message.user_message)
+                    or self.booking_service._looks_like_current_offered_slot_selection(message.user_message)
+                    or self.booking_service._looks_like_suggested_slot_ordinal_selection(message.user_message)
+                    or self.booking_service._looks_like_earliest_slot_rejection_with_next_request(message.user_message)
+                    or self.booking_service._looks_like_first_slot_rejection(message.user_message)
+                    or self.booking_service._looks_like_next_offered_slot_request(message.user_message)
+                )
+            ):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
             if self._looks_like_booking_pause_or_postpone(message.user_message):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
+            if self.booking_service._looks_like_next_week_request(message.user_message):
                 booking_result = self.booking_service.process_booking_message(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
@@ -3030,6 +3227,14 @@ class MessageProcessor:
                         message_text=message.user_message,
                         service=service_correction,
                     )
+                elif self.booking_service._looks_like_selected_slot_reconsideration(
+                    message.user_message
+                ) or self._looks_like_time_window_constraint(message.user_message):
+                    booking_result = self.booking_service.process_booking_message(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        source_channel=message.platform,
+                    )
                 elif self._message_has_valid_contact_data(
                     message.user_message
                 ) or self.booking_service._extract_corrected_time(message.user_message):
@@ -3052,6 +3257,37 @@ class MessageProcessor:
             if (
                 booking_state == BookingState.WAITING_FOR_TIME
                 and self._looks_like_time_window_constraint(message.user_message)
+            ):
+                booking_result = self.booking_service.process_booking_message(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                )
+                if booking_result is not None:
+                    return self._build_booking_reply_result(
+                        message=message,
+                        reply_text=booking_result["reply_text"],
+                        intent_value="booking_flow",
+                        booking_result=booking_result,
+                        fallback_service_id=active_service_id,
+                        fallback_service_name=active_service_name,
+                    )
+
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and (
+                    self.booking_service._looks_like_current_offer_question(message.user_message)
+                    or self.booking_service._looks_like_latest_offered_slot_question(message.user_message)
+                    or self.booking_service._looks_like_relative_time_refinement_request(message.user_message)
+                    or self.booking_service._extract_daypart(message.user_message) is not None
+                    or self.booking_service._looks_like_weekend_availability_request(message.user_message)
+                    or self.booking_service._looks_like_last_offered_slot_selection(message.user_message)
+                    or self.booking_service._looks_like_current_offered_slot_selection(message.user_message)
+                    or self.booking_service._looks_like_suggested_slot_ordinal_selection(message.user_message)
+                    or self.booking_service._looks_like_earliest_slot_rejection_with_next_request(message.user_message)
+                    or self.booking_service._looks_like_first_slot_rejection(message.user_message)
+                    or self.booking_service._looks_like_next_offered_slot_request(message.user_message)
+                )
             ):
                 booking_result = self.booking_service.process_booking_message(
                     sender_id=message.sender_id,
@@ -3107,6 +3343,8 @@ class MessageProcessor:
                         sender_id=message.sender_id,
                         message_text=message.user_message,
                         source_channel=message.platform,
+                        current_service_id=active_service_id,
+                        current_service_name=active_service_name,
                     )
                 if booking_result is not None:
                     return self._build_booking_reply_result(
@@ -3126,6 +3364,8 @@ class MessageProcessor:
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
+                    current_service_id=active_service_id,
+                    current_service_name=active_service_name,
                 )
                 return self._build_booking_reply_result(
                     message=message,
@@ -3298,6 +3538,8 @@ class MessageProcessor:
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
+                    current_service_id=active_service_id,
+                    current_service_name=active_service_name,
                 )
                 return self._build_booking_reply_result(
                     message=message,
@@ -3553,6 +3795,16 @@ class MessageProcessor:
                 fallback_service_name=service_name,
             )
 
+        triage_service_reply = self._get_dental_triage_service_clarification_reply(message)
+        if triage_service_reply is not None:
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=triage_service_reply,
+                intent_value="front_desk_contextual_answer",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
         if (
             self._is_configured_front_desk_mode()
             and self.booking_service._looks_like_dental_pain_mention(message.user_message)
@@ -3609,6 +3861,88 @@ class MessageProcessor:
 
         if (
             self._is_configured_front_desk_mode()
+            and self._looks_like_dental_exam_booking_request(message.user_message)
+        ):
+            service_context = self._dental_consultation_service()
+            service_id, service_name = service_context if service_context is not None else (None, None)
+            booking_result = self._start_front_desk_booking_flow(
+                sender_id=message.sender_id,
+                message_text=message.user_message,
+                source_channel=message.platform,
+                current_service_id=service_id,
+                current_service_name=service_name,
+            )
+            return self._build_booking_reply_result(
+                message=message,
+                reply_text=booking_result["reply_text"],
+                intent_value="booking_request",
+                booking_result=booking_result,
+                fallback_service_id=service_id,
+                fallback_service_name=service_name,
+            )
+
+        if (
+            self._is_configured_front_desk_mode()
+            and self._looks_like_consultation_requirement_question(message.user_message)
+        ):
+            context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
+            if context.get("current_service_id"):
+                contextual_front_desk_reply = self.reply_service.get_contextual_front_desk_reply(message)
+                if contextual_front_desk_reply:
+                    return self._build_direct_reply_result(
+                        message=message,
+                        reply_text=contextual_front_desk_reply,
+                        intent_value="front_desk_contextual_answer",
+                        routing_category="answered_basic",
+                        intent_for_policy=IntentType.GENERAL_QUESTION,
+                    )
+
+        dental_triage_reply = self._get_dental_triage_reply(message.sender_id, message.user_message)
+        if dental_triage_reply is not None:
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=dental_triage_reply,
+                intent_value="dental_triage",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
+        if (
+            self._is_configured_front_desk_mode()
+            and self._looks_like_generic_consultation_booking(message.user_message)
+        ):
+            remembered_service_id, remembered_service_name = self._remembered_service_context_for_booking(
+                message.sender_id,
+            )
+            if remembered_service_id:
+                effective_service_id = self._effective_booking_service_id(remembered_service_id)
+                service_name = remembered_service_name
+                knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+                effective_service = (
+                    knowledge_service.get_service_by_id(effective_service_id)
+                    if knowledge_service is not None and effective_service_id
+                    else None
+                )
+                if effective_service is not None:
+                    service_name = str(effective_service.get("name") or service_name or "")
+                booking_result = self._start_front_desk_booking_flow(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                    current_service_id=effective_service_id,
+                    current_service_name=service_name,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_request",
+                    booking_result=booking_result,
+                    fallback_service_id=effective_service_id,
+                    fallback_service_name=service_name,
+                )
+
+        if (
+            self._is_configured_front_desk_mode()
             and self._looks_like_active_booking_continuation(message.user_message)
         ):
             context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
@@ -3621,6 +3955,8 @@ class MessageProcessor:
                         sender_id=message.sender_id,
                         message_text=message.user_message,
                         source_channel=message.platform,
+                        current_service_id=str(service_id),
+                        current_service_name=context.get("current_service_name"),
                     )
                     return self._build_booking_reply_result(
                         message=message,
@@ -3664,16 +4000,23 @@ class MessageProcessor:
 
         if self._is_configured_front_desk_mode():
             if self._looks_like_availability_question(message.user_message):
+                remembered_service_id, remembered_service_name = self._remembered_service_context_for_booking(
+                    message.sender_id,
+                )
                 booking_result = self.booking_service.handle_availability_question(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
                     source_channel=message.platform,
+                    current_service_id=remembered_service_id,
+                    current_service_name=remembered_service_name,
                 )
                 return self._build_booking_reply_result(
                     message=message,
                     reply_text=booking_result["reply_text"],
                     intent_value="booking_availability_question",
                     booking_result=booking_result,
+                    fallback_service_id=remembered_service_id,
+                    fallback_service_name=remembered_service_name,
                 )
 
             if self._looks_like_call_explanation_question(message.user_message):
@@ -3753,16 +4096,23 @@ class MessageProcessor:
             )
 
         if self._looks_like_availability_question(message.user_message):
+            remembered_service_id, remembered_service_name = self._remembered_service_context_for_booking(
+                message.sender_id,
+            )
             booking_result = self.booking_service.handle_availability_question(
                 sender_id=message.sender_id,
                 message_text=message.user_message,
                 source_channel=message.platform,
+                current_service_id=remembered_service_id,
+                current_service_name=remembered_service_name,
             )
             return self._build_booking_reply_result(
                 message=message,
                 reply_text=booking_result["reply_text"],
                 intent_value="booking_availability_question",
                 booking_result=booking_result,
+                fallback_service_id=remembered_service_id,
+                fallback_service_name=remembered_service_name,
             )
 
         if self._looks_like_call_explanation_question(message.user_message):

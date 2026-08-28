@@ -315,6 +315,7 @@ class ReplyService:
                 and context_service is not None
                 and service.get("id") != context_service.get("id")
                 and bool(self.knowledge_service.unknown_detail_tokens_for_service(normalized, service))
+                and not self.knowledge_service._looks_like_contextual_relation_followup(normalized)
                 and not self.knowledge_service._is_explicit_service_switch(
                     normalized,
                     context_service,
@@ -340,10 +341,7 @@ class ReplyService:
                         marker in normalized
                         for marker in ["зуб", "зуби", "лікування", "процедур", "брекет", "імплант", "коронк"]
                     )
-                    relation_followup = any(
-                        marker in normalized
-                        for marker in ["входить", "включ", "можна поставити", "давно немає"]
-                    )
+                    relation_followup = self.knowledge_service._looks_like_contextual_relation_followup(normalized)
                     scheduling_followup = any(
                         marker in normalized
                         for marker in ["зранку", "вранці", "ввечері", "увечері", "після", "до "]
@@ -437,6 +435,24 @@ class ReplyService:
         if service is not None:
             return self._reply_with_service_summary(message.sender_id, service)
 
+        if (
+            service_context_id
+            and (
+                context.get("question_context") == "pricing"
+                or (
+                    context.get("question_context") == "services"
+                    and self._looks_like_short_acknowledgement(normalized, strict=True)
+                )
+            )
+            and self._looks_like_short_acknowledgement(normalized)
+        ):
+            self._remember_front_desk_context(
+                message.sender_id,
+                current_service_id=str(service_context_id),
+                question_context=str(context.get("question_context") or "pricing"),
+            )
+            return "Добре."
+
         fact_reply = self._get_business_fact_reply(normalized, language)
         if fact_reply:
             self._remember_front_desk_context(
@@ -446,6 +462,19 @@ class ReplyService:
             return fact_reply
 
         return None
+
+    def _looks_like_short_acknowledgement(self, normalized: str, *, strict: bool = False) -> bool:
+        compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
+        if strict:
+            return compact in {"ясно", "зрозуміло"}
+        return compact in {
+            "ага",
+            "ясно",
+            "зрозуміло",
+            "ок",
+            "окей",
+            "добре",
+        }
 
     def evaluate_escalation(self, user_text: str, history: List[str]) -> Tuple[bool, str]:
         """
@@ -877,6 +906,9 @@ class ReplyService:
         if kind == "price":
             return self._reply_with_service_price(sender_id, service)
 
+        if kind == "consultation_summary":
+            return self._reply_with_service_summary(sender_id, service)
+
         if kind == "summary":
             return self._reply_with_service_summary(sender_id, service)
 
@@ -884,6 +916,10 @@ class ReplyService:
 
     def _looks_like_cancellation_or_time_only_followup(self, normalized: str) -> bool:
         if any(marker in normalized for marker in ["скасу", "не треба", "не хочу", "передум"]):
+            return True
+        if re.search(r"\b\d{1,2}(?::\d{2})?\b", normalized) and any(
+            marker in normalized for marker in ["зручно", "зручноо", "підход", "норм"]
+        ):
             return True
         if re.fullmatch(
             r"(?:а|тоді|краще|давайте|давай|можна)?\s*(?:о|на)?\s*\d{1,2}(?::\d{2})?\??",
