@@ -903,6 +903,86 @@ async def test_dental_legitimate_contextual_faq_answers_still_work(service_id, q
 
 
 @pytest.mark.asyncio
+async def test_dental_price_unit_loads_correctly_for_braces_price_options():
+    """braces price_options must carry the explicit per-jaw unit for both
+    materials, loaded as plain dict data with no schema/loader changes."""
+    knowledge_service = KnowledgeService("app/data/knowledge_base.json")
+    braces = knowledge_service.get_service_by_id("braces")
+
+    options_by_label = {opt["label"]: opt for opt in braces["price_options"]}
+
+    assert options_by_label["Металеві брекети"]["price_unit"] == "per_jaw"
+    assert options_by_label["Керамічні брекети"]["price_unit"] == "per_jaw"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("service_id", "expected_unit"),
+    [
+        ("aligners", "per_course"),
+        ("veneers", "per_tooth"),
+        ("dental_sedation", "per_hour"),
+    ],
+)
+async def test_dental_price_unit_loads_correctly_for_flat_price_services(service_id, expected_unit):
+    knowledge_service = KnowledgeService("app/data/knowledge_base.json")
+    service = knowledge_service.get_service_by_id(service_id)
+
+    assert service.get("price_unit") == expected_unit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "service_id",
+    [
+        "dental_cleaning",
+        "pediatric_cleaning",
+        "teeth_whitening",
+        "tooth_extraction",
+        "wisdom_tooth_extraction",
+        "dental_implant",
+        "dental_consultation",
+        "orthodontic_consultation",
+        "prosthetics_consultation",
+        "prosthodontics",
+        "dental_crowns",
+        "caries_treatment",
+        "root_canal_treatment",
+        "gum_treatment",
+        "pediatric_dentistry",
+    ],
+)
+async def test_dental_price_unit_not_inferred_for_unspecified_services(service_id):
+    """Only the five explicitly-approved entries get a price_unit -- every
+    other service, including ones with multiple price_options like
+    dental_crowns, must not have a unit invented for it."""
+    knowledge_service = KnowledgeService("app/data/knowledge_base.json")
+    service = knowledge_service.get_service_by_id(service_id)
+
+    assert service.get("price_unit") is None
+    for option in service.get("price_options") or []:
+        assert option.get("price_unit") is None
+
+
+@pytest.mark.asyncio
+async def test_dental_pricing_replies_unchanged_by_price_unit_addition():
+    """The price_unit field is not read by any reply-building code yet --
+    adding it must not change a single existing reply's wording."""
+    processor, _calendar = _build_dental_processor()
+
+    braces_result = await processor.process(_message("Скільки коштують металеві брекети?"))
+    assert braces_result["reply_text"] == (
+        "Вартість брекетів: Металеві брекети — від 19000 грн; Керамічні брекети — від 30000 грн."
+    )
+
+    aligners_result = await processor.process(_message("Скільки коштують елайнери?", sender_id="patient-2"))
+    assert aligners_result["reply_text"] == "Елайнери коштують від 60000 грн за курс лікування."
+
+    sedation_result = await processor.process(_message("скільки коштує седація?", sender_id="patient-3"))
+    assert sedation_result["reply_text"] == "Седація коштує від 6000 грн за першу годину."
+
+
+@pytest.mark.asyncio
 async def test_dental_pricing_short_followup_uses_recent_price_context(dental_processor):
     processor, _calendar = dental_processor
 
