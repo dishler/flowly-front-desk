@@ -400,6 +400,15 @@ class ReplyService:
         if contextual_followup is not None:
             return contextual_followup
 
+        if service_context_id and self._looks_like_yes_or_no_followup(normalized):
+            context_service = self.knowledge_service.get_service_by_id(str(service_context_id))
+            if context_service is not None:
+                return self._reply_with_service_summary(
+                    message.sender_id,
+                    context_service,
+                    availability_confirmation=True,
+                )
+
         unknown_detail_reply = self.get_unknown_service_detail_reply(
             message.sender_id,
             normalized,
@@ -474,11 +483,13 @@ class ReplyService:
     def _looks_like_short_acknowledgement(self, normalized: str, *, strict: bool = False) -> bool:
         compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
         if strict:
-            return compact in {"ясно", "зрозуміло"}
+            return compact in {"ясно", "зрозуміло", "зрозумів", "зрозуміла"}
         return compact in {
             "ага",
             "ясно",
             "зрозуміло",
+            "зрозумів",
+            "зрозуміла",
             "ок",
             "окей",
             "добре",
@@ -490,7 +501,6 @@ class ReplyService:
         return any(
             marker in normalized
             for marker in [
-                "чи ",
                 "ви робите",
                 "робите",
                 "ставите",
@@ -509,6 +519,18 @@ class ReplyService:
                 normalized,
             )
         )
+
+    def _looks_like_yes_or_no_followup(self, normalized: str) -> bool:
+        compact = re.sub(r"[.!?…]+$", "", normalized).strip()
+        compact = re.sub(r"[,;]+", " ", compact)
+        compact = " ".join(compact.split())
+        return compact in {
+            "так чи ні",
+            "так або ні",
+            "да чи ні",
+            "то так чи ні",
+            "таки так чи ні",
+        }
 
     def evaluate_escalation(self, user_text: str, history: List[str]) -> Tuple[bool, str]:
         """
@@ -947,7 +969,10 @@ class ReplyService:
             return self._reply_with_service_summary(
                 sender_id,
                 service,
-                availability_confirmation=self._looks_like_contextual_pronoun_availability_question(normalized),
+                availability_confirmation=(
+                    self._looks_like_contextual_pronoun_availability_question(normalized)
+                    or self._looks_like_known_service_availability_question(normalized)
+                ),
             )
 
         return None

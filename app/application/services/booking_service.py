@@ -819,7 +819,13 @@ class BookingService:
         *,
         pain_mentioned: bool = False,
         include_greeting: bool = False,
+        requested_day_label: str | None = None,
+        nearest_requested: bool = False,
     ) -> str:
+        if nearest_requested:
+            return "Добре, подивлюся найближчий час. Підкажіть, будь ласка, на яку послугу хочете записатися?"
+        if requested_day_label:
+            return f"Добре, на {requested_day_label}. Підкажіть, будь ласка, на яку послугу хочете записатися?"
         if pain_mentioned:
             return self._pain_acknowledgement_sentence() + "На яку послугу хочете записатися?"
         if include_greeting:
@@ -1062,7 +1068,11 @@ class BookingService:
         both could match the same message.
         """
         normalized = self._normalize_booking_text(text)
-        if re.search(r"\bнайближч\w*\b", normalized):
+        typo_normalized = re.sub(r"б{2,}", "б", normalized)
+        if re.search(r"\bнайближч\w*\b", typo_normalized) or re.search(
+            r"\bнайблич\w*\b",
+            typo_normalized,
+        ):
             return True
         english_markers = [
             "earliest available",
@@ -3260,6 +3270,7 @@ class BookingService:
 
     def _get_suggested_slots_by_day(self) -> dict[str, list[datetime]]:
         now = datetime.now(self.timezone)
+        duration = self._booking_duration_minutes()
         candidates = {
             "tomorrow": [
                 (now + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0),
@@ -3279,10 +3290,14 @@ class BookingService:
         for day_key, slots in candidates.items():
             checked[day_key] = []
             for slot in slots:
+                if not self._is_future_booking_start(slot):
+                    continue
+                if not self._is_within_business_hours(slot, duration):
+                    continue
                 try:
                     if self.calendar_service.check_specific_time_availability(
                         slot,
-                        duration_minutes=self._booking_duration_minutes(),
+                        duration_minutes=duration,
                     ):
                         checked[day_key].append(slot)
                 except Exception:
@@ -3592,6 +3607,12 @@ class BookingService:
                 slots=slots,
             )
         return self._build_day_slots_reply(language, pending.get("last_suggested_day") or "selected_day", slots)
+
+    def _build_ambiguous_slot_confirmation_reply(self, language: str, slots: list[datetime]) -> str:
+        times = self._format_slot_times(self._display_slots(slots), language)
+        if times:
+            return f"Підкажіть, будь ласка, який саме час вам підходить: {times}?"
+        return self._build_missing_time_reply(language, None)
 
     def handle_greeting_during_active_offer(
         self,
@@ -4124,6 +4145,20 @@ class BookingService:
                 "start_dt": matched_slot.isoformat(),
             }
 
+        if self._is_confirmation_text(normalized) and len(candidate_slots) > 1:
+            return {
+                "status": "waiting_for_time",
+                "reply_text": self._build_ambiguous_slot_confirmation_reply(
+                    language,
+                    sorted_candidate_slots,
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "requested_date": requested_date.isoformat() if requested_date else None,
+                "suggested_slots": pending.get("suggested_slots", []),
+            }
+
         if requested_day_key:
             return {
                 "status": "availability_day_selected",
@@ -4222,7 +4257,8 @@ class BookingService:
                     len(candidate_slots) == 1
                     and rejected_time_for_correction is None
                 )
-            ) and requested_date is not None:
+                or rejected_time_for_correction is None
+            ) and requested_date is not None and pending.get("current_service_id"):
                 corrected_dt = self._combine_requested_date_and_time(
                     requested_date,
                     requested_time,
@@ -5567,6 +5603,8 @@ class BookingService:
                 language,
                 pain_mentioned=self._looks_like_dental_pain_mention(message_text),
                 include_greeting=not had_pending_before,
+                requested_day_label=requested_day_label,
+                nearest_requested=self._looks_like_nearest_availability_request(message_text),
             ),
             "requires_confirmation": False,
             "event_created": False,
@@ -6167,7 +6205,11 @@ class BookingService:
             )
             return {
                 "status": "waiting_for_service",
-                "reply_text": self._build_missing_service_reply(language),
+                "reply_text": self._build_missing_service_reply(
+                    language,
+                    requested_day_label=self._format_date_label_for_reply(requested_dt.date(), language),
+                    nearest_requested=self._looks_like_nearest_availability_request(message_text),
+                ),
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
                 "start_dt": requested_dt.isoformat(),
@@ -6643,7 +6685,11 @@ class BookingService:
                 self._save_pending_confirmation(sender_id, pending)
                 return {
                     "status": "waiting_for_service",
-                    "reply_text": self._build_missing_service_reply(language),
+                    "reply_text": self._build_missing_service_reply(
+                        language,
+                        requested_day_label=pending.get("requested_day_label"),
+                        nearest_requested=self._looks_like_nearest_availability_request(message_text),
+                    ),
                     "event_created": False,
                     "requires_confirmation": False,
                     "booking_state": BookingState.WAITING_FOR_TIME.value,

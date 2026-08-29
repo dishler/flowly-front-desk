@@ -84,7 +84,7 @@ class KnowledgeService:
         dental_price_or_booking_reference = bool(
             re.search(r"\bогляд[ау]?\b", normalized)
             and re.search(
-                r"\b(?:скільки|коштує|вартість|ціна|ціну|прайс|записа\w*|запиш\w*|прийом)\b",
+                r"\b(?:скільки|коштує|вартість|ціна|ціну|прайс|записа\w*|запиш\w*|прийом|сьогодні|завтра|післязавтра|понеділ\w*|вівтор\w*|серед\w*|четвер\w*|пʼятниц\w*|п'ятниц\w*|пятниц\w*|субот\w*|неділ\w*|ранку|зранку|вранці|обіду|вечір|вечері)\b",
                 normalized,
             )
         )
@@ -317,17 +317,34 @@ class KnowledgeService:
             for token in self._service_query_tokens(text)
             if token not in self._service_action_exact_tokens()
             and not any(stem in token for stem in self._service_action_stems())
+            and not any(stem in token for stem in self._scheduling_context_stems())
             and not re.search(rf"\bне\s+{re.escape(token)}\w*\b", self._normalize_question_for_match(text))
         }
         if not query_tokens:
             return set()
         service_tokens = self._service_tokens(service, include_description=True)
+        service_tokens.update(self._related_booking_family_tokens(service))
         unknown_tokens = {
             token
             for token in query_tokens
             if not self._token_matches_any(token, service_tokens)
         }
         return unknown_tokens
+
+    def _related_booking_family_tokens(self, service: dict[str, Any]) -> set[str]:
+        booking_service_id = service.get("booking_service_id")
+        service_id = service.get("id")
+        if not booking_service_id:
+            return set()
+
+        related_tokens: set[str] = set()
+        for candidate in self.get_services():
+            if candidate.get("id") == service_id:
+                continue
+            if candidate.get("booking_service_id") != booking_service_id:
+                continue
+            related_tokens.update(self._service_tokens(candidate, include_description=False))
+        return related_tokens
 
     def _service_action_exact_tokens(self) -> set[str]:
         return {
@@ -399,6 +416,29 @@ class KnowledgeService:
             "кошт",
             "цікав",
             "зуб",
+        }
+
+    def _scheduling_context_stems(self) -> set[str]:
+        return {
+            "сьогод",
+            "завтр",
+            "післязавтр",
+            "наступ",
+            "тиж",
+            "понеділ",
+            "вівтор",
+            "серед",
+            "четвер",
+            "пятниц",
+            "пʼятниц",
+            "п'ятниц",
+            "субот",
+            "неділ",
+            "ран",
+            "обід",
+            "веч",
+            "пізніш",
+            "раніш",
         }
 
     def _token_matches_any(self, token: str, candidates: set[str]) -> bool:
@@ -545,6 +585,12 @@ class KnowledgeService:
         if self._looks_like_contextual_relation_followup(normalized):
             return False
 
+        if (
+            resolved_service.get("id") == "dental_consultation"
+            and self._contextual_consultation_service(remembered_service, normalized) is not None
+        ):
+            return False
+
         return self._mentions_service_identity(normalized, resolved_service)
 
     def _looks_like_contextual_relation_followup(self, normalized: str) -> bool:
@@ -617,7 +663,11 @@ class KnowledgeService:
         )
         if not has_consultation_reference:
             return None
-        if not any(
+        compact = re.sub(r"^(?:а|і|и|то|тоді)\s+", "", normalized).strip()
+        is_bare_consultation_followup = bool(
+            re.fullmatch(r"(?:на\s+)?консультац\w*\??", compact)
+        )
+        if not is_bare_consultation_followup and not any(
             marker in normalized
             for marker in ["така", "таку", "цей", "цю", "по цій", "перед", "спочатку", "встановлен"]
         ):
