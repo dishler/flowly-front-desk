@@ -273,7 +273,7 @@
     },
     {
       "question": "За щелепу це всі зуби, за одну чи за дві щелепи для брекетів?",
-      "answer_uk": "Щелепа — це верхня або нижня частина, у якій тримаються зуби. Тобто це не всі зуби одразу: верхня і нижня щелепа рахуються окремо; точний план ортодонт визначає після консультації.",
+      "answer_uk": "Так, вказана ціна — за одну щелепу (верхню або нижню), а не за всі зуби одразу. Якщо брекети потрібні на обидві щелепи, вартість рахується окремо за кожну; точний план ортодонт визначає на консультації.",
       "answer_en": "Per jaw means separately for the upper or lower jaw. If braces are needed on both jaws, the price is calculated separately for each; the orthodontist confirms the exact plan after consultation."
     },
     {
@@ -393,16 +393,19 @@
     },
     {
       "question": "Як можна оплатити?",
+      "aliases": ["варіанти оплати", "способи оплати"],
       "answer_uk": "Приймаємо готівку, оплату карткою, Apple Pay та Google Pay.",
       "answer_en": "We accept cash, bank card, Apple Pay and Google Pay."
     },
     {
       "question": "Є розстрочка?",
-      "answer_uk": "Можливість розстрочки потрібно уточнити з адміністратором.",
-      "answer_en": "Installment options need to be confirmed with the administrator."
+      "aliases": ["розтермінування", "оплата частинами", "оплатити частинами", "можна оплатити частинами", "через який банк", "через які банки", "який банк", "які банки"],
+      "answer_uk": "Так, доступне розтермінування через monobank та ПУМБ.",
+      "answer_en": "Yes, installment payment is available via monobank and PUMB."
     },
     {
       "question": "Приймаєте страховку?",
+      "aliases": ["страховка"],
       "answer_uk": "Роботу зі страховими потрібно уточнити з адміністратором.",
       "answer_en": "Working with insurance needs to be confirmed with the administrator."
     },
@@ -459,7 +462,7 @@
     },
     {
       "id": "installments",
-      "text_uk": "Наявність розстрочки/оплати частинами уточнюється з адміністратором."
+      "text_uk": "Розтермінування (оплата частинами) доступне через monobank та ПУМБ."
     },
     {
       "id": "insurance",

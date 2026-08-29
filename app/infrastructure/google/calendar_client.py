@@ -363,6 +363,51 @@ class GoogleCalendarClient:
                 f"Unexpected Google Calendar update event error: {exc}"
             ) from exc
 
+    def update_event_description(
+        self,
+        event_id: str,
+        description: str,
+    ) -> None:
+        if not event_id:
+            raise GoogleCalendarClientError("event_id is required.")
+
+        body = {"description": description}
+
+        try:
+            service = self._get_service()
+
+            logger.info(
+                "calendar update_event_description start calendar_id=%s event_id=%s",
+                self.calendar_id,
+                event_id,
+            )
+
+            (
+                service.events()
+                .patch(
+                    calendarId=self.calendar_id,
+                    eventId=event_id,
+                    body=body,
+                    sendUpdates="none",
+                )
+                .execute()
+            )
+
+            logger.info(
+                "calendar update_event_description success calendar_id=%s event_id=%s",
+                self.calendar_id,
+                event_id,
+            )
+
+        except HttpError as exc:
+            raise GoogleCalendarClientError(
+                f"Google Calendar update event description failed: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise GoogleCalendarClientError(
+                f"Unexpected Google Calendar update event description error: {exc}"
+            ) from exc
+
     def delete_event(self, event_id: str) -> None:
         if not event_id:
             raise GoogleCalendarClientError("event_id is required.")

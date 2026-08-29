@@ -202,6 +202,21 @@ class CalendarService:
             end_dt=end_dt,
         )
 
+    def update_booking_contact_details(self, event_id: str, description: str) -> None:
+        calendar_configured = (
+            self.google_calendar_client.is_configured()
+            if self.google_calendar_client
+            else False
+        )
+        logger.info(f"Calendar configured: {calendar_configured}")
+        if not calendar_configured:
+            raise RuntimeError("Google Calendar is not configured for event contact update.")
+
+        self.google_calendar_client.update_event_description(
+            event_id=event_id,
+            description=description,
+        )
+
     def delete_event(self, event_id: str) -> None:
         calendar_configured = (
             self.google_calendar_client.is_configured()

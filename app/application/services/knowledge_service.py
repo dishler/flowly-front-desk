@@ -12,7 +12,20 @@ from app.application.services.nlu import service_index as nlu_service_index
 from app.application.services.nlu import unknown_detail as nlu_unknown_detail
 from app.core.config import get_settings
 
-_PEDIATRIC_CONTEXT_FALLBACK_MARKERS = ("зуб", "запис", "прийом", "консультац", "стоматолог")
+_PEDIATRIC_CONTEXT_FALLBACK_MARKERS = (
+    "зуб",
+    "запис",
+    "прийом",
+    "прийма",
+    "консультац",
+    "стоматолог",
+    "лікар",
+    "можна",
+    "до вас",
+    "бої",
+    "бою",
+    "страх",
+)
 
 
 class KnowledgeService:
@@ -42,6 +55,21 @@ class KnowledgeService:
             adult_id: pediatric_id
             for pediatric_id, adult_id in self._PEDIATRIC_ADULT_COUNTERPART.items()
         }
+        # FAQ entries reuse the same service-alias matcher: each FAQ's
+        # "question" is its primary alias, and an optional "aliases" list
+        # lets a topic be phrased multiple genuinely different ways (e.g.
+        # "розтермінування" as a synonym of "розстрочка") without any
+        # per-phrase branching in code -- the stemmed full-coverage matcher
+        # already handles word-form variance (страховку/страховкою etc.).
+        faq_index_entries = [
+            {
+                "id": str(index),
+                "name": str(item.get("question") or ""),
+                "aliases": [str(a) for a in (item.get("aliases") or []) if a],
+            }
+            for index, item in enumerate(self.get_faq())
+        ]
+        self._nlu_faq_profiles = nlu_service_index.build_service_index(faq_index_entries)
 
     def _load(self) -> dict[str, Any]:
         with self.file_path.open("r", encoding="utf-8") as f:
@@ -130,6 +158,12 @@ class KnowledgeService:
             return self._find_pediatric_aware_service(normalized)
 
         match = nlu_matcher.match_service(normalized, self._nlu_profiles)
+        if match is None:
+            # Exact/morphological matching found nothing at all -- only
+            # then try a single-character-typo-tolerant fallback (e.g.
+            # "чиску" for "чистку"). Never runs when exact matching already
+            # found a service, so it can't override a good match.
+            match = nlu_matcher.match_service_typo_tolerant(normalized, self._nlu_profiles)
         return self.get_service_by_id(match.service_id) if match else None
 
     def _find_pediatric_aware_service(self, normalized: str) -> Optional[dict[str, Any]]:
@@ -283,23 +317,22 @@ class KnowledgeService:
         return False
 
     def find_faq_answer(self, question_text: str, language: str = "uk") -> Optional[str]:
-        normalized = self._normalize_question_for_match(question_text)
-        query_tokens = self._question_tokens(normalized)
-        for item in self.get_faq():
-            question = self._normalize_question_for_match(str(item.get("question", "")))
-            question_tokens = self._question_tokens(question)
-            has_close_token_match = (
-                bool(query_tokens)
-                and bool(question_tokens)
-                and question_tokens.issubset(query_tokens)
-            )
-            if question and (question in normalized or normalized in question or has_close_token_match):
-                return (
-                    item.get("answer_uk")
-                    if language == "uk"
-                    else item.get("answer_en") or item.get("answer_uk")
-                )
-        return None
+        match = nlu_matcher.match_service(question_text, self._nlu_faq_profiles)
+        if match is None:
+            return None
+        faq_items = self.get_faq()
+        try:
+            index = int(match.service_id)
+        except ValueError:
+            return None
+        if index < 0 or index >= len(faq_items):
+            return None
+        item = faq_items[index]
+        return (
+            item.get("answer_uk")
+            if language == "uk"
+            else item.get("answer_en") or item.get("answer_uk")
+        )
 
     def find_contextual_service_followup(
         self,
@@ -364,9 +397,31 @@ class KnowledgeService:
             return {"kind": "summary", "service": service}
 
         if self._looks_like_contextual_relation_followup(normalized):
+            if self._looks_like_ungrounded_timing_feasibility_question(normalized, service):
+                return None
             return {"kind": "summary", "service": service}
 
         return None
+
+    def _looks_like_ungrounded_timing_feasibility_question(
+        self,
+        normalized: str,
+        service: dict[str, Any],
+    ) -> bool:
+        query_tokens = self._question_tokens(normalized)
+        service_terms = self._service_tokens(service, include_description=True)
+        has_service_overlap = any(
+            self._token_matches_any(token, service_terms)
+            for token in query_tokens
+        )
+        if has_service_overlap:
+            return False
+        asks_feasibility = any(token.startswith(("можн", "встиг")) for token in query_tokens)
+        mentions_timing_detail = any(
+            token.startswith(("ден", "день", "дн", "раз", "візит", "визит"))
+            for token in query_tokens
+        )
+        return asks_feasibility and mentions_timing_detail
 
     def _looks_like_short_service_followup(self, normalized: str) -> bool:
         compact = re.sub(r"^(?:а|і|и|тоді|то)\s+", "", normalized).strip()
@@ -639,18 +694,54 @@ class KnowledgeService:
 
             query_overlap = sum(1 for token in query_tokens if self._token_matches_any(token, question_tokens))
             service_overlap = sum(1 for token in question_tokens if self._token_matches_any(token, service_terms))
-            if service_overlap and query_overlap >= max(1, min(2, len(query_tokens))):
+            detail_tokens = self._contextual_faq_detail_tokens(question_tokens, service_terms)
+            detail_overlap = sum(
+                1 for token in query_tokens if self._token_matches_any(token, detail_tokens)
+            )
+            if (
+                service_overlap
+                and query_overlap >= max(1, min(2, len(query_tokens)))
+                and (not detail_tokens or detail_overlap > 0)
+            ):
                 answer = (
                     item.get("answer_uk")
                     if language == "uk"
                     else item.get("answer_en") or item.get("answer_uk")
                 )
-                score = service_overlap * 10 + query_overlap * 2 - len(question_tokens)
+                score = service_overlap * 10 + query_overlap * 2 + detail_overlap * 5 - len(question_tokens)
                 if score > best_score:
                     best_score = score
                     best_answer = answer
 
         return best_answer
+
+    def _contextual_faq_detail_tokens(
+        self,
+        question_tokens: set[str],
+        service_terms: set[str],
+    ) -> set[str]:
+        generic_tokens = {
+            "можна",
+            "можн",
+            "треба",
+            "треб",
+            "потрібно",
+            "потріб",
+            "тільки",
+            "саме",
+            "зуб",
+            "зуби",
+            "зуба",
+            "зубів",
+            "процедура",
+            "процедури",
+        }
+        return {
+            token
+            for token in question_tokens
+            if token not in generic_tokens
+            and not self._token_matches_any(token, service_terms)
+        }
 
     def _message_matches_service_text(self, normalized: str, service: dict[str, Any]) -> bool:
         query_tokens = self._service_query_tokens(normalized)

@@ -300,6 +300,14 @@ class ReplyService:
 
         if self._looks_like_pediatric_comfort_question(normalized):
             target_service = service
+            if (
+                target_service is not None
+                and target_service.get("id") == "pediatric_dentistry"
+                and service_context_id
+                and str(service_context_id).startswith("pediatric_")
+                and service_context_id != "pediatric_dentistry"
+            ):
+                target_service = self.knowledge_service.get_service_by_id(str(service_context_id))
             if target_service is None and service_context_id:
                 target_service = self.knowledge_service.get_service_by_id(str(service_context_id))
             if target_service is not None:
@@ -834,7 +842,14 @@ class ReplyService:
                 str(service.get(field) or "")
                 for field in ["name", "description", "price_note"]
             ).lower()
-            if compact_tokens and all(token in service_text for token in compact_tokens):
+            # Word-bounded, not substring: a bare number/word like "16" must
+            # not match inside an unrelated "16000" from another service's
+            # price note (compact_tokens isn't stemmed here, so this only
+            # guards against false substring containment, not word-form
+            # variance).
+            if compact_tokens and all(
+                re.search(rf"\b{re.escape(token)}\b", service_text) for token in compact_tokens
+            ):
                 price_note = service.get("price_note")
                 if price_note:
                     return str(price_note)
@@ -1484,7 +1499,12 @@ class ReplyService:
                 "Відповідай коротко, спокійно і тільки на основі knowledge context.\n"
                 "Не вигадуй послуги, ціни, адресу, графік, політики або доступність календаря.\n"
                 "Не став медичні діагнози і не призначай лікування в чаті.\n"
-                "Якщо питання потребує лікаря або адміністратора, безпечно передай людині або запропонуй запис на візит."
+                "Якщо потрібно щось уточнити в адміністрації клініки (розстрочка, страхування, "
+                "індивідуальні умови тощо) — ніколи не обіцяй перевірити або зв'язатися з "
+                "адміністрацією самостійно. Чітко скажи, що це потрібно уточнити з "
+                "адміністратором. Не збирай ім'я, номер телефону, канал зв'язку або час "
+                "для зворотного контакту, якщо це не звичайний запис на візит.\n"
+                "Якщо питання потребує лікаря або адміністратора, чесно скажи про це і запропонуй запис на візит."
             )
 
         try:
@@ -1878,6 +1898,11 @@ class ReplyService:
                     "Використовуй лише факти з knowledge context.\n"
                     "Не вигадуй послуги, ціни, адресу, графік, політики або доступність календаря.\n"
                     "Якщо користувач просить діагноз, лікування або точний кошторис складного лікування, не вигадуй і поясни, що потрібен огляд лікаря.\n"
+                    "Якщо потрібно щось уточнити в адміністрації клініки (розстрочка, страхування, "
+                    "індивідуальні умови тощо) — ніколи не обіцяй перевірити або зв'язатися з "
+                    "адміністрацією самостійно. Чітко скажи, що це потрібно уточнити з "
+                    "адміністратором. Не збирай ім'я, номер телефону, канал зв'язку або час "
+                    "для зворотного контакту, якщо це не звичайний запис на візит.\n"
                     "Якщо доречно, запропонуй запис на візит без тиску."
                 )
             return (
@@ -1886,6 +1911,11 @@ class ReplyService:
                 "Use only facts from the knowledge context.\n"
                 "Do not invent services, prices, address, working hours, policies, or calendar availability.\n"
                 "If the user asks for a diagnosis, treatment instructions, or an exact complex treatment estimate, explain that a dentist examination is needed.\n"
+                "If something needs to be confirmed with clinic administration (installment plans, "
+                "insurance, individual conditions, etc.) — never promise to check or contact "
+                "administration yourself. Clearly say this needs to be confirmed with an "
+                "administrator, and offer to collect the user's name and phone number so an "
+                "administrator can follow up.\n"
                 "When appropriate, offer to book a visit without pressure."
             )
 

@@ -102,7 +102,116 @@ class MessageProcessor:
         service = knowledge_service.find_confident_service(text)
         if service is not None:
             return service
-        return knowledge_service.find_bounded_consultation_service(text)
+        service = knowledge_service.find_bounded_consultation_service(text)
+        if service is not None:
+            return service
+
+        # Bounded fallback: a supported service named in the message's own
+        # opening clause (e.g. "хочу на огляд, скажіть є де машину
+        # поставити?") must still be recognized even though the matchers
+        # above only look at the whole message and a trailing, unrelated
+        # clause can keep them from matching at all. Retried only on the
+        # first clause -- never on the full text -- so this can't reach
+        # into later content for a match that genuinely isn't there.
+        first_clause, rest = self._split_first_clause(text)
+        if rest:
+            service = knowledge_service.find_confident_service(first_clause)
+            if service is not None:
+                return service
+            service = knowledge_service.find_bounded_consultation_service(first_clause)
+            if service is not None:
+                return service
+        return None
+
+    def _split_first_clause(self, text: str) -> tuple[str, str]:
+        """Splits text into its opening clause and everything after it, on
+        the first comma/semicolon/sentence-ending punctuation. Returns
+        (first_clause, rest) with rest == "" when there is no second
+        clause."""
+        stripped = text.strip()
+        parts = re.split(r"[,;]|(?<=[.!?])\s+", stripped, maxsplit=1)
+        if len(parts) == 2 and parts[1].strip():
+            return parts[0].strip(), parts[1].strip()
+        return stripped, ""
+
+    _UNGROUNDED_LOGISTICS_CLAUSE_ACK = (
+        "Точної інформації з бази для цього уточнення немає — це краще перевірити з адміністратором."
+    )
+
+    # A bare reaction/acknowledgement clause ("шкода.", "добре,", "ясно")
+    # carries no FAQ/logistics content of its own -- it's just
+    # conversational filler reacting to whatever came right before it, not
+    # a second question that needs answering. Bounded to an exact match
+    # against this small closed list (not a general "short clause"
+    # filter), so a genuinely short FAQ like "де ви?" is never affected.
+    _BARE_REACTION_CLAUSE_WORDS = {
+        "шкода",
+        "добре",
+        "ясно",
+        "ок",
+        "окей",
+        "зрозуміло",
+        "зрозумів",
+        "зрозуміла",
+        "гаразд",
+        "звісно",
+        "ага",
+    }
+
+    def _looks_like_bare_reaction_clause(self, text: str) -> bool:
+        compact = re.sub(r"[.!?…,;]+$", "", text.strip().lower()).strip()
+        return compact in self._BARE_REACTION_CLAUSE_WORDS
+
+    def _bounded_logistics_clause(self, text: str) -> str | None:
+        """Splits a two-clause message into a service clause and a separate
+        FAQ/logistics clause, regardless of which clause the recognized
+        service is in -- so both "хочу на огляд, скажіть є де машину
+        поставити?" (service first) and "до котрої працюєте, хочу
+        записатись на огляд" (service second) are found the same way.
+        Returns the logistics clause, or None when the message isn't a
+        genuine two-clause message, when neither clause names a supported
+        service on its own (the common single-clause booking message never
+        reaches here at all), or when the non-service clause is just a
+        bare reaction word ("шкода. тоді хочу на огляд записатись")."""
+        first_clause, rest = self._split_first_clause(text)
+        if not rest:
+            return None
+        if self._find_configured_front_desk_service(first_clause) is not None:
+            logistics_clause = rest
+        elif self._find_configured_front_desk_service(rest) is not None:
+            logistics_clause = first_clause
+        else:
+            return None
+        if self._looks_like_bare_reaction_clause(logistics_clause):
+            return None
+        return logistics_clause
+
+    def _bounded_service_faq_prefix_reply(self, message: NormalizedMessage) -> str | None:
+        """A message that names a recognized service in one clause and
+        raises a separate FAQ/logistics question in the other (either
+        order) must not lose that second question just because the
+        service clause already routes the message into the booking flow.
+        Answers it via the existing grounded-fact lookup, run on the
+        logistics clause in isolation -- so the already-recognized service
+        never leaks into it and makes that lookup return the service's own
+        description instead of the actual second question. When that
+        lookup finds nothing grounded, returns a short, generic
+        acknowledgement that no confirmed answer exists (never an invented
+        fact) so the booking/service flow can still continue. Returns None
+        only when the message is a single, ordinary booking clause -- the
+        overwhelming common case, which never reaches the lookup at all."""
+        logistics_clause = self._bounded_logistics_clause(message.user_message)
+        if not logistics_clause or len(logistics_clause) < 4:
+            return None
+        residual_message = NormalizedMessage(
+            platform=message.platform,
+            sender_id=message.sender_id,
+            recipient_id=message.recipient_id,
+            message_mid="",
+            user_message=logistics_clause,
+        )
+        grounded_reply = self.reply_service.get_contextual_front_desk_reply(residual_message)
+        return grounded_reply or self._UNGROUNDED_LOGISTICS_CLAUSE_ACK
 
     def _effective_booking_service_id(self, service_id: str | None) -> str | None:
         """A knowledge topic keeps its own identity (id/name/description),
@@ -212,6 +321,70 @@ class MessageProcessor:
             "відповім, якщо це є в базі знань."
         )
 
+    def _front_desk_no_visit_service_constraint_reply(
+        self,
+        sender_id: str,
+        text: str,
+    ) -> str | None:
+        if not self._is_configured_front_desk_mode():
+            return None
+        service = self._find_configured_front_desk_service(text)
+        if service is None:
+            return None
+
+        normalized = self._normalize_for_conversation_matching(text)
+        no_visit_markers = [
+            "без візиту",
+            "без визиту",
+            "без прийому",
+            "без огляду",
+            "без консультації",
+            "дистанційно",
+            "дистанционно",
+            "онлайн",
+            "поштою",
+            "почтою",
+            "з доставкою",
+            "доставка",
+            "доставкою",
+        ]
+        if not any(marker in normalized for marker in no_visit_markers):
+            return None
+
+        request_markers = [
+            "можна",
+            "хочу",
+            "треба",
+            "потрібно",
+            "замовити",
+            "заказати",
+            "відправити",
+            "надіслати",
+            "отримати",
+            "набір",
+            "система",
+            "зробити",
+            "поставити",
+            "пройти",
+        ]
+        if not any(marker in normalized for marker in request_markers):
+            return None
+
+        service_id = service.get("id")
+        service_name = str(service.get("name") or "цієї послуги")
+        if self.memory_service is not None:
+            values = {"question_context": "services"}
+            if service_id:
+                values["current_service_id"] = str(service_id)
+                values["current_service_name"] = service_name
+            self.memory_service.update_context(sender_id, **values)
+        return (
+            f"Щодо «{service_name}»: у базі немає підтвердження, що цю послугу можна виконати "
+            "дистанційно, без візиту або з доставкою. Для клінічних процедур потрібен візит "
+            "у клініку та огляд лікаря. Можу зорієнтувати за інформацією з бази або допомогти "
+            "підібрати час на прийом."
+        )
+
     def _has_service_booking_action_signal(self, normalized: str) -> bool:
         action_markers = [
             "хочу",
@@ -272,6 +445,18 @@ class MessageProcessor:
             return False
         has_action = self._has_service_booking_action_signal(normalized)
         has_scheduling = self._has_service_scheduling_signal(normalized)
+        if service.get("id") == "pediatric_dentistry" and not has_scheduling:
+            explicit_pediatric_booking_markers = (
+                "запис",
+                "запиш",
+                "прийом",
+                "візит",
+                "хочу",
+                "треба",
+                "потріб",
+            )
+            if not any(marker in normalized for marker in explicit_pediatric_booking_markers):
+                return False
         if self._looks_like_service_faq_request(normalized) and not has_action:
             return False
 
@@ -471,15 +656,34 @@ class MessageProcessor:
             return False
         return self._has_service_booking_action_signal(normalized) or self._looks_like_booking_message(text)
 
-    def _pain_nearest_offer_followup_service(self, sender_id: str, text: str) -> tuple[str, str] | None:
+    def _pain_nearest_offer_followup_context(self, sender_id: str, text: str) -> tuple[str, str, str] | None:
         if not self._is_configured_front_desk_mode() or self.memory_service is None:
             return None
         context = self.memory_service.get_context(sender_id)
         if context.get("question_context") != "pain_nearest_offer":
             return None
         normalized = self._normalize_for_booking_keywords(text)
+        if self._looks_like_cancel_request(text) or self.booking_service._is_rejection(text):
+            return None
+        asks_for_availability = (
+            self.booking_service._looks_like_nearest_availability_request(text)
+            or self._looks_like_availability_question(text)
+        )
+        has_scheduling_signal = self._has_service_scheduling_signal(normalized)
+        has_booking_action = bool(
+            self._has_service_booking_action_signal(normalized)
+            or self.booking_service._is_confirmation_text(normalized)
+            or re.search(r"\b(?:запиш\w*|записа\w*|прийти|прийом|візит)\b", normalized)
+        )
+        explicit_booking = (
+            self._looks_like_booking_message(text)
+            or self._looks_like_fresh_booking_request(text)
+            or (has_scheduling_signal and has_booking_action)
+        )
         if not (
             self.booking_service._is_confirmation_text(normalized)
+            or asks_for_availability
+            or explicit_booking
             or "передай адміністратор" in normalized
             or "передайте адміністратор" in normalized
             or "уточніть" in normalized
@@ -487,14 +691,27 @@ class MessageProcessor:
         ):
             return None
         knowledge_service = getattr(self.reply_service, "knowledge_service", None)
-        service = (
-            knowledge_service.get_service_by_id("dental_consultation")
-            if knowledge_service is not None
-            else None
-        )
+        service = None
+        context_service_id = context.get("current_service_id")
+        if knowledge_service is not None and context_service_id:
+            service = knowledge_service.get_service_by_id(str(context_service_id))
+        if service is None:
+            service = (
+                knowledge_service.get_service_by_id("dental_consultation")
+                if knowledge_service is not None
+                else None
+            )
         if service is None:
             return None
-        return str(service["id"]), str(service.get("name") or "")
+        mode = "booking" if explicit_booking and not asks_for_availability else "nearest"
+        return str(service["id"]), str(service.get("name") or ""), mode
+
+    def _pain_nearest_offer_followup_service(self, sender_id: str, text: str) -> tuple[str, str] | None:
+        context = self._pain_nearest_offer_followup_context(sender_id, text)
+        if context is None:
+            return None
+        service_id, service_name, _mode = context
+        return service_id, service_name
 
     def _pain_nearest_offer_detail_reply(self, sender_id: str, text: str) -> str | None:
         if not self._is_configured_front_desk_mode() or self.memory_service is None:
@@ -1071,7 +1288,6 @@ class MessageProcessor:
             "які є години",
             "які години",
             "який є вільний час",
-            "які є варіанти",
             "варіанти по часу",
             "коли є",
             "коли можна",
@@ -1107,7 +1323,6 @@ class MessageProcessor:
             "які слоти",
             "які є години",
             "які години",
-            "які є варіанти",
             "варіанти по часу",
             "коли є",
             "коли можна",
@@ -2071,6 +2286,13 @@ class MessageProcessor:
         normalized = self._normalize_for_booking_keywords(text)
         if self.booking_service._is_confirmation_text(normalized):
             return True
+        # A "nearest available" follow-up ("а найближчий вільний день
+        # який?") after a service was just discussed (e.g. a price answer)
+        # is exactly as much a booking-continuation signal as the literal
+        # markers below -- reuses the existing, already-bounded nearest-
+        # availability detector rather than adding new ad-hoc phrases here.
+        if self.booking_service._looks_like_nearest_availability_request(text):
+            return True
         markers = [
             "підходить",
             "підійде",
@@ -2853,8 +3075,55 @@ class MessageProcessor:
             return
         self.memory_service.update_context(sender_id, pending_reschedule=None)
 
+    def _looks_like_own_contact_phone_correction(self, text: str) -> str | None:
+        """Detects an explicit correction of the patient's OWN phone number
+        on an already-confirmed booking (e.g. "ой, помилився номером,
+        правильний 0509998877") -- bounded to requiring both a real phone
+        number AND an explicit mistake/correction marker, so a bare phone
+        number sent post-confirmation for some unrelated reason (e.g.
+        quoting it back, an unrelated question that happens to contain
+        digits) is never treated as changing anything. Returns the matched
+        phone number, or None."""
+        phone_match = self.booking_service.PHONE_RE.search(text)
+        if not phone_match:
+            return None
+        normalized = self._normalize_for_booking_keywords(text)
+        correction_markers = [
+            "помил",
+            "не той номер",
+            "не той телефон",
+            "неправильн",
+            "правильний номер",
+            "правильний телефон",
+            "виправ",
+            "змін",
+            "актуальний номер",
+            "актуальний телефон",
+            "справжній номер",
+            "справжній телефон",
+            "насправді",
+        ]
+        if not any(marker in normalized for marker in correction_markers):
+            return None
+        return phone_match.group(1)
+
     def _handle_confirmed_booking_message(self, message: NormalizedMessage) -> Dict[str, Any] | None:
         language = self.reply_service.detect_user_language(message.user_message)
+
+        phone_correction = self._looks_like_own_contact_phone_correction(message.user_message)
+        if phone_correction is not None:
+            booking_result = self.booking_service.update_confirmed_booking_phone(
+                message.sender_id,
+                phone_correction,
+                message.user_message,
+            )
+            if booking_result is not None:
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_contact_correction",
+                    booking_result=booking_result,
+                )
 
         if self._looks_like_reschedule_request(
             message.user_message
@@ -2921,6 +3190,17 @@ class MessageProcessor:
             )
 
         if self.booking_service.looks_like_booking_status_question(message.user_message):
+            reply_text = self.booking_service.get_confirmed_booking_status_reply(
+                message.sender_id,
+                language,
+            )
+            return self._build_booking_reply_result(
+                message=message,
+                reply_text=reply_text,
+                intent_value="booking_status_confirmed",
+            )
+
+        if self.booking_service._is_confirmation_text(message.user_message):
             reply_text = self.booking_service.get_confirmed_booking_status_reply(
                 message.sender_id,
                 language,
@@ -3825,6 +4105,10 @@ class MessageProcessor:
         ):
             self._invalidate_stale_pending_reschedule(message.sender_id, message.user_message)
 
+            confirmed_result = self._handle_confirmed_booking_message(message)
+            if confirmed_result is not None:
+                return confirmed_result
+
             if self._looks_like_fresh_booking_request(message.user_message):
                 unknown_detail_reply = self._unknown_service_detail_reply_for_booking(
                     message.sender_id,
@@ -3854,16 +4138,16 @@ class MessageProcessor:
                     current_service_id=booking_service_id,
                     current_service_name=booking_service_name,
                 )
+                faq_prefix = self._bounded_service_faq_prefix_reply(message)
+                reply_text = booking_result["reply_text"]
+                if faq_prefix:
+                    reply_text = f"{faq_prefix}\n\n{reply_text}"
                 return self._build_booking_reply_result(
                     message=message,
-                    reply_text=booking_result["reply_text"],
+                    reply_text=reply_text,
                     intent_value="booking_request",
                     booking_result=booking_result,
                 )
-
-            confirmed_result = self._handle_confirmed_booking_message(message)
-            if confirmed_result is not None:
-                return confirmed_result
 
         if booking_state == BookingState.NONE and not self.booking_service.has_confirmed_booking(
             message.sender_id
@@ -3900,19 +4184,28 @@ class MessageProcessor:
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
 
-        pain_followup_service = self._pain_nearest_offer_followup_service(
+        pain_followup_context = self._pain_nearest_offer_followup_context(
             message.sender_id,
             message.user_message,
         )
-        if pain_followup_service is not None:
-            service_id, service_name = pain_followup_service
-            booking_result = self.booking_service.handle_nearest_availability_request(
-                sender_id=message.sender_id,
-                message_text=message.user_message,
-                source_channel=message.platform,
-                current_service_id=service_id,
-                current_service_name=service_name,
-            )
+        if pain_followup_context is not None:
+            service_id, service_name, followup_mode = pain_followup_context
+            if followup_mode == "booking":
+                booking_result = self._start_front_desk_booking_flow(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                    current_service_id=service_id,
+                    current_service_name=service_name,
+                )
+            else:
+                booking_result = self.booking_service.handle_nearest_availability_request(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                    current_service_id=service_id,
+                    current_service_name=service_name,
+                )
             if self.memory_service is not None:
                 self.memory_service.update_context(
                     message.sender_id,
@@ -3958,6 +4251,19 @@ class MessageProcessor:
                 message=message,
                 reply_text=reply_text,
                 intent_value=reason,
+                routing_category="safe_handoff",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
+        no_visit_constraint_reply = self._front_desk_no_visit_service_constraint_reply(
+            message.sender_id,
+            message.user_message,
+        )
+        if no_visit_constraint_reply is not None:
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=no_visit_constraint_reply,
+                intent_value="front_desk_safe_fallback",
                 routing_category="safe_handoff",
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
@@ -4062,11 +4368,15 @@ class MessageProcessor:
         ):
             language = self.reply_service.detect_user_language(message.user_message)
             if self.memory_service is not None:
-                self.memory_service.update_context(
-                    message.sender_id,
-                    question_context="pain_nearest_offer",
-                    pain_context_summary=message.user_message[:280],
-                )
+                update_values = {
+                    "question_context": "pain_nearest_offer",
+                    "pain_context_summary": message.user_message[:280],
+                }
+                pain_service = self._find_configured_front_desk_service(message.user_message)
+                if pain_service is not None and pain_service.get("id"):
+                    update_values["current_service_id"] = str(pain_service["id"])
+                    update_values["current_service_name"] = str(pain_service.get("name") or "")
+                self.memory_service.update_context(message.sender_id, **update_values)
             return self._build_direct_reply_result(
                 message=message,
                 reply_text=self.booking_service.get_pain_acknowledgement_reply(language),
@@ -4130,9 +4440,23 @@ class MessageProcessor:
         ):
             contextual_front_desk_reply = self.reply_service.get_contextual_front_desk_reply(message)
             if contextual_front_desk_reply:
+                reply_text = contextual_front_desk_reply
+                # A second, independent grounded FAQ question in the same
+                # message (e.g. "...і чи є розстрочка?") must not be lost
+                # just because the service+price question above already
+                # answered. Reuses the existing single-fact FAQ lookup
+                # as-is on the full message -- never invents anything when
+                # it finds nothing, and never duplicates text already
+                # covered by the price answer above.
+                knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+                if knowledge_service is not None:
+                    language = self.reply_service.detect_user_language(message.user_message)
+                    extra_faq_answer = knowledge_service.find_faq_answer(message.user_message, language)
+                    if extra_faq_answer and extra_faq_answer not in reply_text:
+                        reply_text = f"{reply_text}\n\n{extra_faq_answer}"
                 return self._build_direct_reply_result(
                     message=message,
-                    reply_text=contextual_front_desk_reply,
+                    reply_text=reply_text,
                     intent_value="front_desk_contextual_answer",
                     routing_category="answered_basic",
                     intent_for_policy=IntentType.GENERAL_QUESTION,
@@ -4323,9 +4647,13 @@ class MessageProcessor:
                     current_service_id=booking_service_id,
                     current_service_name=booking_service_name,
                 )
+                faq_prefix = self._bounded_service_faq_prefix_reply(message)
+                reply_text = booking_result["reply_text"]
+                if faq_prefix:
+                    reply_text = f"{faq_prefix}\n\n{reply_text}"
                 return self._build_booking_reply_result(
                     message=message,
-                    reply_text=booking_result["reply_text"],
+                    reply_text=reply_text,
                     intent_value="booking_request",
                     booking_result=booking_result,
                 )
