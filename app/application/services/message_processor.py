@@ -264,6 +264,8 @@ class MessageProcessor:
             "вартість",
             "прайс",
             "дорожч",
+            "дешевш",
+            "скок",
             "платн",
             "боляче",
             "трива",
@@ -301,6 +303,8 @@ class MessageProcessor:
                 "прайс",
                 "price",
                 "cost",
+                "дешевш",
+                "дорожч",
             ]
         )
 
@@ -1082,6 +1086,26 @@ class MessageProcessor:
 
     def _has_active_booking_payload(self, text: str) -> bool:
         if self._looks_like_business_hours_question(text):
+            return False
+        if (
+            self._find_configured_front_desk_service(text) is not None
+            and text.strip().endswith("?")
+            and not self._has_service_booking_action_signal(self._normalize_for_booking_keywords(text))
+            and not self._looks_like_active_booking_service_correction(text)
+            and not re.search(r"\b(?:давайте|давай)\b", self._normalize_for_booking_keywords(text))
+        ):
+            # A bare "X?" naming a different service ("А елайнери?") is an
+            # FAQ-style follow-up, not a booking-payload/correction attempt
+            # -- checked before every other signal below (including
+            # _service_from_missing_service_reply, which would otherwise
+            # resolve the same service and return True first) so it can
+            # fall through to the grounded-reply path instead of being
+            # treated as active-booking data. Excludes anything with an
+            # action word, an explicit correction word, or "давайте/давай"
+            # (a suggestion cue that -- unlike the other exclusions --
+            # isn't itself recognized elsewhere either, so leaving it out
+            # of the bypass keeps today's behavior for it unchanged rather
+            # than guessing at a new interpretation).
             return False
         if self._looks_like_cancel_request(text) or self._looks_like_reschedule_request(text):
             return True

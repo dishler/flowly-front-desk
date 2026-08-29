@@ -2243,6 +2243,117 @@ async def test_dental_braces_price_then_implant_cheaper_uses_implant_grounded_pr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected_fragment"),
+    [
+        ("А елайнери?", "60000 грн"),
+        ("А імпланти?", "16000 грн"),
+        ("А відбілювання?", "4500 грн"),
+        ("А зуб мудрості?", "3500 грн"),
+        ("Елайнери?", "60000 грн"),
+        ("А елайнери дешевші?", "60000 грн"),
+        ("а скок елайнери?", "60000 грн"),
+    ],
+)
+async def test_dental_bare_service_question_during_active_booking_answers_faq_not_switch(text, expected_fragment):
+    """A bare "X?" naming a different service while a booking is already
+    in progress (WAITING_FOR_TIME) must be answered as an FAQ/comparison
+    follow-up -- not swallowed into a booking-payload/switch attempt that
+    falls back to the generic clarify prompt."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу записатись на консультацію"))
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message(text))
+
+    assert expected_fragment in result["reply_text"]
+    assert "Хочу правильно зорієнтувати" not in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ["краще елайнери", "хочу на елайнери", "давайте елайнери", "ні, елайнери"],
+)
+async def test_dental_explicit_service_switch_during_active_booking_still_works(text):
+    """Explicit/likely switch phrasing (no bare "?") during an active
+    booking must keep resuming the booking flow for the new service --
+    completely unaffected by the bare-question bypass, since none of
+    these end in "?"."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу записатись на консультацію"))
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message(text))
+
+    assert "Хочу правильно зорієнтувати" not in result["reply_text"]
+    assert "який день і приблизний час" in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ["а може краще елайнери?", "можна елайнери?", "давайте елайнери?"],
+)
+async def test_dental_ambiguous_question_plus_switch_wording_stays_unchanged(text):
+    """Known, deliberately unresolved ambiguity: a "?"-ending message that
+    ALSO carries a correction/action/suggestion cue ("краще", "можна",
+    "давайте") is excluded from the bare-question bypass by design, so it
+    keeps whatever behavior it already had before this patch (currently
+    the generic clarify fallback) -- this locks that choice in rather than
+    silently drifting if the bypass is ever broadened."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу записатись на консультацію"))
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message(text))
+
+    assert "Хочу правильно зорієнтувати" in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_faq_interruption_during_active_booking_preserves_pending_date_and_service():
+    """A bare-question FAQ interruption mid-booking must not erase the
+    already-collected day -- the very next genuine time reply must still
+    check availability for the originally requested service and date."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу записатись на чистку зубів"))
+    await processor.process(_message("у понеділок"))
+    faq_result = await processor.process(_message("А елайнери?"))
+    continuation = await processor.process(_message("о 15"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert "Хочу правильно зорієнтувати" not in faq_result["reply_text"]
+    assert pending.get("current_service_id") == "dental_cleaning"
+    assert pending.get("start_dt") is not None
+    assert len(calendar.checked) == 1
+    assert calendar.checked[0]["start_dt"].hour == 15
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_faq_interruptions_after_confirmed_booking_cause_no_calendar_mutation():
+    """FAQ/comparison questions asked after a booking is already confirmed
+    must never touch the Calendar -- no create, update, or delete."""
+    calendar = ContactUpdateTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor, event_id="calendar-event-999")
+
+    for text in ["А елайнери?", "А імпланти?", "а скок елайнери?", "А елайнери дешевші?"]:
+        await processor.process(_message(text))
+
+    assert calendar.created == []
+    assert calendar.contact_updates == []
+
+
+@pytest.mark.asyncio
 async def test_dental_explicit_supported_service_switch_beats_previous_topic():
     processor, calendar = _build_dental_processor()
 
