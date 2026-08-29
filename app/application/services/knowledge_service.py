@@ -702,6 +702,41 @@ class KnowledgeService:
             if isinstance(option, dict) and option.get("label") and option.get("price_note")
         ]
 
+    # Words too generic across the whole dental domain to count as proof
+    # that an FAQ item is actually *about* a given service, for the
+    # purpose of _find_contextual_faq_answer's own service_overlap check
+    # below -- "для" is a bare preposition, and "зуб"/"зуби"/etc. and
+    # "щелеп*" appear in nearly every service's aliases regardless of what
+    # the FAQ is actually asking about (e.g. "капи для вирівнювання" for
+    # aligners, or "кт щелепи" for X-ray diagnostics, neither of which
+    # makes the braces-specific "is the price per jaw?" FAQ relevant to
+    # that service). The "зуб*" portion mirrors an existing, separate
+    # generic-word list already used by _contextual_faq_detail_tokens for
+    # a related purpose; that list is left untouched here to avoid
+    # changing its own, already-working behavior.
+    _GENERIC_DENTAL_OVERLAP_TOKENS = frozenset(
+        {
+            "можна",
+            "можн",
+            "треба",
+            "треб",
+            "потрібно",
+            "потріб",
+            "тільки",
+            "саме",
+            "зуб",
+            "зуби",
+            "зуба",
+            "зубів",
+            "процедура",
+            "процедури",
+            "для",
+            "щелеп",
+            "щелепи",
+            "щелепу",
+        }
+    )
+
     def _find_contextual_faq_answer(
         self,
         service: dict[str, Any],
@@ -720,7 +755,12 @@ class KnowledgeService:
                 continue
 
             query_overlap = sum(1 for token in query_tokens if self._token_matches_any(token, question_tokens))
-            service_overlap = sum(1 for token in question_tokens if self._token_matches_any(token, service_terms))
+            service_overlap = sum(
+                1
+                for token in question_tokens
+                if token not in self._GENERIC_DENTAL_OVERLAP_TOKENS
+                and self._token_matches_any(token, service_terms)
+            )
             detail_tokens = self._contextual_faq_detail_tokens(question_tokens, service_terms)
             detail_overlap = sum(
                 1 for token in query_tokens if self._token_matches_any(token, detail_tokens)

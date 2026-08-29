@@ -811,6 +811,98 @@ async def test_dental_typo_tolerant_matching_never_overrides_exact_match():
 
 
 @pytest.mark.asyncio
+async def test_dental_per_jaw_faq_answers_correctly_in_braces_context():
+    """Repro: "це за одну щелепу?" in a genuine braces context must return
+    the real per-jaw pricing FAQ."""
+    knowledge_service = KnowledgeService("app/data/knowledge_base.json")
+    braces = knowledge_service.get_service_by_id("braces")
+    normalized = knowledge_service._normalize_question_for_match("це за одну щелепу?")
+
+    answer = knowledge_service._find_contextual_faq_answer(braces, normalized, "uk")
+
+    assert answer is not None
+    assert "за одну щелепу" in answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "service_id",
+    [
+        "aligners",
+        "dental_cleaning",
+        "dental_consultation",
+        "dental_diagnostics",
+        "pediatric_cleaning",
+        "teeth_whitening",
+        "orthodontic_consultation",
+        "pediatric_dentistry",
+    ],
+)
+async def test_dental_per_jaw_faq_never_leaks_into_unrelated_service_context(service_id):
+    """Repro: the braces-specific "per jaw" FAQ must never be returned for
+    a service it has nothing to do with -- confirmed leak class caused by
+    generic words ("для", "зуб*", "щелеп*") counting as meaningful
+    service-specific overlap."""
+    knowledge_service = KnowledgeService("app/data/knowledge_base.json")
+    service = knowledge_service.get_service_by_id(service_id)
+    normalized = knowledge_service._normalize_question_for_match("це за одну щелепу?")
+
+    answer = knowledge_service._find_contextual_faq_answer(service, normalized, "uk")
+
+    assert answer is None
+
+
+@pytest.mark.asyncio
+async def test_dental_per_jaw_faq_leak_fixed_end_to_end_for_aligners():
+    """End-to-end repro of the exact reported production conversation:
+    asking the per-jaw question right after an aligners price answer must
+    not get the braces-specific per-jaw claim."""
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують елайнери?"))
+    result = await processor.process(_message("це за одну щелепу?"))
+
+    assert "за одну щелепу" not in result["reply_text"]
+
+
+@pytest.mark.asyncio
+async def test_dental_per_jaw_faq_still_works_end_to_end_for_braces():
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("це за одну щелепу?"))
+
+    assert "за одну щелепу" in result["reply_text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("service_id", "query", "expected_fragment"),
+    [
+        ("dental_cleaning", "Скільки коштує чистка?", "1800 грн"),
+        ("veneers", "треба обточувати зуб під вініри?", "клінічної ситуації"),
+        ("wisdom_tooth_extraction", "треба видаляти всі зуби мудрості?", "індивідуально"),
+        ("dental_implant", "давно немає зуба, чи можна імплант?", "рентген-діагностики"),
+        ("pediatric_cleaning", "скільки коштує дитяча чистка зубів?", "1200 грн"),
+    ],
+)
+async def test_dental_legitimate_contextual_faq_answers_still_work(service_id, query, expected_fragment):
+    """Existing, genuinely-relevant contextual FAQ matches must survive
+    the generic-word exclusion -- this isn't a blanket tightening, only
+    the specific generic tokens are excluded from counting as
+    service-specific overlap."""
+    knowledge_service = KnowledgeService("app/data/knowledge_base.json")
+    service = knowledge_service.get_service_by_id(service_id)
+    normalized = knowledge_service._normalize_question_for_match(query)
+
+    answer = knowledge_service._find_contextual_faq_answer(service, normalized, "uk")
+
+    assert answer is not None
+    if expected_fragment:
+        assert expected_fragment in answer
+
+
+@pytest.mark.asyncio
 async def test_dental_pricing_short_followup_uses_recent_price_context(dental_processor):
     processor, _calendar = dental_processor
 
