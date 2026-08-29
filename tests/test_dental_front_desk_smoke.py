@@ -2163,6 +2163,86 @@ async def test_dental_aligners_comparison_followups_do_not_hijack_to_braces():
 
 
 @pytest.mark.asyncio
+async def test_dental_braces_price_then_aligners_cheaper_comparison_answers_aligners_price():
+    """Repro: after a брекети price answer, "а елайнери дешевші?" must be
+    understood as a comparison naming aligners -- and answered with
+    aligners' own grounded price, not the previous braces summary/price."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А елайнери дешевші?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "60000 грн" in result["reply_text"]
+    assert "Брекети встановлюють" not in result["reply_text"]
+    assert context["current_service_id"] == "aligners"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_price_then_ceramic_more_expensive_narrows_to_ceramic_option():
+    """"А керамічні дорожчі?" names a price *option* of the same
+    already-discussed service (brackets), not a different service -- must
+    narrow to just the ceramic price, not repeat the full brackets price
+    list or fall back to a generic summary."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А керамічні дорожчі?"))
+
+    assert "30000 грн" in result["reply_text"]
+    assert "19000 грн" not in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_price_then_aligners_how_much_answers_aligners_price():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А елайнери скільки?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "60000 грн" in result["reply_text"]
+    assert context["current_service_id"] == "aligners"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_price_then_what_is_cheaper_repeats_grounded_known_price():
+    """With no alternative named, "а що дешевше?" must not invent a
+    comparison verdict -- restating the already-known grounded price is
+    the safe, non-inventing answer."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А що дешевше?"))
+
+    assert "19000 грн" in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_price_then_implant_cheaper_uses_implant_grounded_price():
+    """Adversarial: the comparison target can be any other real service,
+    not just aligners -- must never be hardcoded to one phrase/service."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А імпланти дешевші?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "16000 грн" in result["reply_text"]
+    assert context["current_service_id"] == "dental_implant"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_explicit_supported_service_switch_beats_previous_topic():
     processor, calendar = _build_dental_processor()
 
@@ -2446,7 +2526,7 @@ async def test_dental_human_handoff_request_is_acknowledged_without_fake_transfe
     assert result["routing_category"] == "safe_handoff"
     assert "AI-асистент" in result["reply_text"]
     assert "адміністратор" in result["reply_text"]
-    assert "зможе повернутися" in result["reply_text"]
+    assert "повернеться" in result["reply_text"]
     assert "передав" not in result["reply_text"].lower()
     assert result["booking_result"] is None
     assert calendar.checked == []

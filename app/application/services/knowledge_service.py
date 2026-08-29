@@ -365,6 +365,28 @@ class KnowledgeService:
                 return {"kind": "price", "service": consultation_service}
             return {"kind": "consultation_summary", "service": consultation_service}
 
+        if (
+            resolved_service is not None
+            and resolved_service.get("id") != service.get("id")
+            and (
+                self._looks_like_price_query(normalized)
+                or "дешевш" in normalized
+                or "дорожч" in normalized
+            )
+        ):
+            # The message explicitly names a different service while
+            # comparing prices (e.g. "а елайнери дешевші?" right after a
+            # брекети price answer) -- answer with THAT service's own
+            # grounded price, not the previously-discussed one's price or
+            # summary again. Checked only after the specialty-consultation
+            # redirect above, so a generic "консультація" mention while in
+            # a specialty context still redirects there first instead of
+            # being treated as "a different service to compare against."
+            price_options = self._matching_price_options(resolved_service, normalized)
+            if price_options:
+                return {"kind": "price_options", "price_options": price_options, "service": resolved_service}
+            return {"kind": "price", "service": resolved_service}
+
         if self._looks_like_price_query(normalized) and self._looks_like_total_price_followup(normalized):
             return {"kind": "price", "service": service}
 
@@ -650,6 +672,11 @@ class KnowledgeService:
                 "дешевше",
                 "дешевший",
                 "дешевша",
+                "дешевші",
+                "дорожче",
+                "дорожчий",
+                "дорожча",
+                "дорожчі",
                 "недорого",
             ]
         )
