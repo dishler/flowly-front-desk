@@ -10164,3 +10164,39 @@ async def test_dental_active_booking_cancel_and_reschedule_still_route_to_bookin
 
     assert reschedule["booking_result"]["status"] == "rescheduled"
     assert len(calendar.rescheduled) == 1
+
+
+async def test_dental_fresh_service_booking_does_not_inherit_stale_unconfirmed_date():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на огляд"))
+    stale_date = await processor.process(_message("післязавтра"))
+    checks_before = len(calendar.checked)
+    result = await processor.process(_message("хочу на чистку"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert stale_date["booking_result"]["status"] == "waiting_for_time"
+    assert stale_date["booking_result"]["requested_date"] == "2026-08-24"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "післязавтра" not in result["reply_text"].lower()
+    assert "який день" in result["reply_text"].lower() or "день і приблизний час" in result["reply_text"].lower()
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending.get("requested_date") is None
+    assert pending.get("start_dt") is None
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+async def test_dental_missing_service_continuation_still_preserves_previous_date():
+    processor, calendar = _build_dental_processor()
+
+    first = await processor.process(_message("хочу записатись післязавтра"))
+    result = await processor.process(_message("на чистку"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert first["booking_result"]["status"] == "waiting_for_service"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert "післязавтра" in result["reply_text"].lower()
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending["requested_date"] == "2026-08-24"
+    assert calendar.created == []

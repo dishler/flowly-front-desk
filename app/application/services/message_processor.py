@@ -1426,6 +1426,69 @@ class MessageProcessor:
             or self._looks_like_business_hours_question(text)
         )
 
+    def _reset_stale_temporal_context_for_fresh_booking(self, sender_id: str, text: str) -> None:
+        if self.booking_service.get_booking_state(sender_id) != BookingState.WAITING_FOR_TIME:
+            return
+        pending = self.booking_service._get_pending_confirmation(sender_id) or {}
+        if not pending or pending.get("missing_service"):
+            return
+        if self._find_configured_front_desk_service(text) is None:
+            return
+        if self._looks_like_active_booking_service_correction(text):
+            return
+        if self._message_has_temporal_booking_signal(text):
+            return
+
+        changed = False
+        for key in [
+            "start_dt",
+            "requested_date",
+            "requested_day_label",
+            "availability_context",
+            "busy_alternative",
+            "suggested_slots",
+            "last_suggested_day",
+            "time_window",
+            "preferred_time_window",
+        ]:
+            if key in pending:
+                pending.pop(key, None)
+                changed = True
+        if changed:
+            self.booking_service._save_pending_confirmation(sender_id, pending)
+
+    def _message_has_temporal_booking_signal(self, text: str) -> bool:
+        return (
+            self.booking_service._extract_requested_date(text) is not None
+            or self.booking_service._parse_requested_datetime(text) is not None
+            or self.booking_service._parse_time_only(text) is not None
+            or self._looks_like_time_window_constraint(text)
+            or self.booking_service._extract_daypart(text) is not None
+            or self.booking_service._looks_like_nearest_availability_request(text)
+            or self.booking_service._looks_like_weekend_availability_request(text)
+            or self.booking_service._looks_like_next_week_request(text)
+            or self._looks_like_availability_question(text)
+            or self._looks_like_patient_asks_clinic_to_choose_time(text)
+        )
+
+    def _looks_like_active_booking_service_correction(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        padded = f" {normalized} "
+        return any(
+            marker in padded
+            for marker in [
+                " ні ",
+                " не ",
+                " а не ",
+                " краще ",
+                " переплутав",
+                " переплутала",
+                " замість ",
+                " instead ",
+                " rather ",
+            ]
+        )
+
     def _looks_like_offered_slot_ordinal_reply(self, text: str) -> bool:
         normalized = self._normalize_for_booking_keywords(text)
         normalized = re.sub(
@@ -3714,6 +3777,10 @@ class MessageProcessor:
                     fallback_service_id=active_service_id,
                     fallback_service_name=active_service_name,
                 )
+                self._reset_stale_temporal_context_for_fresh_booking(
+                    message.sender_id,
+                    message.user_message,
+                )
                 booking_result = self._start_front_desk_booking_flow(
                     sender_id=message.sender_id,
                     message_text=message.user_message,
@@ -3957,6 +4024,11 @@ class MessageProcessor:
                     if booking_service_name:
                         pending["current_service_name"] = booking_service_name
                     self.booking_service._save_pending_confirmation(message.sender_id, pending)
+                    self._reset_stale_temporal_context_for_fresh_booking(
+                        message.sender_id,
+                        message.user_message,
+                    )
+                    pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
 
                 requested_dt_override = None
                 if (
