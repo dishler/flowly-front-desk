@@ -514,6 +514,17 @@ class BookingService:
             )
         )
 
+    def _looks_like_clinic_should_choose_time(self, text: str) -> bool:
+        normalized = self._normalize_booking_text(text)
+        if not normalized:
+            return False
+        return bool(
+            self._looks_like_any_day_selection(text)
+            or re.search(r"\b(?:підберіть|підбери|оберіть|обери)\b", normalized)
+            or re.search(r"\b(?:як|коли)\s+вам\s+зручн\w*\b", normalized)
+            or re.search(r"\b(?:мені\s+)?(?:без\s+різниці|все\s+одно)\b", normalized)
+        )
+
     def _looks_like_booking_intent_reaffirmation(self, text: str) -> bool:
         normalized = self._normalize_booking_text(text)
         if not normalized:
@@ -531,10 +542,7 @@ class BookingService:
         return any(marker in normalized for marker in markers)
 
     def _build_unavailable_reply(self, language: str) -> str:
-        slots = self.calendar_service.get_available_slots(language)
-        if not slots:
-            slots = self.calendar_service.get_fallback_slots(language)
-        return f"На цей час слот уже зайнятий. Можу запропонувати: {', '.join(slots)}."
+        return "На цей час слот уже зайнятий. Підкажіть, будь ласка, інший день або час?"
 
     def _build_availability_check_failed_reply(self, language: str) -> str:
         return "Не вдалося перевірити доступність цього часу. Напишіть, будь ласка, бажаний день і час, і ми перевіримо запис."
@@ -4187,6 +4195,23 @@ class BookingService:
                 if self.PHONE_RE.search(message_text) or self.EMAIL_RE.search(message_text)
                 else self._extract_contact_details(message_text)
             )
+            if (
+                len(candidate_slots) == 1
+                and not pending.get("busy_alternative")
+                and self._has_required_contact(
+                    customer_name=contact_details["customer_name"] or pending.get("customer_name"),
+                    email=contact_details["email"] or pending.get("contact_email"),
+                    phone=contact_details["phone"] or pending.get("contact_phone"),
+                )
+            ):
+                return self.start_booking_flow(
+                    sender_id=sender_id,
+                    message_text=message_text,
+                    source_channel=source_channel or pending.get("source_channel"),
+                    requested_dt_override=candidate_slots[0],
+                    current_service_id=pending.get("current_service_id"),
+                    current_service_name=pending.get("current_service_name"),
+                )
             if self._has_required_contact(
                 customer_name=contact_details["customer_name"] or pending.get("customer_name"),
                 email=contact_details["email"] or pending.get("contact_email"),
@@ -5721,7 +5746,10 @@ class BookingService:
                 else None
             )
             requested_day_label = requested_day_label or previous_pending.get("requested_day_label")
-            if requested_date is None and self._looks_like_nearest_availability_request(message_text):
+            if requested_date is None and (
+                self._looks_like_nearest_availability_request(message_text)
+                or self._looks_like_clinic_should_choose_time(message_text)
+            ):
                 return self.handle_nearest_availability_request(
                     sender_id=sender_id,
                     message_text=message_text,

@@ -173,6 +173,45 @@ class MessageProcessor:
         ]
         return any(marker in normalized for marker in faq_markers)
 
+    def _looks_like_front_desk_price_request(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        if any(marker in normalized for marker in ["скільки часу", "як довго", "скільки трива"]):
+            return False
+        return any(
+            marker in normalized
+            for marker in [
+                "скільки",
+                "скок",
+                "коштує",
+                "коштуе",
+                "коштувати",
+                "ціна",
+                "ціну",
+                "ціни",
+                "вартість",
+                "прайс",
+                "price",
+                "cost",
+            ]
+        )
+
+    def _looks_like_front_desk_chat_discussion_request(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        chat_markers = ["в чаті", "у чаті", "тут", "повідомленнями", "текстом"]
+        avoid_call_markers = ["не на дзвінок", "без дзвінка", "не дзвінок", "не дзвон", "а в чаті"]
+        discuss_markers = ["обговорити", "поговорити", "уточнити", "розказати", "пояснити"]
+        return (
+            any(marker in normalized for marker in chat_markers)
+            and any(marker in normalized for marker in avoid_call_markers + discuss_markers)
+        )
+
+    def _get_front_desk_chat_discussion_reply(self) -> str:
+        return (
+            "Так, у чаті можу зорієнтувати за базовою інформацією з клініки. "
+            "Точний план і вартість лікар визначає після огляду, але можете написати питання тут — "
+            "відповім, якщо це є в базі знань."
+        )
+
     def _has_service_booking_action_signal(self, normalized: str) -> bool:
         action_markers = [
             "хочу",
@@ -223,6 +262,9 @@ class MessageProcessor:
     def _looks_like_service_booking_request(self, text: str) -> bool:
         service = self._find_configured_front_desk_service(text)
         if service is None:
+            return False
+
+        if self._looks_like_front_desk_chat_discussion_request(text):
             return False
 
         normalized = self._normalize_for_booking_keywords(text)
@@ -605,6 +647,7 @@ class MessageProcessor:
             or self.booking_service._parse_time_only(text) is not None
             or self.booking_service._extract_time_window(text) is not None
             or self.booking_service._extract_daypart(text) is not None
+            or self._looks_like_patient_asks_clinic_to_choose_time(text)
             or self.booking_service.PHONE_RE.search(text)
             or self.booking_service.EMAIL_RE.search(text)
         ):
@@ -1100,6 +1143,14 @@ class MessageProcessor:
 
         return "підлаштуюсь" in normalized and "що є" in normalized
 
+    def _looks_like_patient_asks_clinic_to_choose_time(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        if not normalized:
+            return False
+        if self._looks_like_business_hours_question(text):
+            return False
+        return self.booking_service._looks_like_clinic_should_choose_time(text)
+
     def _looks_like_offered_slot_ordinal_reply(self, text: str) -> bool:
         normalized = self._normalize_for_booking_keywords(text)
         normalized = re.sub(
@@ -1363,7 +1414,42 @@ class MessageProcessor:
 
         return None
 
+    def _looks_like_human_handoff_request(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        has_human = any(
+            marker in normalized
+            for marker in [
+                "живу людин",
+                "жива людина",
+                "людину",
+                "людина",
+                "оператор",
+                "адміністратор",
+                "администратор",
+                "менеджер",
+                "не хочу з ботом",
+                "не хочу з роботом",
+            ]
+        )
+        has_request = any(
+            marker in normalized
+            for marker in ["дайте", "дай", "можна", "хочу", "поклич", "підключ", "перемк", "говорити", "спілкуват"]
+        )
+        return has_human and has_request
+
+    def _get_human_handoff_request_reply(self) -> str:
+        return (
+            "Розумію. Я AI-асистент, а для відповіді людини краще залиште, будь ласка, "
+            "коротко ваше питання і номер телефону — адміністратор клініки зможе повернутися до вас."
+        )
+
     def _get_bot_identity_reply(self) -> str:
+        if self._is_configured_front_desk_mode():
+            return (
+                "Я AI-асистент Smile Dental Clinic. Допомагаю відповісти на типові питання "
+                "і підібрати час для запису; якщо питання потребує лікаря або адміністратора, "
+                "краще уточнити його з командою клініки."
+            )
         return (
             "Я AI-асистент Flowly, але відповідаю по суті задачі, не як форма 🙂 "
             "Можу пояснити сценарій для вашого каналу і передати команді, якщо захочете "
@@ -3222,6 +3308,15 @@ class MessageProcessor:
                         fallback_service_name=active_service_name,
                     )
 
+            if self._looks_like_human_handoff_request(message.user_message):
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=self._get_human_handoff_request_reply(),
+                    intent_value="human_handoff_request",
+                    routing_category="safe_handoff",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
             if self._looks_like_capability_question(message.user_message):
                 return self._build_capability_question_result(message)
 
@@ -3378,6 +3473,42 @@ class MessageProcessor:
                         fallback_service_id=active_service_id,
                         fallback_service_name=active_service_name,
                     )
+
+            if (
+                booking_state == BookingState.WAITING_FOR_TIME
+                and self._looks_like_patient_asks_clinic_to_choose_time(message.user_message)
+            ):
+                pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
+                if pending.get("week_anchor_date"):
+                    booking_result = self.booking_service.process_booking_message(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        source_channel=message.platform,
+                    )
+                    if booking_result is not None:
+                        return self._build_booking_reply_result(
+                            message=message,
+                            reply_text=booking_result["reply_text"],
+                            intent_value="booking_flow",
+                            booking_result=booking_result,
+                            fallback_service_id=active_service_id,
+                            fallback_service_name=active_service_name,
+                        )
+                booking_result = self.booking_service.handle_nearest_availability_request(
+                    sender_id=message.sender_id,
+                    message_text=message.user_message,
+                    source_channel=message.platform,
+                    current_service_id=active_service_id,
+                    current_service_name=active_service_name,
+                )
+                return self._build_booking_reply_result(
+                    message=message,
+                    reply_text=booking_result["reply_text"],
+                    intent_value="booking_nearest_availability",
+                    booking_result=booking_result,
+                    fallback_service_id=active_service_id,
+                    fallback_service_name=active_service_name,
+                )
 
             if (
                 booking_state == BookingState.WAITING_FOR_TIME
@@ -3811,6 +3942,15 @@ class MessageProcessor:
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
 
+        if self._looks_like_human_handoff_request(message.user_message):
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=self._get_human_handoff_request_reply(),
+                intent_value="human_handoff_request",
+                routing_category="safe_handoff",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
         configured_handoff = self._detect_configured_handoff(message.user_message)
         if configured_handoff:
             reason, reply_text = configured_handoff
@@ -3985,6 +4125,21 @@ class MessageProcessor:
 
         if (
             self._is_configured_front_desk_mode()
+            and self._looks_like_front_desk_price_request(message.user_message)
+            and self._find_configured_front_desk_service(message.user_message) is not None
+        ):
+            contextual_front_desk_reply = self.reply_service.get_contextual_front_desk_reply(message)
+            if contextual_front_desk_reply:
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=contextual_front_desk_reply,
+                    intent_value="front_desk_contextual_answer",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
+        if (
+            self._is_configured_front_desk_mode()
             and (
                 self._looks_like_generic_consultation_booking(message.user_message)
                 or self._looks_like_contextual_consultation_selection(
@@ -4126,6 +4281,15 @@ class MessageProcessor:
                     intent_for_policy=IntentType.GENERAL_QUESTION,
                 )
 
+            if self._looks_like_front_desk_chat_discussion_request(message.user_message):
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=self._get_front_desk_chat_discussion_reply(),
+                    intent_value="front_desk_chat_discussion",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
             if (
                 self._looks_like_fresh_booking_request(message.user_message)
                 or self._looks_like_booking_message(message.user_message)
@@ -4176,6 +4340,15 @@ class MessageProcessor:
                         routing_category="answered_basic",
                         intent_for_policy=IntentType.GENERAL_QUESTION,
                     )
+
+            if self._looks_like_bot_identity_question(message.user_message):
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=self._get_bot_identity_reply(),
+                    intent_value="bot_identity_question",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
 
             return self._build_front_desk_safe_fallback_result(message)
 

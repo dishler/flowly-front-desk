@@ -219,9 +219,19 @@ class ReplyService:
         price_requested = (
             self._looks_like_price_query(normalized)
             or intent == IntentType.PRICE
-            or (service is not None and self._looks_like_how_much_marker(normalized))
+            or self._looks_like_how_much_marker(normalized)
         )
         service_context_id = context.get("current_service_id")
+
+        combined_reply = self._get_combined_front_desk_fact_reply(
+            message.sender_id,
+            normalized=normalized,
+            language=language,
+            service=service,
+            price_requested=price_requested,
+        )
+        if combined_reply is not None:
+            return combined_reply
 
         if self._looks_like_anesthesia_question(normalized) and (
             self._looks_like_price_query(normalized) or self._looks_like_how_much_marker(normalized)
@@ -276,11 +286,41 @@ class ReplyService:
                 "Це краще підтвердити з адміністратором або лікарем перед візитом."
             )
 
+        if self._looks_like_pain_or_comfort_question(normalized):
+            target_service = service
+            if target_service is None and service_context_id:
+                target_service = self.knowledge_service.get_service_by_id(str(service_context_id))
+            if target_service is not None:
+                self._remember_front_desk_context(
+                    message.sender_id,
+                    current_service_id=str(target_service.get("id") or ""),
+                    question_context="services",
+                )
+                return self._build_service_comfort_reply(target_service)
+
+        if self._looks_like_pediatric_comfort_question(normalized):
+            target_service = service
+            if target_service is None and service_context_id:
+                target_service = self.knowledge_service.get_service_by_id(str(service_context_id))
+            if target_service is not None:
+                self._remember_front_desk_context(
+                    message.sender_id,
+                    current_service_id=str(target_service.get("id") or ""),
+                    question_context="services",
+                )
+                return self._build_pediatric_comfort_reply(target_service)
+
         if self._looks_like_directions_question(normalized):
             return self._reply_with_grounded_directions(message.sender_id)
 
         if service is None and self._looks_like_service_availability_question(normalized):
             return "Не хочу дати вам неточну інформацію. Це краще підтвердити з адміністратором або лікарем. Можу допомогти записатися на консультацію або передати питання."
+
+        if service is None and not price_requested:
+            faq_answer = self.knowledge_service.find_faq_answer(normalized, language)
+            if faq_answer:
+                self._remember_front_desk_context(message.sender_id, question_context="faq")
+                return faq_answer
 
         if self._looks_like_business_fact_question(normalized):
             fact_reply = self._get_business_fact_reply(normalized, language)
@@ -808,6 +848,41 @@ class ReplyService:
     def _looks_like_anesthesia_question(self, normalized: str) -> bool:
         return any(marker in normalized for marker in ["анестез", "знебол", "обезбол"])
 
+    def _looks_like_pain_or_comfort_question(self, normalized: str) -> bool:
+        if self._looks_like_price_query(normalized):
+            return False
+        return any(
+            marker in normalized
+            for marker in ["боляче", "болітиме", "болитиме", "болить", "болю", "страшно", "не боляче"]
+        )
+
+    def _looks_like_pediatric_comfort_question(self, normalized: str) -> bool:
+        has_child_context = any(
+            marker in normalized
+            for marker in ["дитин", "діть", "дітям", "доньк", "донечк", "дочк", "син", "вона", "він"]
+        )
+        has_comfort_context = any(
+            marker in normalized
+            for marker in ["боїться", "боїт", "страх", "ляка", "як ви з дітьми", "з дітьми працю"]
+        )
+        return has_child_context and has_comfort_context
+
+    def _build_service_comfort_reply(self, service: dict[str, Any]) -> str:
+        name = str(service.get("name") or "цієї процедури")
+        return (
+            f"Розумію, це нормальне питання перед процедурою. Щодо «{name}»: "
+            "лікар працює з урахуванням вашого комфорту, а за потреби може застосувати "
+            "знеболення. Точно по вашому випадку лікар зорієнтує на огляді."
+        )
+
+    def _build_pediatric_comfort_reply(self, service: dict[str, Any]) -> str:
+        name = str(service.get("name") or "дитячого візиту")
+        return (
+            f"Розумію, для дитини це справді важливо. Щодо «{name}»: у нас працюють з дітьми "
+            "у спокійному темпі, лікар спершу адаптує дитину й пояснює кроки без тиску. "
+            "На огляді дитячий стоматолог підкаже, як краще провести лікування комфортно."
+        )
+
     def _find_anesthesia_topic_service(self) -> dict[str, Any] | None:
         """Finds whichever KB service is itself about anesthesia, by
         re-using _looks_like_anesthesia_question against each service's own
@@ -959,6 +1034,16 @@ class ReplyService:
                 )
                 return reply_text
 
+        if kind == "option_advice":
+            reply_text = self._format_contextual_option_advice_reply(service, match["price_options"])
+            if reply_text is not None:
+                self._remember_front_desk_context(
+                    sender_id,
+                    current_service_id=remembered_service_id,
+                    question_context="services",
+                )
+                return reply_text
+
         if kind == "price":
             return self._reply_with_service_price(sender_id, service)
 
@@ -976,6 +1061,26 @@ class ReplyService:
             )
 
         return None
+
+    def _format_contextual_option_advice_reply(
+        self,
+        service: dict[str, Any],
+        price_options: list[dict[str, Any]],
+    ) -> Optional[str]:
+        labels = [str(option.get("label") or "").strip() for option in price_options]
+        labels = [label for label in labels if label]
+        if not labels:
+            return None
+        if len(labels) == 1:
+            options_text = labels[0]
+        elif len(labels) == 2:
+            options_text = f"{labels[0]} і {labels[1]}"
+        else:
+            options_text = ", ".join(labels[:-1]) + f" і {labels[-1]}"
+        return (
+            "Дистанційно не можемо сказати, який варіант краще саме у вашому випадку. "
+            f"{options_text} мають різні особливості, а відповідний варіант підбирає лікар після огляду."
+        )
 
     def _looks_like_cancellation_or_time_only_followup(self, normalized: str) -> bool:
         if any(marker in normalized for marker in ["скасу", "не треба", "не хочу", "передум"]):
@@ -1015,6 +1120,47 @@ class ReplyService:
                 "номер",
             ]
         )
+
+    def _get_combined_front_desk_fact_reply(
+        self,
+        sender_id: str,
+        *,
+        normalized: str,
+        language: str,
+        service: dict[str, Any] | None,
+        price_requested: bool,
+    ) -> Optional[str]:
+        if self.knowledge_service is None:
+            return None
+
+        parts: list[str] = []
+        has_location = any(marker in normalized for marker in ["де ви", "адрес", "локац", "location", "address"])
+        has_hours = any(
+            marker in normalized
+            for marker in ["графік", "години", "працюєте", "субот", "неділ", "working hours", "hours"]
+        )
+        has_price = service is not None and price_requested
+        if sum(1 for flag in [has_location, has_hours, has_price] if flag) < 2:
+            return None
+
+        if has_location:
+            location_reply = self._get_business_fact_reply("де ви", language)
+            if location_reply:
+                parts.append(location_reply)
+
+        if has_hours:
+            hours_reply = self._get_business_fact_reply("працюєте в суботу", language)
+            if hours_reply and hours_reply not in parts:
+                parts.append(hours_reply)
+
+        if has_price and service is not None:
+            price_reply = self._reply_with_service_price(sender_id, service)
+            if price_reply and price_reply not in parts:
+                parts.append(price_reply)
+
+        if len(parts) < 2:
+            return None
+        return " ".join(parts)
 
     def _remember_front_desk_context(
         self,

@@ -59,6 +59,16 @@ class KnowledgeService:
         return self.get_service_by_id(adult_id)
 
     def find_service(self, text: str) -> Optional[dict[str, Any]]:
+        normalized = self._normalize_question_for_match(text)
+        bounded_implant_consultation = self._find_bounded_implant_consultation_service(normalized)
+        if bounded_implant_consultation is not None:
+            return bounded_implant_consultation
+        bounded_implant = self._find_bounded_implant_service(normalized)
+        if bounded_implant is not None:
+            return bounded_implant
+        bounded = self._find_bounded_tooth_extraction_service(normalized)
+        if bounded is not None:
+            return bounded
         return self._find_service(text, include_description=True)
 
     def find_bounded_consultation_service(self, text: str) -> Optional[dict[str, Any]]:
@@ -101,6 +111,18 @@ class KnowledgeService:
         pediatric_service = self._find_bounded_pediatric_service(normalized)
         if pediatric_service is not None:
             return pediatric_service
+
+        bounded_implant_consultation = self._find_bounded_implant_consultation_service(normalized)
+        if bounded_implant_consultation is not None:
+            return bounded_implant_consultation
+
+        bounded_implant = self._find_bounded_implant_service(normalized)
+        if bounded_implant is not None:
+            return bounded_implant
+
+        extraction_service = self._find_bounded_tooth_extraction_service(normalized)
+        if extraction_service is not None:
+            return extraction_service
 
         best_service = None
         best_score = 0
@@ -154,6 +176,45 @@ class KnowledgeService:
 
         return best_service if best_score > 0 else None
 
+    def _find_bounded_implant_consultation_service(self, normalized: str) -> Optional[dict[str, Any]]:
+        has_implantologist = bool(re.search(r"\bімплантолог\w*\b", normalized))
+        has_implant_consultation = bool(
+            re.search(r"\bконсультац\w*\b", normalized)
+            and re.search(r"\b(?:імплант\w*|імплантац\w*)\b", normalized)
+        )
+        if not (has_implantologist or has_implant_consultation):
+            return None
+        return self.get_service_by_id("implant_consultation")
+
+    def _find_bounded_implant_service(self, normalized: str) -> Optional[dict[str, Any]]:
+        if not re.search(r"\b(?:імплант\w*|імплантац\w*)\b", normalized):
+            return None
+        has_implant_price_request = self._looks_like_price_query(normalized)
+        has_implant_total_context = any(
+            marker in normalized
+            for marker in ["коронк", "під ключ", "точн", "повн", "разом"]
+        )
+        has_implant_action = bool(
+            re.search(r"\b(?:став\w*|постав\w*|встанов\w*|роб\w*|можн\w*|хоч\w*)\b", normalized)
+        )
+        if has_implant_price_request or has_implant_total_context or has_implant_action:
+            return self.get_service_by_id("dental_implant")
+        return None
+
+    def _find_bounded_tooth_extraction_service(self, normalized: str) -> Optional[dict[str, Any]]:
+        has_tooth = bool(re.search(r"\bзуб\w*\b", normalized))
+        has_extraction_action = bool(
+            re.search(r"\b(?:видал\w*|вирв\w*|рват\w*|удал\w*)\b", normalized)
+        )
+        if not (has_tooth and has_extraction_action):
+            return None
+        if (
+            re.search(r"\bмудрост\w*\b", normalized)
+            or re.search(r"\b(?:вісімк\w*|восьмірк\w*|ретинован\w*)\b", normalized)
+        ):
+            return self.get_service_by_id("wisdom_tooth_extraction")
+        return self.get_service_by_id("tooth_extraction")
+
     def _find_bounded_pediatric_service(self, normalized: str) -> Optional[dict[str, Any]]:
         has_pediatric_context = bool(
             re.search(
@@ -162,12 +223,13 @@ class KnowledgeService:
             )
             or "для дитини" in normalized
             or "для дітей" in normalized
+            or re.search(r"\b(?:доньк\w*|донечк\w*|дочк\w*|син(?:у|а|ові|ом)?|їй|йому)\b", normalized)
             or re.search(r"\bмолочн\w*\s+зуб", normalized)
         )
         if not has_pediatric_context:
             return None
 
-        if re.search(r"\b(?:карієс\w*|пломб\w*)\b", normalized):
+        if re.search(r"\b(?:карієс\w*|пломб\w*|дірк\w*)\b", normalized):
             return self.get_service_by_id("pediatric_caries_treatment")
 
         if re.search(r"\b(?:чистк\w*|гігієн\w*)\b", normalized):
@@ -358,6 +420,7 @@ class KnowledgeService:
             "ні",
             "тоді",
             "для",
+            "під",
             "день",
             "мене",
             "мені",
@@ -368,6 +431,7 @@ class KnowledgeService:
             "вже",
             "ним",
             "саме",
+            "буде",
             "напевно",
             "приблизно",
             "орієнтовно",
@@ -383,6 +447,18 @@ class KnowledgeService:
             "provide",
             "book",
             "want",
+            "їй",
+            "йому",
+            "донька",
+            "доньку",
+            "доньці",
+            "донечка",
+            "донечку",
+            "дочка",
+            "дочку",
+            "син",
+            "сина",
+            "сину",
         }
 
     def _service_action_stems(self) -> set[str]:
@@ -397,23 +473,39 @@ class KnowledgeService:
             "можн",
             "потрібн",
             "треба",
+            "нема",
+            "одн",
+            "пів",
             "кращ",
+            "порад",
+            "точн",
+            "ключ",
             "рок",
             "люд",
             "діт",
             "дитин",
+            "доньк",
+            "донечк",
+            "дочк",
             "дорослим",
             "дорослих",
             "заваж",
+            "зда",
+            "дірк",
             "прив",
             "добр",
             "скаж",
+            "сказ",
+            "может",
             "підкаж",
             "підаж",
             "розкаж",
             "поясн",
             "показ",
             "кошт",
+            "скок",
+            "видалит",
+            "удалит",
             "цікав",
             "зуб",
         }
@@ -500,10 +592,18 @@ class KnowledgeService:
                 return {"kind": "price", "service": consultation_service}
             return {"kind": "consultation_summary", "service": consultation_service}
 
+        if self._looks_like_price_query(normalized) and self._looks_like_total_price_followup(normalized):
+            return {"kind": "price", "service": service}
+
         if self._should_try_contextual_faq_before_price(normalized):
             faq_answer = self._find_contextual_faq_answer(service, normalized, language)
             if faq_answer is not None:
                 return {"kind": "faq", "answer": faq_answer, "service": service}
+
+        if self._looks_like_contextual_option_advice_question(normalized):
+            price_options = self._valid_price_options(service)
+            if price_options:
+                return {"kind": "option_advice", "price_options": price_options, "service": service}
 
         if self._looks_like_contextual_option_list_question(normalized):
             price_options = self._valid_price_options(service)
@@ -539,6 +639,11 @@ class KnowledgeService:
             "входить",
             "включ",
             "кращ",
+            "порад",
+            "під ключ",
+            "з коронк",
+            "точну ціну",
+            "точна ціна",
             "обточ",
             "мікроскоп",
             "носити",
@@ -549,6 +654,8 @@ class KnowledgeService:
             "процес",
             "видален",
             "пів року",
+            "немає зуб",
+            "немає одного зуб",
             "передні зуб",
             "за щелеп",
             "верхн",
@@ -572,6 +679,13 @@ class KnowledgeService:
             re.search(r"\b(?:які|який|яка)\b", compact)
             and any(marker in compact for marker in ["є", "саме", "варіант"])
         )
+
+    def _looks_like_contextual_option_advice_question(self, normalized: str) -> bool:
+        compact = re.sub(r"^(?:а|і|и|тоді|то)\s+", "", normalized).strip()
+        return any(marker in compact for marker in ["кращ", "порад", "що обрати", "що вибрати"])
+
+    def _looks_like_total_price_followup(self, normalized: str) -> bool:
+        return any(marker in normalized for marker in ["точн", "під ключ", "разом", "повн"])
 
     def _is_explicit_service_switch(
         self,
@@ -601,12 +715,17 @@ class KnowledgeService:
             "разом",
             "один",
             "одиниц",
+            "під ключ",
+            "з коронк",
             "за щелеп",
             "щелеп",
             "верхн",
             "нижн",
             "всі зуб",
             "кращ",
+            "порад",
+            "точну ціну",
+            "точна ціна",
             "обточ",
             "мікроскоп",
             "носити",
@@ -621,6 +740,7 @@ class KnowledgeService:
             "процес",
             "давно немає",
             "немає зуб",
+            "немає одного зуб",
             "зуб вже видален",
             "видален",
             "пів року",
@@ -700,6 +820,8 @@ class KnowledgeService:
                 "окрем",
                 "разом",
                 "кращ",
+                "порад",
+                "під ключ",
                 "обточ",
                 "щелеп",
                 "верхн",
@@ -719,8 +841,10 @@ class KnowledgeService:
             for marker in [
                 "скільки",
                 "сколько",
+                "скок",
                 "how much",
                 "коштує",
+                "коштуе",
                 "ціна",
                 "ціну",
                 "ціни",
