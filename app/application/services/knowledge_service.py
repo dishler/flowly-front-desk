@@ -5,7 +5,14 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from app.application.services.nlu import matcher as nlu_matcher
+from app.application.services.nlu import modifiers as nlu_modifiers
+from app.application.services.nlu import normalizer as nlu_normalizer
+from app.application.services.nlu import service_index as nlu_service_index
+from app.application.services.nlu import unknown_detail as nlu_unknown_detail
 from app.core.config import get_settings
+
+_PEDIATRIC_CONTEXT_FALLBACK_MARKERS = ("зуб", "запис", "прийом", "консультац", "стоматолог")
 
 
 class KnowledgeService:
@@ -14,6 +21,27 @@ class KnowledgeService:
             file_path = get_settings().knowledge_base_path
         self.file_path = Path(file_path)
         self.data = self._load()
+        self._nlu_profiles = nlu_service_index.build_service_index(self.get_services())
+        self._nlu_attribute_index = nlu_unknown_detail.build_attribute_index(
+            self._nlu_profiles, self.get_services()
+        )
+        # "pediatric_dentistry" is the generic pediatric catch-all; its own
+        # alias set includes bare pediatric-context words (e.g. "дітей"),
+        # which lets it out-score a more specific procedure alias (e.g.
+        # "чистка") in a plain match purely because a pediatric-context word
+        # is present -- not because it's actually the right service. Pediatric
+        # resolution therefore matches against every other service first (see
+        # find_confident_service) and only falls back to this generic bucket
+        # when nothing more specific is found.
+        self._nlu_non_generic_profiles = {
+            service_id: profile
+            for service_id, profile in self._nlu_profiles.items()
+            if service_id != "pediatric_dentistry"
+        }
+        self._nlu_adult_to_pediatric = {
+            adult_id: pediatric_id
+            for pediatric_id, adult_id in self._PEDIATRIC_ADULT_COUNTERPART.items()
+        }
 
     def _load(self) -> dict[str, Any]:
         with self.file_path.open("r", encoding="utf-8") as f:
@@ -59,17 +87,8 @@ class KnowledgeService:
         return self.get_service_by_id(adult_id)
 
     def find_service(self, text: str) -> Optional[dict[str, Any]]:
-        normalized = self._normalize_question_for_match(text)
-        bounded_implant_consultation = self._find_bounded_implant_consultation_service(normalized)
-        if bounded_implant_consultation is not None:
-            return bounded_implant_consultation
-        bounded_implant = self._find_bounded_implant_service(normalized)
-        if bounded_implant is not None:
-            return bounded_implant
-        bounded = self._find_bounded_tooth_extraction_service(normalized)
-        if bounded is not None:
-            return bounded
-        return self._find_service(text, include_description=True)
+        match = nlu_matcher.match_service(text, self._nlu_profiles, include_description=True)
+        return self.get_service_by_id(match.service_id) if match else None
 
     def find_bounded_consultation_service(self, text: str) -> Optional[dict[str, Any]]:
         """Resolves a dental consultation reference that alias matching
@@ -103,163 +122,39 @@ class KnowledgeService:
         return self.get_service_by_id("dental_consultation")
 
     def find_confident_service(self, text: str) -> Optional[dict[str, Any]]:
-        normalized = self._normalize_question_for_match(text)
-        query_tokens = self._service_query_tokens(normalized)
-        if not query_tokens:
+        normalized = nlu_normalizer.normalize(text)
+        if not normalized:
             return None
 
-        pediatric_service = self._find_bounded_pediatric_service(normalized)
-        if pediatric_service is not None:
-            return pediatric_service
+        if nlu_modifiers.has_pediatric_context(normalized):
+            return self._find_pediatric_aware_service(normalized)
 
-        bounded_implant_consultation = self._find_bounded_implant_consultation_service(normalized)
-        if bounded_implant_consultation is not None:
-            return bounded_implant_consultation
+        match = nlu_matcher.match_service(normalized, self._nlu_profiles)
+        return self.get_service_by_id(match.service_id) if match else None
 
-        bounded_implant = self._find_bounded_implant_service(normalized)
-        if bounded_implant is not None:
-            return bounded_implant
+    def _find_pediatric_aware_service(self, normalized: str) -> Optional[dict[str, Any]]:
+        """Matches against every service except the generic "pediatric_dentistry"
+        catch-all first (see the comment in __init__ on why), redirects an
+        adult match to its pediatric counterpart when one exists, keeps a
+        match that has no pediatric counterpart as-is (e.g. a chipped-tooth
+        restoration -- there's no pediatric-specific variant in this KB, so
+        the honest answer is the adult service), and only falls back to the
+        generic bucket when nothing more specific matched at all and the
+        message still looks dental-relevant.
+        """
+        specific_match = nlu_matcher.match_service(normalized, self._nlu_non_generic_profiles)
+        specific_id = specific_match.service_id if specific_match else None
 
-        extraction_service = self._find_bounded_tooth_extraction_service(normalized)
-        if extraction_service is not None:
-            return extraction_service
+        if specific_id in self._nlu_adult_to_pediatric:
+            service_id = self._nlu_adult_to_pediatric[specific_id]
+        elif specific_id is not None:
+            service_id = specific_id
+        elif any(marker in normalized for marker in _PEDIATRIC_CONTEXT_FALLBACK_MARKERS):
+            service_id = "pediatric_dentistry"
+        else:
+            service_id = None
 
-        best_service = None
-        best_score = 0
-        best_specificity = 0
-        for service in self.get_services():
-            score = 0
-            specificity = 0
-            matched_query_tokens: set[str] = set()
-            aliases = service.get("aliases")
-            if not isinstance(aliases, list):
-                continue
-
-            for alias in aliases:
-                alias_text = str(alias or "").strip()
-                if not alias_text:
-                    continue
-                alias_normalized = self._normalize_question_for_match(alias_text)
-                alias_tokens = self._service_query_tokens(alias_normalized)
-                if not alias_tokens:
-                    continue
-
-                if len(alias_tokens) > 1:
-                    if alias_normalized in normalized:
-                        score += len(alias_tokens)
-                        specificity = max(specificity, len(alias_tokens))
-                    continue
-
-                alias_token = next(iter(alias_tokens))
-                matched_query_token = next(
-                    (
-                        token
-                        for token in query_tokens
-                        if self._token_matches_any(alias_token, {token})
-                    ),
-                    None,
-                )
-                if matched_query_token is not None and matched_query_token not in matched_query_tokens:
-                    matched_query_tokens.add(matched_query_token)
-                    score += 1
-                    specificity = max(specificity, 1)
-                    if re.search(rf"\b(?:саме|а\s+саме)\s+{re.escape(alias_token)}\w*\b", normalized):
-                        score += 2
-                        specificity = max(specificity, 2)
-                    if re.search(rf"\bне\s+{re.escape(alias_token)}\w*\b", normalized):
-                        score -= 2
-
-            if score > best_score or (score == best_score and specificity > best_specificity):
-                best_score = score
-                best_specificity = specificity
-                best_service = service
-
-        return best_service if best_score > 0 else None
-
-    def _find_bounded_implant_consultation_service(self, normalized: str) -> Optional[dict[str, Any]]:
-        has_implantologist = bool(re.search(r"\bімплантолог\w*\b", normalized))
-        has_implant_consultation = bool(
-            re.search(r"\bконсультац\w*\b", normalized)
-            and re.search(r"\b(?:імплант\w*|імплантац\w*)\b", normalized)
-        )
-        if not (has_implantologist or has_implant_consultation):
-            return None
-        return self.get_service_by_id("implant_consultation")
-
-    def _find_bounded_implant_service(self, normalized: str) -> Optional[dict[str, Any]]:
-        if not re.search(r"\b(?:імплант\w*|імплантац\w*)\b", normalized):
-            return None
-        has_implant_price_request = self._looks_like_price_query(normalized)
-        has_implant_total_context = any(
-            marker in normalized
-            for marker in ["коронк", "під ключ", "точн", "повн", "разом"]
-        )
-        has_implant_action = bool(
-            re.search(r"\b(?:став\w*|постав\w*|встанов\w*|роб\w*|можн\w*|хоч\w*)\b", normalized)
-        )
-        if has_implant_price_request or has_implant_total_context or has_implant_action:
-            return self.get_service_by_id("dental_implant")
-        return None
-
-    def _find_bounded_tooth_extraction_service(self, normalized: str) -> Optional[dict[str, Any]]:
-        has_tooth = bool(re.search(r"\bзуб\w*\b", normalized))
-        has_extraction_action = bool(
-            re.search(r"\b(?:видал\w*|вирв\w*|рват\w*|удал\w*)\b", normalized)
-        )
-        if not (has_tooth and has_extraction_action):
-            return None
-        if (
-            re.search(r"\bмудрост\w*\b", normalized)
-            or re.search(r"\b(?:вісімк\w*|восьмірк\w*|ретинован\w*)\b", normalized)
-        ):
-            return self.get_service_by_id("wisdom_tooth_extraction")
-        return self.get_service_by_id("tooth_extraction")
-
-    def _find_bounded_pediatric_service(self, normalized: str) -> Optional[dict[str, Any]]:
-        has_pediatric_context = bool(
-            re.search(
-                r"\b(?:дит(?:ині|ину|ини|яча|ячу|ячий|ячі|ячого|ячому|ячою)|дітям)\b",
-                normalized,
-            )
-            or "для дитини" in normalized
-            or "для дітей" in normalized
-            or re.search(r"\b(?:доньк\w*|донечк\w*|дочк\w*|син(?:у|а|ові|ом)?|їй|йому)\b", normalized)
-            or re.search(r"\bмолочн\w*\s+зуб", normalized)
-        )
-        if not has_pediatric_context:
-            return None
-
-        if re.search(r"\b(?:карієс\w*|пломб\w*|дірк\w*)\b", normalized):
-            return self.get_service_by_id("pediatric_caries_treatment")
-
-        if re.search(r"\b(?:чистк\w*|гігієн\w*)\b", normalized):
-            return self.get_service_by_id("pediatric_cleaning")
-
-        if re.search(r"\b(?:записа\w*|запис\b|прийом\b|консультац\w*)\b", normalized):
-            return self.get_service_by_id("pediatric_dentistry")
-
-        return None
-
-    def _find_service(self, text: str, *, include_description: bool) -> Optional[dict[str, Any]]:
-        query_tokens = self._service_query_tokens(text)
-        if not query_tokens:
-            return None
-
-        best_service = None
-        best_score = 0
-        for service in self.get_services():
-            service_tokens = self._service_tokens(
-                service,
-                include_description=include_description,
-            )
-            if not service_tokens:
-                continue
-            score = sum(1 for token in query_tokens if self._token_matches_any(token, service_tokens))
-            if score > best_score:
-                best_score = score
-                best_service = service
-
-        return best_service if best_score > 0 else None
+        return self.get_service_by_id(service_id) if service_id else None
 
     def get_pricing(self) -> dict[str, Any]:
         return self.data.get("pricing", {})
@@ -360,178 +255,23 @@ class KnowledgeService:
         return self._service_query_tokens(" ".join(parts))
 
     def unknown_detail_tokens_for_service(self, text: str, service: dict[str, Any]) -> set[str]:
-        """Returns extra service-detail tokens that are not grounded in the
-        matched service's aliases/name/description/options. This catches
-        "known broader topic + unknown variant/brand" without blacklisting
-        particular procedures.
-
-        Ordinary conversational/reporting verbs and generic booking-action
-        words around the service mention ("Скажіть, ви ставите брекети?",
-        "можна поставити брекети?", "скільки коштують брекети?") must not
-        themselves count as an unrecognized "detail" -- they name no
-        service variant at all. Matched by STEM (substring), not exact
-        word-form, so this stays robust to conjugation and Ukrainian
-        verb prefixation (ставите/ставити/поставити, коштує/коштують)
-        without having to enumerate every inflected form by hand.
+        """Returns query stems that name a specific service attribute
+        (material/brand/technique) not confirmed for the matched service --
+        e.g. asking about "цирконій" while discussing a service whose price
+        options don't include it. Allow-by-default: only stems in the small,
+        closed attribute index (derived from price_option labels plus a
+        short seed list of technique/brand words this KB doesn't model) can
+        ever be flagged -- ordinary descriptive/contextual words are never
+        in that index, so they're never flagged, with no growing safe-word
+        list to maintain.
         """
-        query_tokens = {
-            token
-            for token in self._service_query_tokens(text)
-            if token not in self._service_action_exact_tokens()
-            and not any(stem in token for stem in self._service_action_stems())
-            and not any(stem in token for stem in self._scheduling_context_stems())
-            and not re.search(rf"\bне\s+{re.escape(token)}\w*\b", self._normalize_question_for_match(text))
-        }
-        if not query_tokens:
-            return set()
-        service_tokens = self._service_tokens(service, include_description=True)
-        service_tokens.update(self._related_booking_family_tokens(service))
-        unknown_tokens = {
-            token
-            for token in query_tokens
-            if not self._token_matches_any(token, service_tokens)
-        }
-        return unknown_tokens
-
-    def _related_booking_family_tokens(self, service: dict[str, Any]) -> set[str]:
-        booking_service_id = service.get("booking_service_id")
-        service_id = service.get("id")
-        if not booking_service_id:
-            return set()
-
-        related_tokens: set[str] = set()
-        for candidate in self.get_services():
-            if candidate.get("id") == service_id:
-                continue
-            if candidate.get("booking_service_id") != booking_service_id:
-                continue
-            related_tokens.update(self._service_tokens(candidate, include_description=False))
-        return related_tokens
-
-    def _service_action_exact_tokens(self) -> set[str]:
-        return {
-            "ви",
-            "вас",
-            "які",
-            "яка",
-            "який",
-            "чи",
-            "що",
-            "ні",
-            "тоді",
-            "для",
-            "під",
-            "день",
-            "мене",
-            "мені",
-            "мій",
-            "моя",
-            "моє",
-            "мої",
-            "вже",
-            "ним",
-            "саме",
-            "буде",
-            "напевно",
-            "приблизно",
-            "орієнтовно",
-            "поки",
-            "просто",
-            "але",
-            "здравствуйте",
-            "здравствуй",
-            "привет",
-            "do",
-            "you",
-            "offer",
-            "provide",
-            "book",
-            "want",
-            "їй",
-            "йому",
-            "донька",
-            "доньку",
-            "доньці",
-            "донечка",
-            "донечку",
-            "дочка",
-            "дочку",
-            "син",
-            "сина",
-            "сину",
-        }
-
-    def _service_action_stems(self) -> set[str]:
-        return {
-            "вход",
-            "роб",
-            "став",
-            "ліку",
-            "запис",
-            "запиш",
-            "хоч",
-            "можн",
-            "потрібн",
-            "треба",
-            "нема",
-            "одн",
-            "пів",
-            "кращ",
-            "порад",
-            "точн",
-            "ключ",
-            "рок",
-            "люд",
-            "діт",
-            "дитин",
-            "доньк",
-            "донечк",
-            "дочк",
-            "дорослим",
-            "дорослих",
-            "заваж",
-            "зда",
-            "дірк",
-            "прив",
-            "добр",
-            "скаж",
-            "сказ",
-            "может",
-            "підкаж",
-            "підаж",
-            "розкаж",
-            "поясн",
-            "показ",
-            "кошт",
-            "скок",
-            "видалит",
-            "удалит",
-            "цікав",
-            "зуб",
-        }
-
-    def _scheduling_context_stems(self) -> set[str]:
-        return {
-            "сьогод",
-            "завтр",
-            "післязавтр",
-            "наступ",
-            "тиж",
-            "понеділ",
-            "вівтор",
-            "серед",
-            "четвер",
-            "пятниц",
-            "пʼятниц",
-            "п'ятниц",
-            "субот",
-            "неділ",
-            "ран",
-            "обід",
-            "веч",
-            "пізніш",
-            "раніш",
-        }
+        service_id = str(service.get("id") or "")
+        profile = self._nlu_profiles.get(service_id)
+        return set(
+            nlu_unknown_detail.unknown_detail_stems(
+                text, service_id, self._nlu_attribute_index, profile
+            )
+        )
 
     def _token_matches_any(self, token: str, candidates: set[str]) -> bool:
         for candidate in candidates:
