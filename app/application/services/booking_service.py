@@ -1000,7 +1000,6 @@ class BookingService:
     def get_confirmed_booking_status_reply(self, sender_id: str, language: str) -> str:
         completed_booking = self._get_completed_booking(sender_id) or {}
         service_name = str(completed_booking.get("current_service_name") or "").strip()
-        visit_label = f"візит на {service_name}" if service_name else "візит"
         start_dt = None
         if completed_booking.get("start_dt"):
             try:
@@ -1013,14 +1012,33 @@ class BookingService:
                 )
         if start_dt is not None:
             if self._appointment_label() == "візит":
-                return f"Так, ваш {visit_label} підтверджено на {self._format_scheduled_time_for_reply(start_dt, language)}. Чекатимемо на вас!"
+                service_sentence = self._build_confirmed_status_service_sentence(service_name)
+                return (
+                    f"Так, ваш візит підтверджено на "
+                    f"{self._format_scheduled_time_for_reply(start_dt, language)}. "
+                    f"{service_sentence}Чекатимемо на вас!"
+                )
             return (
                 f"Так, {self._appointment_label()} підтверджено на {self._format_scheduled_time_for_reply(start_dt, language)} 🙌 "
                 "Зв’яжемося з вами у цей час."
             )
         if self._appointment_label() == "візит":
-            return f"Так, ваш {visit_label} підтверджено. Чекатимемо на вас!"
+            service_sentence = self._build_confirmed_status_service_sentence(service_name)
+            return f"Так, ваш візит підтверджено. {service_sentence}Чекатимемо на вас!"
         return f"Так, {self._appointment_label()} підтверджено 🙌 Зв’яжемося з вами у домовлений час."
+
+    def _build_confirmed_status_service_sentence(self, service_name: str) -> str:
+        if not service_name.strip():
+            return ""
+        return f"Послуга: {service_name.strip().lower()}. "
+
+    def _append_calendar_service_description(
+        self,
+        description_parts: list[str],
+        service_name: str | None,
+    ) -> None:
+        if service_name and str(service_name).strip():
+            description_parts.append(f"Service: {str(service_name).strip()}")
 
     def _build_email_confirmed_reply(
         self,
@@ -2733,6 +2751,10 @@ class BookingService:
             if calendar_configured:
                 try:
                     description_parts = [self._booking_description_prefix()]
+                    self._append_calendar_service_description(
+                        description_parts,
+                        updated_booking.get("current_service_name"),
+                    )
                     if updated_booking.get("customer_name"):
                         description_parts.append(f"Customer name: {updated_booking['customer_name']}")
                     description_parts.append(f"Sender ID: {sender_id}")
@@ -6460,6 +6482,7 @@ class BookingService:
         ):
             try:
                 description_parts = [self._booking_description_prefix()]
+                self._append_calendar_service_description(description_parts, current_service_name)
                 if contact_details["customer_name"]:
                     description_parts.append(f"Customer name: {contact_details['customer_name']}")
                 description_parts.append(f"Sender ID: {sender_id}")
@@ -7541,6 +7564,10 @@ class BookingService:
 
         try:
             description_parts = [pending["description"]]
+            self._append_calendar_service_description(
+                description_parts,
+                pending.get("current_service_name"),
+            )
             if pending.get("customer_name"):
                 description_parts.append(f"Customer name: {pending['customer_name']}")
             description_parts.append(f"Sender ID: {sender_id}")

@@ -1036,6 +1036,7 @@ async def test_dental_early_contact_with_date_is_reused_after_time_selection():
     ]
     assert len(calendar.created) == 1
     assert calendar.created[0]["start_dt"] == _kyiv_dt(2026, 8, 27, 14)
+    assert "Service: Професійна гігієна зубів" in calendar.created[0]["description"]
     assert "Customer name: Дмитро" in calendar.created[0]["description"]
     assert "Phone: 0987121328" in calendar.created[0]["description"]
 
@@ -5465,7 +5466,12 @@ class RescheduleTrackingCalendarService(RecordingConfiguredCalendarService):
         self.deleted.append(event_id)
 
 
-def _mark_dental_booking_confirmed(processor, event_id: str = "calendar-event-123") -> None:
+def _mark_dental_booking_confirmed(
+    processor,
+    event_id: str = "calendar-event-123",
+    current_service_id: str | None = None,
+    current_service_name: str | None = None,
+) -> None:
     processor.booking_service._mark_booking_completed(
         "patient-1",
         start_dt=_kyiv_dt(2026, 4, 27, 12),
@@ -5473,6 +5479,8 @@ def _mark_dental_booking_confirmed(processor, event_id: str = "calendar-event-12
         email="client@example.com",
         phone="0987121328",
         calendar_event_id=event_id,
+        current_service_id=current_service_id,
+        current_service_name=current_service_name,
     )
 
 
@@ -5615,7 +5623,8 @@ async def test_dental_confirmed_booking_natural_status_queries_read_existing_boo
     assert result["booking_result"] is None
     assert "27.08" in result["reply_text"]
     assert "15:30" in result["reply_text"]
-    assert "Професійна гігієна зубів" in result["reply_text"]
+    assert "на Професійна гігієна зубів підтверджено" not in result["reply_text"]
+    assert "Послуга: професійна гігієна зубів" in result["reply_text"]
     assert completed["calendar_event_id"] == "calendar-event-status"
     assert completed["phone"] == "0981112233"
     assert calendar.checked == []
@@ -5689,7 +5698,12 @@ async def test_dental_confirmed_booking_own_phone_correction_updates_record_and_
     existing Calendar event's description -- never create a second event."""
     calendar = ContactUpdateTrackingCalendarService()
     processor, calendar = _build_dental_processor(calendar_service=calendar)
-    _mark_dental_booking_confirmed(processor, event_id="calendar-event-999")
+    _mark_dental_booking_confirmed(
+        processor,
+        event_id="calendar-event-999",
+        current_service_id="dental_cleaning",
+        current_service_name="Професійна гігієна зубів",
+    )
 
     result = await processor.process(
         _message("ой вибачте, помилився номером, правильний 0509998877")
@@ -5705,6 +5719,7 @@ async def test_dental_confirmed_booking_own_phone_correction_updates_record_and_
 
     assert len(calendar.contact_updates) == 1
     assert calendar.contact_updates[0]["event_id"] == "calendar-event-999"
+    assert "Service: Професійна гігієна зубів" in calendar.contact_updates[0]["description"]
     assert "0509998877" in calendar.contact_updates[0]["description"]
     assert calendar.created == []
 
@@ -10061,3 +10076,91 @@ async def test_dental_generic_availability_questions_still_route_to_booking_afte
     await processor3.process(_message("хочу записатись на чистку"))
     result3 = await processor3.process(_message("коли можна?"))
     assert result3["intent"] == "booking_availability_question"
+
+
+async def test_dental_active_booking_location_and_metro_question_not_hijacked_by_nearest_context():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("коли найближчий час?"))
+    checks_before = len(calendar.checked)
+    result = await processor.process(_message("А де ви знаходитесь і яке найближче метро?"))
+
+    assert result["intent"] == "booking_grounded_question"
+    assert "Липська, 12" in result["reply_text"]
+    assert "Арсенальна" in result["reply_text"]
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
+
+
+async def test_dental_active_booking_hours_and_payment_faq_not_hijacked_by_booking_context():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу записатись на чистку"))
+    await processor.process(_message("коли найближчий час?"))
+    checks_before = len(calendar.checked)
+
+    hours = await processor.process(_message("а в суботу працюєте?"))
+    payment = await processor.process(_message("а оплата частинами є?"))
+
+    assert hours["intent"] == "booking_grounded_question"
+    assert "10:00-16:00" in hours["reply_text"]
+    assert payment["intent"] == "booking_grounded_question"
+    assert "monobank" in payment["reply_text"]
+    assert "ПУМБ" in payment["reply_text"]
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+async def test_dental_active_booking_admin_callback_request_with_date_not_treated_as_booking_date():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("коли найближчий час?"))
+    checks_before = len(calendar.checked)
+    result = await processor.process(
+        _message("Можете передати адміністратору, щоб він мені завтра подзвонив?")
+    )
+
+    assert result["intent"] == "booking_grounded_question"
+    assert result["booking_result"] is None
+    assert "AI-асистент" in result["reply_text"]
+    assert "завтра" not in result["reply_text"].lower()
+    assert "можу запропонувати" not in result["reply_text"].lower()
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+async def test_dental_active_booking_genuine_continuation_still_checks_calendar():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    result = await processor.process(_message("у четвер о 15"))
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert calendar.checked[-1]["start_dt"] == _kyiv_dt(2026, 8, 27, 15)
+    assert calendar.created == []
+
+
+async def test_dental_active_booking_cancel_and_reschedule_still_route_to_booking_service():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у четвер о 15"))
+    await processor.process(_message("Дмитро 0987121328"))
+    cancel = await processor.process(_message("скасуйте мій запис"))
+
+    assert cancel["booking_result"]["status"] == "cancelled"
+    assert calendar.deleted == ["dental-event-1"]
+
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у четвер о 15"))
+    await processor.process(_message("Дмитро 0987121328"))
+    reschedule = await processor.process(_message("перенесіть запис на пʼятницю о 14"))
+
+    assert reschedule["booking_result"]["status"] == "rescheduled"
+    assert len(calendar.rescheduled) == 1

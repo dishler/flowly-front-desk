@@ -1366,6 +1366,66 @@ class MessageProcessor:
             return False
         return self.booking_service._looks_like_clinic_should_choose_time(text)
 
+    def _get_active_booking_non_booking_reply(self, sender_id: str, text: str) -> str | None:
+        if not self._is_configured_front_desk_mode():
+            return None
+        if self._looks_like_cancel_request(text) or self._looks_like_reschedule_request(text):
+            return None
+        if self._message_has_valid_contact_data(text):
+            return None
+
+        if self._looks_like_human_handoff_request(text):
+            return self._get_human_handoff_request_reply()
+
+        if not self._looks_like_explicit_front_desk_fact_question(text):
+            return None
+
+        return self.reply_service.get_contextual_front_desk_reply(
+            NormalizedMessage(
+                platform="instagram",
+                sender_id=sender_id,
+                recipient_id="",
+                message_mid="",
+                user_message=text,
+            )
+        )
+
+    def _looks_like_explicit_front_desk_fact_question(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        if not normalized:
+            return False
+        if self._looks_like_availability_question(text) or self._looks_like_booking_pause_or_postpone(text):
+            return False
+
+        location_markers = [
+            "де ви",
+            "де знаход",
+            "знаходитесь",
+            "адрес",
+            "локац",
+            "метро",
+            "як до вас",
+            "доїхати",
+            "добратися",
+        ]
+        payment_markers = [
+            "оплата",
+            "оплатити",
+            "карткою",
+            "картка",
+            "готівкою",
+            "розтермінування",
+            "розстрочка",
+            "оплата частинами",
+            "страховка",
+            "страховою",
+        ]
+        return (
+            any(marker in normalized for marker in location_markers)
+            or any(marker in normalized for marker in payment_markers)
+            or self._looks_like_business_hours_question(text)
+        )
+
     def _looks_like_offered_slot_ordinal_reply(self, text: str) -> bool:
         normalized = self._normalize_for_booking_keywords(text)
         normalized = re.sub(
@@ -1648,7 +1708,20 @@ class MessageProcessor:
         )
         has_request = any(
             marker in normalized
-            for marker in ["дайте", "дай", "можна", "хочу", "поклич", "підключ", "перемк", "говорити", "спілкуват"]
+            for marker in [
+                "дайте",
+                "дай",
+                "можна",
+                "хочу",
+                "передати",
+                "передайте",
+                "передат",
+                "поклич",
+                "підключ",
+                "перемк",
+                "говорити",
+                "спілкуват",
+            ]
         )
         return has_human and has_request
 
@@ -3491,6 +3564,19 @@ class MessageProcessor:
                         fallback_service_id=active_service_id,
                         fallback_service_name=active_service_name,
                     )
+
+            non_booking_reply = self._get_active_booking_non_booking_reply(
+                message.sender_id,
+                message.user_message,
+            )
+            if non_booking_reply is not None:
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=non_booking_reply,
+                    intent_value="booking_grounded_question",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
 
             if self.booking_service._looks_like_date_unavailable_message(message.user_message):
                 booking_result = self.booking_service.process_booking_message(
