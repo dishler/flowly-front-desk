@@ -382,6 +382,10 @@ class KnowledgeService:
             # redirect above, so a generic "консультація" mention while in
             # a specialty context still redirects there first instead of
             # being treated as "a different service to compare against."
+            if "дешевш" in normalized or "дорожч" in normalized:
+                comparison_answer = self._build_price_comparison_reply(resolved_service, service)
+                if comparison_answer is not None:
+                    return {"kind": "faq", "answer": comparison_answer, "service": resolved_service}
             price_options = self._matching_price_options(resolved_service, normalized)
             if price_options:
                 return {"kind": "price_options", "price_options": price_options, "service": resolved_service}
@@ -701,6 +705,67 @@ class KnowledgeService:
             for option in price_options
             if isinstance(option, dict) and option.get("label") and option.get("price_note")
         ]
+
+    def _representative_priced_entry(self, service: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """The single price-bearing entry (a price_option, or the service
+        itself for a flat price_note) used to represent a service in a
+        comparison. For a service with multiple price_options, the first
+        listed one is used -- a fixed, non-numeric convention (no amount
+        comparison), matching the order the KB already lists them in."""
+        price_options = self._valid_price_options(service)
+        if price_options:
+            return price_options[0]
+        if service.get("price_note"):
+            return service
+        return None
+
+    def _price_display_text(self, entry: dict[str, Any]) -> Optional[str]:
+        """The entry's own already-existing price text, used verbatim --
+        never reformatted or amount-parsed. A price_option is shown as its
+        label paired with its own price_note; a flat service-level
+        price_note (already a full grounded sentence) is shown as-is."""
+        price_note = entry.get("price_note")
+        if not price_note:
+            return None
+        label = entry.get("label")
+        if label:
+            return f"{label} — {price_note}"
+        return str(price_note)
+
+    def _build_price_comparison_reply(
+        self,
+        resolved_service: dict[str, Any],
+        remembered_service: dict[str, Any],
+    ) -> Optional[str]:
+        """Answers a genuine "X дешевше/дорожче?" comparison between the
+        service named in the current message and the service already
+        being discussed, using structured price_unit ONLY to determine
+        whether the two are directly comparable -- never to compute or
+        compare a numeric verdict. When the units differ, states plainly
+        that a direct comparison isn't valid and shows both sides' own
+        grounded price text. When either unit is missing, or the units
+        match, returns None so the safe existing (unit-less) behavior
+        applies."""
+        resolved_entry = self._representative_priced_entry(resolved_service)
+        remembered_entry = self._representative_priced_entry(remembered_service)
+        if resolved_entry is None or remembered_entry is None:
+            return None
+
+        resolved_unit = resolved_entry.get("price_unit")
+        remembered_unit = remembered_entry.get("price_unit")
+        if not resolved_unit or not remembered_unit:
+            return None
+        if resolved_unit == remembered_unit:
+            return None
+
+        remembered_text = self._price_display_text(remembered_entry)
+        resolved_text = self._price_display_text(resolved_entry)
+        if remembered_text is None or resolved_text is None:
+            return None
+        if not remembered_text.endswith((".", "!", "?")):
+            remembered_text = f"{remembered_text}."
+
+        return f"Прямо порівняти ці ціни некоректно: {remembered_text} {resolved_text}"
 
     # Words too generic across the whole dental domain to count as proof
     # that an FAQ item is actually *about* a given service, for the

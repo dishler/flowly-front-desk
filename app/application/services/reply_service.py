@@ -1034,7 +1034,7 @@ class ReplyService:
         if kind == "faq":
             self._remember_front_desk_context(
                 sender_id,
-                current_service_id=remembered_service_id,
+                current_service_id=str(service.get("id")) if service.get("id") else remembered_service_id,
                 question_context="services",
             )
             return str(match["answer"])

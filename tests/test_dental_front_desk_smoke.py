@@ -2409,8 +2409,114 @@ async def test_dental_braces_price_then_implant_cheaper_uses_implant_grounded_pr
     context = processor.memory_service.get_context("patient-1")
 
     assert "16000 грн" in result["reply_text"]
+    assert "Прямо порівняти" not in result["reply_text"]
     assert context["current_service_id"] == "dental_implant"
     assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_price_then_aligners_cheaper_states_not_directly_comparable():
+    """Braces (per_jaw) vs aligners (per_course) use different price units
+    -- must never render a yes/no cheaper/more-expensive verdict, only the
+    explicit "not directly comparable" framing with both sides' own,
+    verbatim grounded price text (no derived amount, no derived unit
+    phrase)."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А елайнери дешевші?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["reply_text"] == (
+        "Прямо порівняти ці ціни некоректно: Металеві брекети — від 19000 грн. "
+        "Елайнери коштують від 60000 грн за курс лікування."
+    )
+    assert context["current_service_id"] == "aligners"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_price_then_aligners_more_expensive_states_not_directly_comparable():
+    """Same differing-unit pair, asked with "дорожчі" instead of "дешевші"
+    -- the verdict must still be withheld (unit mismatch, not direction of
+    the question, is what makes this incomparable), and the message must
+    be identical regardless of which direction was asked."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А елайнери дорожчі?"))
+
+    assert result["reply_text"] == (
+        "Прямо порівняти ці ціни некоректно: Металеві брекети — від 19000 грн. "
+        "Елайнери коштують від 60000 грн за курс лікування."
+    )
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_aligners_price_then_braces_cheaper_swaps_labels_correctly():
+    """Reverse starting point of the differing-unit pair: must not be
+    hardcoded to a fixed braces-then-aligners direction -- the previously
+    discussed service (aligners) and the newly named one (braces) must
+    swap places correctly in the rendered comparison."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Скільки коштують елайнери?"))
+    result = await processor.process(_message("А брекети дешевші?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["reply_text"] == (
+        "Прямо порівняти ці ціни некоректно: Елайнери коштують від 60000 грн за курс "
+        "лікування. Металеві брекети — від 19000 грн"
+    )
+    assert context["current_service_id"] == "braces"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_price_comparison_same_unit_returns_no_verdict():
+    """When both compared services share the same structured price_unit,
+    no comparison message is produced at all (for now) -- the safe
+    existing unit-less behavior applies instead. No two real KB services
+    currently share a price_unit across different service ids, so this
+    exercises the check directly against synthetic same-unit entries,
+    with no price amounts involved."""
+    knowledge_service = KnowledgeService("app/data/knowledge_base.json")
+    service_a = {"id": "svc_a", "name": "Сервіс А", "price_note": "від 1000 грн", "price_unit": "per_tooth"}
+    service_b = {"id": "svc_b", "name": "Сервіс Б", "price_note": "від 2000 грн", "price_unit": "per_tooth"}
+
+    assert knowledge_service._build_price_comparison_reply(service_b, service_a) is None
+
+
+@pytest.mark.asyncio
+async def test_dental_faq_comparison_during_waiting_for_time_preserves_booking_state():
+    """The differing-unit comparative verdict must be answerable mid-booking
+    (WAITING_FOR_TIME) without disturbing the already-collected service or
+    date -- the very next genuine time reply must still resume the
+    original booking for the original service."""
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу записатись на чистку зубів"))
+    await processor.process(_message("у понеділок"))
+    await processor.process(_message("Скільки коштують металеві брекети?"))
+    comparison_result = await processor.process(_message("А елайнери дешевші?"))
+    mid_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+    await processor.process(_message("о 15"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert comparison_result["reply_text"] == (
+        "Прямо порівняти ці ціни некоректно: Металеві брекети — від 19000 грн. "
+        "Елайнери коштують від 60000 грн за курс лікування."
+    )
+    assert mid_pending.get("current_service_id") == "dental_cleaning"
+    assert pending.get("current_service_id") == "dental_cleaning"
+    assert pending.get("start_dt") is not None
+    assert len(calendar.checked) == 1
+    assert calendar.checked[0]["start_dt"].hour == 15
     assert calendar.created == []
 
 
