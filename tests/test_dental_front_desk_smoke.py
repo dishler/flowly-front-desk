@@ -7000,6 +7000,23 @@ async def test_dental_pain_offer_faq_does_not_start_booking():
     assert calendar.created == []
 
 
+@pytest.mark.asyncio
+async def test_dental_explicit_wisdom_extraction_price_beats_stale_caries_context():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("скільки коштує консультація?"))
+    await processor.process(_message("а лікування карієсу?"))
+    result = await processor.process(_message("а видалення зуба мудрості?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "3500 грн" in result["reply_text"]
+    assert "2200 грн" not in result["reply_text"]
+    assert context["current_service_id"] == "wisdom_tooth_extraction"
+    assert result["booking_result"] is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
 async def test_dental_pain_specific_service_context_preserves_pronoun_extraction_price():
     calendar = RecordingConfiguredCalendarService()
     processor, calendar = _build_dental_processor(calendar_service=calendar)

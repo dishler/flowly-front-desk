@@ -517,7 +517,23 @@ class KnowledgeService:
         if resolved_service is None or resolved_service.get("id") == remembered_service.get("id"):
             return False
 
-        if self._looks_like_contextual_relation_followup(normalized):
+        if self._looks_like_contextual_relation_followup(normalized) and not (
+            self._mentions_service_identity(normalized, resolved_service)
+            and not any(
+                marker in normalized
+                for marker in [
+                    "входить",
+                    "включ",
+                    "це",
+                    "його",
+                    "ним",
+                    "дешевш",
+                    "дорожч",
+                    "порад",
+                    "кращ",
+                ]
+            )
+        ):
             return False
 
         if (
