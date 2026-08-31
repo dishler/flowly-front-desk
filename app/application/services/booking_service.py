@@ -5111,8 +5111,28 @@ class BookingService:
             pending["service_name"] = str(service_name)
             pending["current_service_name"] = str(service_name)
         pending["context_summary"] = message_text[:280]
-        pending["customer_name"] = None
+        state = pending.get("state") or pending.get("step")
+        if state == BookingState.WAITING_FOR_CONTACT.value:
+            pending["customer_name"] = None
         self._save_pending_confirmation(sender_id, pending)
+
+        if state == BookingState.WAITING_FOR_TIME.value:
+            requested_day_label = pending.get("requested_day_label")
+            has_date_context = bool(pending.get("requested_date") or pending.get("start_dt"))
+            return {
+                "status": "waiting_for_time",
+                "reply_text": (
+                    self._build_missing_time_reply(language, requested_day_label)
+                    if has_date_context
+                    else self._build_unclear_time_reply(language)
+                ),
+                "event_created": False,
+                "requires_confirmation": False,
+                "booking_state": BookingState.WAITING_FOR_TIME.value,
+                "service_id": str(service_id) if service_id else None,
+                "start_dt": pending.get("start_dt"),
+                "requested_date": pending.get("requested_date"),
+            }
 
         return {
             "status": "waiting_for_contact",

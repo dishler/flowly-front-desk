@@ -6349,6 +6349,50 @@ async def test_dental_active_booking_service_switch_preserves_selected_date():
     assert calendar.created == []
 
 
+async def test_dental_waiting_time_service_correction_with_zamist_preserves_date():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    result = await processor.process(_message("а можна замість чистки одразу відбілювання?"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "teeth_whitening"
+    assert pending["requested_date"] == "2026-08-26"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_waiting_time_service_correction_with_not_this_but_that_switches_service():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    result = await processor.process(_message("ні, я не на чистку, а на відбілювання"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "teeth_whitening"
+    assert pending.get("requested_date") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_waiting_time_service_correction_to_consultation_preserves_date():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у понеділок"))
+    result = await processor.process(_message("насправді ні, на консультацію"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "dental_consultation"
+    assert pending["requested_date"] == "2026-08-24"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
 async def test_dental_unavailable_slot_later_refinement_preserves_day():
     calendar = SelectiveConfiguredCalendarService(
         [_kyiv_dt(2026, 8, 27, 16), _kyiv_dt(2026, 8, 27, 17)]

@@ -888,13 +888,17 @@ class MessageProcessor:
         text: str,
         fallback_service_id: str | None = None,
         fallback_service_name: str | None = None,
+        prefer_fallback_service: bool = False,
     ) -> None:
         if not self._is_configured_front_desk_mode():
             return
 
-        service = self._find_configured_front_desk_service(text)
-        service_id = str(service.get("id")) if service and service.get("id") else None
-        service_name = str(service.get("name")) if service and service.get("name") else None
+        service_id = fallback_service_id if prefer_fallback_service else None
+        service_name = fallback_service_name if prefer_fallback_service else None
+        service = None if prefer_fallback_service else self._find_configured_front_desk_service(text)
+        if service_id is None:
+            service_id = str(service.get("id")) if service and service.get("id") else None
+            service_name = str(service.get("name")) if service and service.get("name") else None
         if service_id is None and self._looks_like_generic_dentist_booking_without_service(text):
             return
         context_service_id, context_service_name = self._remembered_service_context_for_booking(
@@ -2505,12 +2509,14 @@ class MessageProcessor:
         booking_result: Dict[str, Any] | None = None,
         fallback_service_id: str | None = None,
         fallback_service_name: str | None = None,
+        prefer_fallback_service: bool = False,
     ) -> Dict[str, Any]:
         self._remember_front_desk_booking_service_context(
             message.sender_id,
             message.user_message,
             fallback_service_id=fallback_service_id,
             fallback_service_name=fallback_service_name,
+            prefer_fallback_service=prefer_fallback_service,
         )
         reply_text = self.reply_service.enforce_response_policy(
             reply_text=reply_text,
@@ -3146,27 +3152,49 @@ class MessageProcessor:
         return bool(contact_details["has_phone"] or contact_details["has_email"])
 
     def _find_service_correction(self, text: str) -> dict[str, Any] | None:
-        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
-        if knowledge_service is None:
-            return None
-
-        normalized = self._normalize_for_conversation_matching(text)
+        is_question = text.strip().endswith("?")
+        normalized = text.lower().replace("ʼ", "'").replace("’", "'")
+        normalized = re.sub(r"[,;:!?]+", " ", normalized)
+        normalized = " ".join(normalized.split())
         padded = f" {normalized} "
-        correction_markers = [" а не ", " не ", " not ", " instead ", " rather "]
+        correction_markers = [
+            " а не ",
+            " не ",
+            " а на ",
+            " замість ",
+            " одразу ",
+            " краще ",
+            " насправді ",
+            " ні ",
+            " not ",
+            " instead ",
+            " rather ",
+        ]
         if not any(marker in padded for marker in correction_markers):
             return None
 
-        preferred_text = normalized
-        for marker in correction_markers:
+        if (
+            is_question
+            and " може краще " in padded
+            and not any(marker in padded for marker in [" замість ", " не ", " ні "])
+        ):
+            return None
+
+        candidate_texts: list[str] = []
+        for marker in [" а на ", " а саме ", " одразу ", " краще ", " ні ", " instead ", " rather "]:
             if marker in padded:
-                preferred_text = padded.split(marker, maxsplit=1)[0].strip()
-                break
+                candidate_texts.append(padded.rsplit(marker, maxsplit=1)[-1].strip())
 
-        service = knowledge_service.find_service(preferred_text)
-        if service is not None:
-            return service
+        for marker in [" а не ", " не ", " not "]:
+            if marker in padded:
+                candidate_texts.append(padded.split(marker, maxsplit=1)[0].strip())
 
-        return knowledge_service.find_service(normalized)
+        for candidate in candidate_texts:
+            service = self._find_configured_front_desk_service(candidate)
+            if service is not None:
+                return service
+
+        return None
 
     def _is_pending_reschedule_continuation(self, sender_id: str) -> bool:
         if self.memory_service is None:
@@ -3651,6 +3679,35 @@ class MessageProcessor:
                         fallback_service_id=active_service_id,
                         fallback_service_name=active_service_name,
                     )
+
+            if booking_state == BookingState.WAITING_FOR_TIME:
+                service_correction = self._find_service_correction(message.user_message)
+                if service_correction is not None:
+                    corrected_service = dict(service_correction)
+                    corrected_service["id"] = self._effective_booking_service_id(
+                        str(corrected_service.get("id") or "")
+                    )
+                    booking_result = self.booking_service.handle_service_correction(
+                        sender_id=message.sender_id,
+                        message_text=message.user_message,
+                        service=corrected_service,
+                    )
+                    if booking_result is not None:
+                        corrected_service_id = str(
+                            corrected_service.get("id") or active_service_id or ""
+                        )
+                        corrected_service_name = str(
+                            corrected_service.get("name") or active_service_name or ""
+                        )
+                        return self._build_booking_reply_result(
+                            message=message,
+                            reply_text=booking_result["reply_text"],
+                            intent_value="booking_flow",
+                            booking_result=booking_result,
+                            fallback_service_id=corrected_service_id,
+                            fallback_service_name=corrected_service_name,
+                            prefer_fallback_service=True,
+                        )
 
             non_booking_reply = self._get_active_booking_non_booking_reply(
                 message.sender_id,
