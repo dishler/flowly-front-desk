@@ -1042,9 +1042,10 @@ class ReplyService:
         if kind == "price_options":
             reply_text = self._format_price_options_reply(service, price_options=match["price_options"])
             if reply_text is not None:
+                service_id = str(service.get("id") or remembered_service_id)
                 self._remember_front_desk_context(
                     sender_id,
-                    current_service_id=remembered_service_id,
+                    current_service_id=service_id,
                     question_context="pricing",
                 )
                 return reply_text

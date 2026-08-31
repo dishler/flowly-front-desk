@@ -359,6 +359,22 @@ class KnowledgeService:
         if self._is_explicit_service_switch(normalized, service, resolved_service):
             return None
 
+        option_owner_match = self._service_with_matching_price_options(normalized)
+        if (
+            option_owner_match is not None
+            and option_owner_match["service"].get("id") != service.get("id")
+            and (
+                self._looks_like_price_query(normalized)
+                or "дешевш" in normalized
+                or "дорожч" in normalized
+            )
+        ):
+            return {
+                "kind": "price_options",
+                "price_options": option_owner_match["price_options"],
+                "service": option_owner_match["service"],
+            }
+
         consultation_service = self._contextual_consultation_service(service, normalized)
         if consultation_service is not None:
             if self._looks_like_price_query(normalized):
@@ -711,6 +727,52 @@ class KnowledgeService:
             if any(self._token_matches_any(query_token, label_tokens) for query_token in query_tokens):
                 matches.append(option)
         return matches
+
+    def _service_with_matching_price_options(self, normalized: str) -> Optional[dict[str, Any]]:
+        best_match: dict[str, Any] | None = None
+        for service in self.get_services():
+            matches = self._matching_explicit_price_options(service, normalized)
+            if len(matches) < 2:
+                continue
+            if best_match is not None and len(matches) == len(best_match["price_options"]):
+                return None
+            if best_match is None or len(matches) > len(best_match["price_options"]):
+                best_match = {"service": service, "price_options": matches}
+        return best_match
+
+    def _matching_explicit_price_options(self, service: dict[str, Any], normalized: str) -> list[dict[str, Any]]:
+        price_options = self._valid_price_options(service)
+        if not price_options:
+            return []
+
+        query_tokens = self._service_query_tokens(normalized)
+        option_token_sets = [
+            self._service_query_tokens(str(option["label"]))
+            for option in price_options
+        ]
+        common_option_tokens = set.intersection(*option_token_sets) if option_token_sets else set()
+        matches = []
+        for option, label_tokens in zip(price_options, option_token_sets):
+            distinguishing_tokens = label_tokens - common_option_tokens
+            if any(
+                self._tokens_match_as_option_detail(query_token, label_token)
+                for query_token in query_tokens
+                for label_token in distinguishing_tokens
+            ):
+                matches.append(option)
+        return matches
+
+    def _tokens_match_as_option_detail(self, query_token: str, label_token: str) -> bool:
+        if query_token == label_token:
+            return True
+        return (
+            len(query_token) >= 6
+            and len(label_token) >= 6
+            and (
+                query_token.startswith(label_token[:6])
+                or label_token.startswith(query_token[:6])
+            )
+        )
 
     def _valid_price_options(self, service: dict[str, Any]) -> list[dict[str, Any]]:
         price_options = service.get("price_options")

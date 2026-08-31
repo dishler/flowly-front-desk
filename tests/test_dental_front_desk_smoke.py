@@ -2457,6 +2457,53 @@ async def test_dental_braces_price_then_aligners_more_expensive_states_not_direc
 
 
 @pytest.mark.asyncio
+async def test_dental_braces_option_comparison_beats_stale_aligners_context():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("скільки коштують металеві брекети?"))
+    await processor.process(_message("а це дорожче за елайнери?"))
+    result = await processor.process(_message("а керамічні дешевше за металеві?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Металеві брекети — від 19000 грн" in result["reply_text"]
+    assert "Керамічні брекети — від 30000 грн" in result["reply_text"]
+    assert "Елайнери коштують" not in result["reply_text"]
+    assert context["current_service_id"] == "braces"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_braces_price_then_aligners_question_still_switches_to_aligners():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("скільки коштують металеві брекети?"))
+    result = await processor.process(_message("А елайнери?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Елайнери коштують від 60000 грн" in result["reply_text"]
+    assert context["current_service_id"] == "aligners"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_unrelated_stale_context_cannot_hijack_braces_option_comparison():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("скільки коштують елайнери?"))
+    result = await processor.process(_message("а керамічні дешевше за металеві?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Металеві брекети — від 19000 грн" in result["reply_text"]
+    assert "Керамічні брекети — від 30000 грн" in result["reply_text"]
+    assert "Елайнери коштують" not in result["reply_text"]
+    assert context["current_service_id"] == "braces"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_aligners_price_then_braces_cheaper_swaps_labels_correctly():
     """Reverse starting point of the differing-unit pair: must not be
     hardcoded to a fixed braces-then-aligners direction -- the previously
