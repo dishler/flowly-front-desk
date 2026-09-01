@@ -727,7 +727,10 @@ class ReplyService:
             if location:
                 return f"Ми знаходимося: {str(location).strip().rstrip('.!?… ')}."
 
-        if any(marker in normalized for marker in ["графік", "години", "працюєте", "working hours", "hours"]):
+        if any(
+            marker in normalized
+            for marker in ["графік", "години", "працює", "працюєте", "відкрит", "working hours", "hours"]
+        ):
             working_hours = business.get("working_hours")
             if isinstance(working_hours, dict) and working_hours:
                 parts = [f"{key}: {value}" for key, value in working_hours.items()]

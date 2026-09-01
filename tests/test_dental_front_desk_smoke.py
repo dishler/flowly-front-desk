@@ -11421,6 +11421,107 @@ async def test_dental_active_booking_admin_callback_request_with_date_not_treate
     assert calendar.created == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "адміністратор працює сьогодні?",
+        "ви сьогодні відкриті?",
+        "лікар сьогодні працює?",
+        "ви працюєте сьогодні?",
+        "клініка працює сьогодні?",
+        "можна сьогодні оплатити карткою?",
+        "сьогодні є адміністратор?",
+    ],
+)
+async def test_dental_active_booking_fact_question_with_today_preserves_waiting_for_time(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    before_pending = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+
+    result = await processor.process(_message(text))
+    after_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_grounded_question"
+    assert result["booking_result"] is None
+    assert after_pending == before_pending
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
+    assert "Добре, на сьогодні" not in result["reply_text"]
+    if "відкрит" in text or "ви працюєте" in text:
+        assert "Графік роботи" in result["reply_text"]
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "адміністратор працює сьогодні?",
+        "ви сьогодні відкриті?",
+        "лікар сьогодні працює?",
+        "можна сьогодні оплатити карткою?",
+    ],
+)
+async def test_dental_active_booking_fact_question_with_today_preserves_waiting_for_contact_slot(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу о 15"))
+    before_pending = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+
+    result = await processor.process(_message(text))
+    after_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_grounded_question"
+    assert result["booking_result"] is None
+    assert before_pending.get("start_dt") == "2026-08-26T15:00:00+03:00"
+    assert after_pending == before_pending
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_CONTACT
+    if "відкрит" in text:
+        assert "Графік роботи" in result["reply_text"]
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "краще сьогодні",
+        "а можна сьогодні?",
+        "давайте сьогодні",
+    ],
+)
+async def test_dental_active_booking_genuine_today_date_corrections_still_update_pending(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] in {"booking_flow", "booking_availability_question"}
+    assert pending.get("requested_date") == "2026-08-22"
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
+    assert calendar.created == []
+
+
+async def test_dental_active_booking_combined_fact_and_booking_today_update_allowed():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    result = await processor.process(_message("ви сьогодні відкриті? хочу прийти сьогодні"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_flow"
+    assert pending.get("requested_date") == "2026-08-22"
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
+    assert calendar.created == []
+
+
 async def test_dental_active_booking_genuine_continuation_still_checks_calendar():
     processor, calendar = _build_dental_processor()
 

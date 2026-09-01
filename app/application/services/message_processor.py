@@ -1563,8 +1563,10 @@ class MessageProcessor:
 
         if not self._looks_like_explicit_front_desk_fact_question(text):
             return None
+        if self._looks_like_fact_question_with_booking_update(text):
+            return None
 
-        return self.reply_service.get_contextual_front_desk_reply(
+        grounded_reply = self.reply_service.get_contextual_front_desk_reply(
             NormalizedMessage(
                 platform="instagram",
                 sender_id=sender_id,
@@ -1573,6 +1575,19 @@ class MessageProcessor:
                 user_message=text,
             )
         )
+        return grounded_reply or self.reply_service.get_safe_fallback_reply(
+            self.reply_service.detect_user_language(text)
+        )
+
+    def _looks_like_fact_question_with_booking_update(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        has_booking_action = bool(
+            re.search(
+                r"\b(?:хочу|давай\w*|запиш\w*|прийти|потрапити|підходить|краще)\b",
+                normalized,
+            )
+        )
+        return has_booking_action and self._message_has_temporal_booking_signal(text)
 
     def _looks_like_explicit_front_desk_fact_question(self, text: str) -> bool:
         normalized = self._normalize_for_conversation_matching(text)
@@ -1605,10 +1620,23 @@ class MessageProcessor:
             "страховка",
             "страховою",
         ]
+        staff_availability_markers = [
+            "адміністратор",
+            "администратор",
+            "оператор",
+            "лікар",
+            "доктор",
+        ]
+        has_staff_availability_question = (
+            any(marker in normalized for marker in staff_availability_markers)
+            and any(marker in normalized for marker in ["сьогодні", "зараз", "є", "працює", "працюють"])
+            and not self._looks_like_human_handoff_request(text)
+        )
         return (
             any(marker in normalized for marker in location_markers)
             or any(marker in normalized for marker in payment_markers)
             or self._looks_like_business_hours_question(text)
+            or has_staff_availability_question
         )
 
     def _reset_stale_temporal_context_for_fresh_booking(self, sender_id: str, text: str) -> None:
@@ -4325,7 +4353,9 @@ class MessageProcessor:
                         fallback_service_name=booking_service_name,
                     )
 
-            grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)
+            grounded_reply = None
+            if not self._looks_like_fact_question_with_booking_update(message.user_message):
+                grounded_reply = self.reply_service.get_contextual_front_desk_reply(message)
             if grounded_reply:
                 pending = self.booking_service._get_pending_confirmation(message.sender_id) or {}
                 context = self.memory_service.get_context(message.sender_id) if self.memory_service else {}
