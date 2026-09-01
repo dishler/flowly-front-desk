@@ -880,6 +880,25 @@ class KnowledgeService:
         }
     )
 
+    _GENERIC_SERVICE_TEXT_OVERLAP_TOKENS = frozenset(
+        {
+            "а",
+            "від",
+            "до",
+            "на",
+            "у",
+            "в",
+            "і",
+            "й",
+            "та",
+            "з",
+            "за",
+            "для",
+            "по",
+            "про",
+        }
+    )
+
     def _find_contextual_faq_answer(
         self,
         service: dict[str, Any],
@@ -955,6 +974,11 @@ class KnowledgeService:
 
     def _message_matches_service_text(self, normalized: str, service: dict[str, Any]) -> bool:
         query_tokens = self._service_query_tokens(normalized)
+        query_tokens = {
+            token
+            for token in query_tokens
+            if token not in self._GENERIC_SERVICE_TEXT_OVERLAP_TOKENS
+        }
         if not query_tokens:
             return False
         service_tokens = self._service_tokens(service, include_description=True)

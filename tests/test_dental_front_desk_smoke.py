@@ -11365,6 +11365,87 @@ async def test_dental_metro_question_during_active_booking_preserves_pending_sta
 @pytest.mark.parametrize(
     "text",
     [
+        "Від Арсенальної далеко?",
+        "Від Арсенальної далеко йти?",
+        "Скільки йти від метро?",
+        "Від метро далеко йти?",
+    ],
+)
+async def test_dental_active_booking_location_followup_not_hijacked_by_cleaning_context(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатися на чистку зубів"))
+    await processor.process(_message("Добрий вечір, де ви знаходитесь?"))
+    await processor.process(_message("А біля якого метро?"))
+    before_pending = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+
+    result = await processor.process(_message(text))
+    after_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_grounded_question"
+    assert "Липська, 12" in result["reply_text"]
+    assert "Арсенальна" in result["reply_text"]
+    assert "Професійна гігієна" not in result["reply_text"]
+    assert "1800 грн" not in result["reply_text"]
+    assert after_pending == before_pending
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Як від метро до вас дійти?",
+        "А як до вас дійти від Арсенальної?",
+    ],
+)
+async def test_dental_active_booking_existing_directions_followups_still_location_replies(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатися на чистку зубів"))
+    before_pending = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+
+    result = await processor.process(_message(text))
+    after_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_grounded_question"
+    assert "Липська, 12" in result["reply_text"]
+    assert "Арсенальна" in result["reply_text"]
+    assert after_pending == before_pending
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "followup", "expected"),
+    [
+        (["скільки коштує чистка?"], "а скільки?", "1800 грн"),
+        (["видалення зуба"], "а це боляче?", "знеболення"),
+        (["лікування карієсу"], "а входить анестезія?", "анестез"),
+    ],
+)
+async def test_dental_contextual_followups_still_use_meaningful_service_context(
+    setup, followup, expected
+):
+    processor, calendar = _build_dental_processor()
+
+    for text in setup:
+        await processor.process(_message(text))
+    result = await processor.process(_message(followup))
+
+    assert expected in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
         "найближчий вільний час",
         "який найближчий час?",
         "коли найближче можна?",
