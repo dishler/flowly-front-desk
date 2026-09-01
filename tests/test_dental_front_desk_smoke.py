@@ -10777,6 +10777,74 @@ async def test_dental_installment_synonyms_get_same_grounded_answer(text):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "чи працює монобанк?",
+        "можна через ПУМБ?",
+        "у вас є monobank?",
+        "через monobank можна?",
+        "ПУМБ підтримуєте?",
+    ],
+)
+async def test_dental_installment_supported_bank_names_use_grounded_faq(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["reply_text"] == INSTALLMENT_FAQ_MARKER
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert calendar.checked == []
+    assert calendar.created == []
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "чи працює монобанк?",
+        "можна через ПУМБ?",
+        "у вас є monobank?",
+        "через monobank можна?",
+        "ПУМБ підтримуєте?",
+    ],
+)
+async def test_dental_installment_bank_faq_during_active_booking_preserves_state(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    await processor.process(_message("о 15"))
+    before = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+    creates_before = len(calendar.created)
+
+    result = await processor.process(_message(text))
+    after = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["reply_text"] == INSTALLMENT_FAQ_MARKER
+    assert result["intent"] == "booking_grounded_question"
+    assert after == before
+    assert after["current_service_id"] == "dental_cleaning"
+    assert after["start_dt"] == "2026-08-26T15:00:00+03:00"
+    assert len(calendar.checked) == checks_before
+    assert len(calendar.created) == creates_before
+
+
+@pytest.mark.asyncio
+async def test_dental_unknown_bank_name_does_not_get_supported_installment_answer():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("через приватбанк можна?"))
+
+    assert INSTALLMENT_FAQ_MARKER not in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+
+
+@pytest.mark.asyncio
 async def test_dental_insurance_question_does_not_answer_with_hours():
     processor, calendar = _build_dental_processor()
 
