@@ -6380,6 +6380,74 @@ async def test_dental_explicit_service_switch_beats_stale_topic_context():
     assert calendar.created == []
 
 
+async def test_dental_fresh_negative_booking_stop_does_not_start_booking():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("не записуйте поки"))
+
+    assert result["intent"] == "booking_flow_stopped"
+    assert "не записую" in result["reply_text"]
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_active_negative_booking_stop_clears_unconfirmed_pending():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    result = await processor.process(_message("не записуйте поки"))
+
+    assert result["intent"] == "booking_flow_stopped"
+    assert "не записую" in result["reply_text"]
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_active_changed_mind_no_need_stops_unconfirmed_booking():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    result = await processor.process(_message("я передумав, не треба"))
+
+    assert result["intent"] == "booking_flow_stopped"
+    assert "не записую" in result["reply_text"]
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_negative_booking_stop_does_not_hijack_service_correction():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    result = await processor.process(_message("не на чистку, а на відбілювання"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "teeth_whitening"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_confirmed_cancel_still_uses_calendar_delete_path_after_stop_fix():
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    _mark_dental_booking_confirmed(processor, event_id="calendar-event-stop-guard")
+
+    result = await processor.process(_message("скасуйте запис"))
+
+    assert result["booking_result"]["status"] == "cancelled"
+    assert calendar.deleted == ["calendar-event-stop-guard"]
+    assert calendar.created == []
+
+
 async def test_dental_active_booking_service_switch_preserves_selected_date():
     calendar = SelectiveConfiguredCalendarService([_kyiv_dt(2026, 8, 27, 15)])
     processor, calendar = _build_dental_processor(calendar_service=calendar)

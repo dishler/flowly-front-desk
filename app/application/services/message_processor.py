@@ -1304,6 +1304,25 @@ class MessageProcessor:
         compact = re.sub(r"[.!?…,]+$", "", normalized).strip()
         return bool(re.fullmatch(r"(?:я\s+)?передумав[аи]?", compact))
 
+    def _looks_like_unconfirmed_booking_stop(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        if not normalized:
+            return False
+        if self._find_service_correction(text) is not None:
+            return False
+
+        stop_patterns = [
+            r"\bне\s+запис\w*",
+            r"\bне\s+треба\s+запис\w*",
+            r"\bпоки\s+не\s+треба\s+запис\w*",
+            r"\bбез\s+запис\w*",
+            r"\bпередумав[аи]?\b.*\bне\s+треба\b",
+        ]
+        return any(re.search(pattern, normalized) for pattern in stop_patterns)
+
+    def _get_unconfirmed_booking_stop_reply(self) -> str:
+        return "Добре, не записую. Якщо захочете, напишіть — допоможу підібрати час."
+
     def _looks_like_availability_question(self, text: str) -> bool:
         normalized = text.strip().lower()
         markers = [
@@ -3709,6 +3728,16 @@ class MessageProcessor:
                             prefer_fallback_service=True,
                         )
 
+            if self._looks_like_unconfirmed_booking_stop(message.user_message):
+                self.booking_service._clear_pending_confirmation(message.sender_id)
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=self._get_unconfirmed_booking_stop_reply(),
+                    intent_value="booking_flow_stopped",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
             non_booking_reply = self._get_active_booking_non_booking_reply(
                 message.sender_id,
                 message.user_message,
@@ -4399,6 +4428,18 @@ class MessageProcessor:
                 message=message,
                 reply_text=self.booking_service.get_no_active_booking_reply(language),
                 intent_value="booking_no_active_booking",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
+
+        if (
+            booking_state == BookingState.NONE
+            and self._looks_like_unconfirmed_booking_stop(message.user_message)
+        ):
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=self._get_unconfirmed_booking_stop_reply(),
+                intent_value="booking_flow_stopped",
                 routing_category="answered_basic",
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
