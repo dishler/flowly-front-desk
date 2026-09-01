@@ -1169,12 +1169,19 @@ class MessageProcessor:
     def _has_active_booking_payload(self, text: str) -> bool:
         if self._looks_like_business_hours_question(text):
             return False
+        normalized = self._normalize_for_booking_keywords(text)
         if (
             self._find_configured_front_desk_service(text) is not None
             and text.strip().endswith("?")
-            and not self._has_service_booking_action_signal(self._normalize_for_booking_keywords(text))
+            and (
+                not self._has_service_booking_action_signal(normalized)
+                or re.search(r"\bможна\s+на\b", normalized)
+            )
             and not self._looks_like_active_booking_service_correction(text)
-            and not re.search(r"\b(?:давайте|давай)\b", self._normalize_for_booking_keywords(text))
+            and not re.search(r"\b(?:давайте|давай)\b", normalized)
+            and self.booking_service._extract_requested_date(text) is None
+            and self.booking_service._parse_time_only(text) is None
+            and self.booking_service._parse_requested_datetime(text) is None
         ):
             # A bare "X?" naming a different service ("А елайнери?") is an
             # FAQ-style follow-up, not a booking-payload/correction attempt
@@ -1205,7 +1212,6 @@ class MessageProcessor:
         if self._service_from_missing_service_reply(text) is not None:
             return True
         service = self._find_configured_front_desk_service(text)
-        normalized = self._normalize_for_booking_keywords(text)
         if service is not None and (
             not self._looks_like_service_faq_request(normalized)
             or self._has_service_booking_action_signal(normalized)
@@ -3346,6 +3352,8 @@ class MessageProcessor:
             " одразу ",
             " краще ",
             " насправді ",
+            " все-таки ",
+            " все таки ",
             " ні ",
             " not ",
             " instead ",
@@ -3362,6 +3370,16 @@ class MessageProcessor:
             return None
 
         candidate_texts: list[str] = []
+        for pattern in [
+            r"\bзамість\b.+?\b(?:на|одразу)\s+(.+)$",
+            r"\bнасправді\s+(?:хочу\s+)?(.+)$",
+            r"\bвсе\s*таки\s+(?:на\s+)?(.+)$",
+            r"\bвсе-таки\s+(?:на\s+)?(.+)$",
+        ]:
+            match = re.search(pattern, normalized)
+            if match:
+                candidate_texts.append(match.group(1).strip())
+
         for marker in [" а на ", " а саме ", " одразу ", " краще ", " ні ", " instead ", " rather "]:
             if marker in padded:
                 candidate_texts.append(padded.rsplit(marker, maxsplit=1)[-1].strip())
@@ -4084,11 +4102,17 @@ class MessageProcessor:
             if booking_state == BookingState.WAITING_FOR_CONTACT:
                 booking_result = None
                 service_correction = self._find_service_correction(message.user_message)
+                corrected_service_id = active_service_id
+                corrected_service_name = active_service_name
                 if service_correction is not None:
                     booking_result = self.booking_service.handle_service_correction(
                         sender_id=message.sender_id,
                         message_text=message.user_message,
                         service=service_correction,
+                    )
+                    corrected_service_id = str(service_correction.get("id") or active_service_id or "")
+                    corrected_service_name = str(
+                        service_correction.get("name") or active_service_name or ""
                     )
                 elif self.booking_service._looks_like_selected_slot_reconsideration(
                     message.user_message
@@ -4113,8 +4137,9 @@ class MessageProcessor:
                         reply_text=booking_result["reply_text"],
                         intent_value="booking_flow",
                         booking_result=booking_result,
-                        fallback_service_id=active_service_id,
-                        fallback_service_name=active_service_name,
+                        fallback_service_id=corrected_service_id,
+                        fallback_service_name=corrected_service_name,
+                        prefer_fallback_service=service_correction is not None,
                     )
 
             if (

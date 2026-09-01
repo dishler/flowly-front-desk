@@ -6805,6 +6805,111 @@ async def test_dental_waiting_time_service_correction_to_consultation_preserves_
     assert calendar.created == []
 
 
+@pytest.mark.parametrize(
+    ("text", "service_id", "service_label"),
+    [
+        ("а можна замість чистки на відбілювання?", "teeth_whitening", "відбілювання"),
+        ("ні, я не на чистку, а на відбілювання", "teeth_whitening", "відбілювання"),
+        ("давайте краще відбілювання", "teeth_whitening", "відбілювання"),
+        ("насправді хочу відбілювання", "teeth_whitening", "відбілювання"),
+        ("а можна все-таки на консультацію?", "dental_consultation", "консультац"),
+    ],
+)
+async def test_dental_waiting_time_service_correction_acknowledges_and_preserves_date(
+    text, service_id, service_label
+):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["reply_text"].startswith("Так, змінив послугу: ")
+    assert service_label in result["reply_text"].lower()
+    assert "середу" in result["reply_text"]
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["current_service_id"] == service_id
+    assert pending["requested_date"] == "2026-08-26"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    ("text", "service_id", "service_label"),
+    [
+        ("ні, я не на чистку, а на відбілювання", "teeth_whitening", "відбілювання"),
+        ("давайте краще відбілювання", "teeth_whitening", "відбілювання"),
+        ("насправді хочу відбілювання", "teeth_whitening", "відбілювання"),
+    ],
+)
+async def test_dental_waiting_time_service_correction_before_date_asks_for_date_with_ack(
+    text, service_id, service_label
+):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["reply_text"].startswith("Так, змінив послугу: ")
+    assert service_label in result["reply_text"].lower()
+    assert "який день" in result["reply_text"].lower()
+    assert pending["state"] == "WAITING_FOR_TIME"
+    assert pending["current_service_id"] == service_id
+    assert pending.get("requested_date") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_waiting_contact_service_correction_preserves_selected_slot_with_ack():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    await processor.process(_message("11"))
+    checks_before = len(calendar.checked)
+    result = await processor.process(_message("давайте краще відбілювання"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["booking_result"]["status"] == "waiting_for_contact"
+    assert result["reply_text"].startswith("Так, змінив послугу: ")
+    assert "відбілювання" in result["reply_text"].lower()
+    assert "ім’я та номер телефону" in result["reply_text"]
+    assert pending["state"] == "WAITING_FOR_CONTACT"
+    assert pending["current_service_id"] == "teeth_whitening"
+    assert pending["service_id"] == "teeth_whitening"
+    assert pending["start_dt"] == "2026-08-26T11:00:00+03:00"
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "а можна на консультацію?",
+        "скільки коштує консультація?",
+        "а консультація є?",
+    ],
+)
+async def test_dental_active_booking_service_correction_controls_do_not_overwrite_service(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    before = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    result = await processor.process(_message(text))
+    after = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert not result["reply_text"].startswith("Так, змінив послугу: ")
+    assert after["current_service_id"] == before["current_service_id"]
+    assert after["requested_date"] == before["requested_date"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
 async def test_dental_unavailable_slot_later_refinement_preserves_day():
     calendar = SelectiveConfiguredCalendarService(
         [_kyiv_dt(2026, 8, 27, 16), _kyiv_dt(2026, 8, 27, 17)]

@@ -5104,6 +5104,7 @@ class BookingService:
         language = pending.get("language") or self._detect_language(message_text)
         service_id = service.get("id")
         service_name = service.get("name")
+        previous_service_id = pending.get("service_id") or pending.get("current_service_id")
         if service_id:
             pending["service_id"] = str(service_id)
             pending["current_service_id"] = str(service_id)
@@ -5119,13 +5120,20 @@ class BookingService:
         if state == BookingState.WAITING_FOR_TIME.value:
             requested_day_label = pending.get("requested_day_label")
             has_date_context = bool(pending.get("requested_date") or pending.get("start_dt"))
+            reply_text = (
+                self._build_missing_time_reply(language, requested_day_label)
+                if has_date_context
+                else self._build_unclear_time_reply(language)
+            )
+            reply_text = self._with_service_correction_acknowledgement(
+                reply_text=reply_text,
+                service_id=service_id,
+                service_name=service_name,
+                previous_service_id=previous_service_id,
+            )
             return {
                 "status": "waiting_for_time",
-                "reply_text": (
-                    self._build_missing_time_reply(language, requested_day_label)
-                    if has_date_context
-                    else self._build_unclear_time_reply(language)
-                ),
+                "reply_text": reply_text,
                 "event_created": False,
                 "requires_confirmation": False,
                 "booking_state": BookingState.WAITING_FOR_TIME.value,
@@ -5134,15 +5142,36 @@ class BookingService:
                 "requested_date": pending.get("requested_date"),
             }
 
+        reply_text = self._with_service_correction_acknowledgement(
+            reply_text=self._build_contact_retry_reply(language),
+            service_id=service_id,
+            service_name=service_name,
+            previous_service_id=previous_service_id,
+        )
         return {
             "status": "waiting_for_contact",
-            "reply_text": self._build_contact_retry_reply(language),
+            "reply_text": reply_text,
             "event_created": False,
             "requires_contact": True,
             "booking_state": BookingState.WAITING_FOR_CONTACT.value,
             "service_id": str(service_id) if service_id else None,
             "start_dt": pending.get("start_dt"),
         }
+
+    def _with_service_correction_acknowledgement(
+        self,
+        *,
+        reply_text: str,
+        service_id: Any,
+        service_name: Any,
+        previous_service_id: Any,
+    ) -> str:
+        if not service_id or str(service_id) == str(previous_service_id or ""):
+            return reply_text
+        label = str(service_name or "").strip()
+        if not label:
+            return reply_text
+        return f"Так, змінив послугу: {label[:1].lower() + label[1:]}. {reply_text}"
 
     def _deserialize_pending_requested_date(self, value: Any) -> date | None:
         if isinstance(value, datetime):
