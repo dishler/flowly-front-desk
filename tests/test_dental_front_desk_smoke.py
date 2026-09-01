@@ -11115,6 +11115,93 @@ async def test_dental_active_booking_location_and_metro_question_not_hijacked_by
     assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "яке найближче метро?",
+        "біля якого метро ви?",
+        "до вас далеко від метро?",
+        "ви біля Арсенальної?",
+        "де ви знаходитесь?",
+        "яка адреса?",
+    ],
+)
+async def test_dental_fresh_metro_location_questions_use_grounded_location(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert "Липська, 12" in result["reply_text"]
+    assert "Арсенальна" in result["reply_text"]
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_metro_question_after_service_context_does_not_start_nearest_booking():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("скільки коштує чистка?"))
+    checks_before = len(calendar.checked)
+    result = await processor.process(_message("а яке найближче метро?"))
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert "Липська, 12" in result["reply_text"]
+    assert "Арсенальна" in result["reply_text"]
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_metro_question_during_active_booking_preserves_pending_state():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    before_pending = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    before_context = processor.memory_service.get_context("patient-1")
+    checks_before = len(calendar.checked)
+
+    result = await processor.process(_message("а біля якого метро ви?"))
+    after_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+    after_context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "booking_grounded_question"
+    assert "Липська, 12" in result["reply_text"]
+    assert "Арсенальна" in result["reply_text"]
+    assert after_pending == before_pending
+    assert after_context.get("current_service_id") == before_context.get("current_service_id")
+    assert after_context.get("current_service_name") == before_context.get("current_service_name")
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "найближчий вільний час",
+        "який найближчий час?",
+        "коли найближче можна?",
+    ],
+)
+async def test_dental_metro_location_guard_preserves_nearest_availability_requests(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    result = await processor.process(_message(text))
+
+    assert result["intent"] in {"booking_flow", "booking_nearest_availability", "booking_availability_question"}
+    assert result["booking_result"] is not None
+    assert "Липська" not in result["reply_text"]
+    assert calendar.checked != []
+    assert calendar.created == []
+
+
 async def test_dental_active_booking_hours_and_payment_faq_not_hijacked_by_booking_context():
     processor, calendar = _build_dental_processor()
 

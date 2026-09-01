@@ -711,7 +711,18 @@ class ReplyService:
             return faq_answer
 
         business = self.knowledge_service.get_business() or {}
-        if any(marker in normalized for marker in ["де ви", "адрес", "локац", "location", "address"]):
+        if any(
+            marker in normalized
+            for marker in [
+                "де ви",
+                "адрес",
+                "локац",
+                "location",
+                "address",
+                "метро",
+                "арсенальн",
+            ]
+        ):
             location = business.get("location")
             if location:
                 return f"Ми знаходимося: {str(location).strip().rstrip('.!?… ')}."

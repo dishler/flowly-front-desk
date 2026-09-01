@@ -325,6 +325,15 @@ class MessageProcessor:
             "відповім, якщо це є в базі знань."
         )
 
+    def _get_explicit_metro_location_fact_reply(self, text: str) -> str | None:
+        if not self._is_configured_front_desk_mode():
+            return None
+        normalized = self._normalize_for_conversation_matching(text)
+        if not any(marker in normalized for marker in ["метро", "арсенальн"]):
+            return None
+        language = self.reply_service.detect_user_language(text)
+        return self.reply_service.get_grounded_front_desk_reply(text, language)
+
     def _get_installment_faq_reply(
         self,
         sender_id: str,
@@ -1575,6 +1584,7 @@ class MessageProcessor:
             "адрес",
             "локац",
             "метро",
+            "арсенальн",
             "як до вас",
             "доїхати",
             "добратися",
@@ -4935,6 +4945,16 @@ class MessageProcessor:
                     fallback_service_id=effective_service_id,
                     fallback_service_name=service_name,
                 )
+
+        metro_location_reply = self._get_explicit_metro_location_fact_reply(message.user_message)
+        if metro_location_reply is not None:
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=metro_location_reply,
+                intent_value="front_desk_contextual_answer",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
 
         if (
             self._is_configured_front_desk_mode()
