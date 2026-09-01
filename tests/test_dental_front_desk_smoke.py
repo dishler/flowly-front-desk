@@ -7300,6 +7300,113 @@ async def test_dental_pain_detail_keeps_nearest_booking_offer_context():
     assert calendar.created == []
 
 
+@pytest.mark.asyncio
+async def test_dental_vague_symptom_clears_stale_xray_pricing_context():
+    processor, calendar = _build_dental_processor()
+
+    xray = await processor.process(_message("скільки коштує рентген?"))
+    symptom = await processor.process(_message("зуб турбує"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Рентген-діагностика" in xray["reply_text"]
+    assert symptom["intent"] == "pain_acknowledgement"
+    assert "Розумію" in symptom["reply_text"]
+    assert "рентген" not in symptom["reply_text"].lower()
+    assert "400 грн" not in symptom["reply_text"]
+    assert context.get("current_service_id") is None
+    assert context["question_context"] == "pain_nearest_offer"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_vague_symptom_prevents_next_price_followup_from_reusing_xray():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("скільки коштує рентген?"))
+    await processor.process(_message("зуб турбує"))
+    price = await processor.process(_message("скільки коштує?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert "Рентген-діагностика" not in price["reply_text"]
+    assert "400 грн" not in price["reply_text"]
+    assert "600 грн" not in price["reply_text"]
+    assert "1200 грн" not in price["reply_text"]
+    assert price["intent"] == "front_desk_safe_fallback"
+    assert context.get("current_service_id") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_text", ["скільки коштує консультація?", "скільки лікування карієсу?"])
+async def test_dental_vague_symptom_clears_other_stale_pricing_contexts(first_text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message(first_text))
+    symptom = await processor.process(_message("мене турбує зуб"))
+    price = await processor.process(_message("скільки коштує?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert symptom["intent"] == "pain_acknowledgement"
+    assert "Розумію" in symptom["reply_text"]
+    assert "700 грн" not in symptom["reply_text"]
+    assert "2200 грн" not in symptom["reply_text"]
+    assert "700 грн" not in price["reply_text"]
+    assert "2200 грн" not in price["reply_text"]
+    assert context.get("current_service_id") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["болить зуб", "зуб турбує"])
+async def test_dental_fresh_vague_symptom_uses_pain_acknowledgement(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "pain_acknowledgement"
+    assert "Розумію" in result["reply_text"]
+    assert "Подивитися найближчий запис" in result["reply_text"]
+    assert context.get("current_service_id") is None
+    assert context["question_context"] == "pain_nearest_offer"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_explicit_xray_pricing_still_resolves_normally():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("скільки коштує рентген?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert "Рентген-діагностика" in result["reply_text"]
+    assert "400 грн" in result["reply_text"]
+    assert context["current_service_id"] == "dental_diagnostics"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_procedure_comfort_followup_keeps_known_context():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("скільки коштує видалення зуба?"))
+    result = await processor.process(_message("а це боляче?"))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert "Видалення зуба" in result["reply_text"]
+    assert "комфорту" in result["reply_text"]
+    assert context["current_service_id"] == "tooth_extraction"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
 async def test_dental_pain_mention_with_booking_intent_starts_booking_flow():
     """Matrix 7: pain mentioned together with explicit booking intent gets
     acknowledged once, then proceeds into the normal booking flow (here:

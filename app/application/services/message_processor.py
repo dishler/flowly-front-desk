@@ -547,6 +547,33 @@ class MessageProcessor:
         markers = ["до дантиста", "до стоматолога", "дантист", "стоматолог"]
         return any(marker in normalized for marker in markers)
 
+    def _looks_like_nonspecific_tooth_symptom(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        if self._find_configured_front_desk_service(text) is not None:
+            return False
+        if self._looks_like_booking_message(text) or self._looks_like_fresh_booking_request(text):
+            return False
+        if self._looks_like_front_desk_price_request(text):
+            return False
+
+        if not (
+            re.search(r"\bзуб\w*\b", normalized)
+            or re.search(r"\bжува\w*\b", normalized)
+        ):
+            return False
+
+        symptom_markers = [
+            "болить",
+            "болять",
+            "боляче",
+            "ниє",
+            "ниють",
+            "турбує",
+            "турбують",
+            "не знаю що з зуб",
+        ]
+        return any(marker in normalized for marker in symptom_markers)
+
     def _dental_consultation_service(self) -> tuple[str, str] | None:
         knowledge_service = getattr(self.reply_service, "knowledge_service", None)
         service = (
@@ -4692,6 +4719,27 @@ class MessageProcessor:
                     fallback_service_id=booking_service_id,
                     fallback_service_name=booking_service_name,
                 )
+
+        if (
+            self._is_configured_front_desk_mode()
+            and self._looks_like_nonspecific_tooth_symptom(message.user_message)
+        ):
+            language = self.reply_service.detect_user_language(message.user_message)
+            if self.memory_service is not None:
+                self.memory_service.update_context(
+                    message.sender_id,
+                    question_context="pain_nearest_offer",
+                    pain_context_summary=message.user_message[:280],
+                    current_service_id=None,
+                    current_service_name=None,
+                )
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=self.booking_service.get_pain_acknowledgement_reply(language),
+                intent_value="pain_acknowledgement",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
 
         # A bare pain mention with no booking/scheduling intent ("болить
         # зуб") deserves a human acknowledgement, not silence or a generic
