@@ -10910,6 +10910,33 @@ async def test_dental_installment_supported_bank_names_use_grounded_faq(text):
 @pytest.mark.parametrize(
     "text",
     [
+        "можна оплата частинами за брекети?",
+        "можна оплатити брекети частинами?",
+        "за брекети є розстрочка?",
+        "брекети можна взяти в розстрочку?",
+        "можна оплатити відбілювання частинами?",
+        "за імпланти можна платити частинами?",
+    ],
+)
+async def test_dental_named_service_installment_questions_do_not_start_booking(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["reply_text"] == INSTALLMENT_FAQ_MARKER
+    assert result["intent"] == "front_desk_contextual_answer"
+    assert pending is None
+    assert context["question_context"] == "faq"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
         "чи працює монобанк?",
         "можна через ПУМБ?",
         "у вас є monobank?",
@@ -10940,6 +10967,41 @@ async def test_dental_installment_bank_faq_during_active_booking_preserves_state
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "можна оплата частинами за брекети?",
+        "можна оплатити брекети частинами?",
+        "за брекети є розстрочка?",
+        "брекети можна взяти в розстрочку?",
+        "можна оплатити відбілювання частинами?",
+        "за імпланти можна платити частинами?",
+    ],
+)
+async def test_dental_named_service_installment_faq_during_active_booking_preserves_state(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    await processor.process(_message("о 15"))
+    before_pending = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    before_context = processor.memory_service.get_context("patient-1")
+    checks_before = len(calendar.checked)
+    creates_before = len(calendar.created)
+
+    result = await processor.process(_message(text))
+    after_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+    after_context = processor.memory_service.get_context("patient-1")
+
+    assert result["reply_text"] == INSTALLMENT_FAQ_MARKER
+    assert result["intent"] == "booking_grounded_question"
+    assert after_pending == before_pending
+    assert after_context == before_context
+    assert len(calendar.checked) == checks_before
+    assert len(calendar.created) == creates_before
+
+
+@pytest.mark.asyncio
 async def test_dental_unknown_bank_name_does_not_get_supported_installment_answer():
     processor, calendar = _build_dental_processor()
 
@@ -10949,6 +11011,29 @@ async def test_dental_unknown_bank_name_does_not_get_supported_installment_answe
     assert calendar.checked == []
     assert calendar.created == []
     assert processor.booking_service._get_pending_confirmation("patient-1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "хочу записатися на брекети",
+        "можна записатися на брекети?",
+        "запишіть мене на брекети",
+        "хочу брекети",
+    ],
+)
+async def test_dental_installment_guard_preserves_explicit_braces_booking_controls(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert pending["current_service_id"] == "orthodontic_consultation"
+    assert calendar.checked == []
+    assert calendar.created == []
 
 
 @pytest.mark.asyncio

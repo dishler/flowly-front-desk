@@ -325,6 +325,44 @@ class MessageProcessor:
             "відповім, якщо це є в базі знань."
         )
 
+    def _get_installment_faq_reply(
+        self,
+        sender_id: str,
+        text: str,
+        *,
+        remember_context: bool = True,
+    ) -> str | None:
+        if not self._is_configured_front_desk_mode():
+            return None
+        knowledge_service = getattr(self.reply_service, "knowledge_service", None)
+        if knowledge_service is None:
+            return None
+
+        normalized = self._normalize_for_booking_keywords(text)
+        if re.search(r"\b(?:записа\w*|запиш\w*|прийом\w*|візит\w*|брон\w*)\b", normalized):
+            return None
+
+        installment_markers = [
+            "розтермін",
+            "розстроч",
+            "оплата частинами",
+            "оплатити частинами",
+            "платити частинами",
+            "частинами",
+            "в розстрочку",
+            "у розстрочку",
+        ]
+        if not any(marker in normalized for marker in installment_markers):
+            return None
+
+        language = self.reply_service.detect_user_language(text)
+        answer = knowledge_service.find_faq_answer(text, language)
+        if answer is None:
+            return None
+        if remember_context and self.memory_service is not None:
+            self.memory_service.update_context(sender_id, question_context="faq")
+        return answer
+
     def _front_desk_no_visit_service_constraint_reply(
         self,
         sender_id: str,
@@ -1501,6 +1539,14 @@ class MessageProcessor:
 
         if self._looks_like_human_handoff_request(text):
             return self._get_human_handoff_request_reply()
+
+        installment_reply = self._get_installment_faq_reply(
+            sender_id,
+            text,
+            remember_context=False,
+        )
+        if installment_reply is not None:
+            return installment_reply
 
         if not self._looks_like_explicit_front_desk_fact_question(text):
             return None
@@ -4930,6 +4976,19 @@ class MessageProcessor:
                     fallback_service_id=str(service_id),
                     fallback_service_name=context.get("current_service_name"),
                 )
+
+        installment_reply = self._get_installment_faq_reply(
+            message.sender_id,
+            message.user_message,
+        )
+        if installment_reply is not None:
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=installment_reply,
+                intent_value="front_desk_contextual_answer",
+                routing_category="answered_basic",
+                intent_for_policy=IntentType.GENERAL_QUESTION,
+            )
 
         if not (
             self._looks_like_booking_message(message.user_message)
