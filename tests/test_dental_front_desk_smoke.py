@@ -1662,6 +1662,122 @@ async def test_dental_service_price_followup_during_booking_preserves_booking_co
 
 
 @pytest.mark.asyncio
+async def test_dental_additional_wife_during_waiting_for_time_preserves_current_booking():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    before = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+    creates_before = len(calendar.created)
+
+    result = await processor.process(_message("а ще дружину можна записати?"))
+    after = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "additional_person_booking_deferred"
+    assert "окремо" in result["reply_text"].lower()
+    assert "котра година" in result["reply_text"].lower()
+    assert after == before
+    assert len(calendar.checked) == checks_before
+    assert len(calendar.created) == creates_before
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_additional_child_during_waiting_for_time_does_not_switch_to_pediatric():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    before = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+    creates_before = len(calendar.created)
+
+    result = await processor.process(_message("а дитину теж можна записати?"))
+    after = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "additional_person_booking_deferred"
+    assert after == before
+    assert after["current_service_id"] == "dental_cleaning"
+    assert after["requested_date"] == "2026-08-26"
+    assert len(calendar.checked) == checks_before
+    assert len(calendar.created) == creates_before
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_additional_child_during_waiting_for_contact_preserves_slot_and_service():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    await processor.process(_message("о 15"))
+    before = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+    creates_before = len(calendar.created)
+
+    result = await processor.process(_message("а дитину теж можна записати?"))
+    after = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "additional_person_booking_deferred"
+    assert "ім’я та номер телефону" in result["reply_text"]
+    assert after == before
+    assert after["state"] == "WAITING_FOR_CONTACT"
+    assert after["current_service_id"] == "dental_cleaning"
+    assert after["start_dt"] == "2026-08-26T15:00:00+03:00"
+    assert len(calendar.checked) == checks_before
+    assert len(calendar.created) == creates_before
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_additional_person_guard_does_not_hijack_service_correction():
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+
+    result = await processor.process(_message("ні, я не на чистку, а на відбілювання"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_flow"
+    assert pending["current_service_id"] == "teeth_whitening"
+    assert pending["requested_date"] == "2026-08-26"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_additional_person_guard_does_not_hijack_date_correction():
+    processor, _calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+
+    result = await processor.process(_message("а краще в четвер"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_flow"
+    assert pending["current_service_id"] == "dental_cleaning"
+    assert pending["requested_date"] == "2026-08-27"
+    assert pending["requested_day_label"] == "четвер"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
+async def test_dental_fresh_pediatric_booking_is_not_additional_person_guarded():
+    processor, _calendar = _build_dental_processor()
+
+    result = await processor.process(_message("хочу записати дитину на чистку"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "booking_request"
+    assert pending["current_service_id"] == "pediatric_dentistry"
+    assert pending["current_service_name"] == "Дитяча чистка зубів"
+    assert result["intent"] != "additional_person_booking_deferred"
+    _assert_no_flowly_leakage(result["reply_text"])
+
+
+@pytest.mark.asyncio
 async def test_dental_service_price_faq_does_not_enter_booking(dental_processor):
     processor, _calendar = dental_processor
 

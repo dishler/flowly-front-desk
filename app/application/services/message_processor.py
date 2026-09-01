@@ -1323,6 +1323,57 @@ class MessageProcessor:
     def _get_unconfirmed_booking_stop_reply(self) -> str:
         return "Добре, не записую. Якщо захочете, напишіть — допоможу підібрати час."
 
+    def _looks_like_additional_person_booking_request(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        if not normalized:
+            return False
+        if self._find_service_correction(text) is not None:
+            return False
+
+        has_additional_marker = bool(
+            re.search(r"\b(?:ще|теж|також)\b", normalized)
+            or re.search(r"\bще\s+одн(?:у|ого|а|е|і)\b", normalized)
+        )
+        if not has_additional_marker:
+            return False
+
+        has_person_marker = bool(
+            re.search(
+                r"\b(?:дружин\w*|чоловік\w*|чоловіка|дитин\w*|доньк\w*|син\w*|синов\w*|"
+                r"мам\w*|тат\w*|батьк\w*|сестр\w*|брат\w*|людин\w*|пацієнт\w*)\b",
+                normalized,
+            )
+        )
+        if not has_person_marker:
+            return False
+
+        return bool(re.search(r"\b(?:запис\w*|запиш\w*|заброню\w*|брон\w*)\b", normalized))
+
+    def _get_additional_person_booking_reply(self, sender_id: str) -> str:
+        pending = self.booking_service._get_pending_confirmation(sender_id) or {}
+        state = self.booking_service.get_booking_state(sender_id)
+        prefix = "Можемо оформити ще один запис окремо після завершення поточного."
+
+        if state == BookingState.WAITING_FOR_CONTACT and pending.get("start_dt"):
+            return (
+                f"{prefix} Щоб підтвердити цей візит, залиште, будь ласка, "
+                "ім’я та номер телефону."
+            )
+
+        if state == BookingState.WAITING_FOR_TIME:
+            day_label = pending.get("requested_day_label")
+            if day_label:
+                return (
+                    f"{prefix} Для поточного запису на {day_label} підкажіть, "
+                    "будь ласка, котра година вам зручна?"
+                )
+            return (
+                f"{prefix} Для поточного запису підкажіть, будь ласка, "
+                "який день і приблизний час вам зручний?"
+            )
+
+        return f"{prefix} Давайте спершу завершимо поточний запис."
+
     def _looks_like_availability_question(self, text: str) -> bool:
         normalized = text.strip().lower()
         markers = [
@@ -3734,6 +3785,15 @@ class MessageProcessor:
                     message=message,
                     reply_text=self._get_unconfirmed_booking_stop_reply(),
                     intent_value="booking_flow_stopped",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
+            if self._looks_like_additional_person_booking_request(message.user_message):
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=self._get_additional_person_booking_reply(message.sender_id),
+                    intent_value="additional_person_booking_deferred",
                     routing_category="answered_basic",
                     intent_for_policy=IntentType.GENERAL_QUESTION,
                 )
