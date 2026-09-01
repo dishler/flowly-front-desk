@@ -3170,6 +3170,104 @@ async def test_dental_human_handoff_request_is_acknowledged_without_fake_transfe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "хочу поговорити з живою людиною",
+        "можна поговорити з людиною?",
+        "з'єднайте з адміністратором",
+        "мені потрібен оператор",
+        "хочу поговорити не з ботом",
+    ],
+)
+async def test_dental_human_handoff_natural_phrase_variants(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "human_handoff_request"
+    assert result["routing_category"] == "safe_handoff"
+    assert "AI-асистент" in result["reply_text"]
+    assert "адміністратор" in result["reply_text"]
+    assert result["booking_result"] is None
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "покличте адміністратора",
+        "хочу поговорити з адміністратором",
+        "можна живого оператора?",
+        "передайте мене адміністратору",
+    ],
+)
+async def test_dental_human_handoff_existing_phrase_variants_still_work(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "human_handoff_request"
+    assert result["routing_category"] == "safe_handoff"
+    assert "AI-асистент" in result["reply_text"]
+    assert "адміністратор" in result["reply_text"]
+    assert result["booking_result"] is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_human_handoff_during_active_booking_preserves_pending_state():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("хочу на чистку"))
+    await processor.process(_message("у середу"))
+    before_pending = dict(processor.booking_service._get_pending_confirmation("patient-1") or {})
+    checks_before = len(calendar.checked)
+
+    result = await processor.process(_message("можна поговорити з людиною?"))
+    after_pending = processor.booking_service._get_pending_confirmation("patient-1") or {}
+
+    assert result["intent"] == "human_handoff_request"
+    assert result["routing_category"] == "safe_handoff"
+    assert after_pending == before_pending
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
+    assert len(calendar.checked) == checks_before
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ви бот?",
+        "це бот?",
+        "адміністратор працює сьогодні?",
+        "людина",
+        "оператор",
+        "адміністратор",
+        "привіт",
+        "хочу записатися на чистку",
+    ],
+)
+async def test_dental_human_handoff_false_positive_controls(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] != "human_handoff_request"
+    if text == "хочу записатися на чистку":
+        assert result["booking_result"] is not None
+        assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
+    else:
+        assert calendar.created == []
+    assert calendar.checked == []
+
+
+@pytest.mark.asyncio
 async def test_dental_booking_unrelated_question_has_no_flowly_leakage(dental_processor):
     processor, _calendar = dental_processor
 

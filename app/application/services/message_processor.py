@@ -1939,39 +1939,35 @@ class MessageProcessor:
 
     def _looks_like_human_handoff_request(self, text: str) -> bool:
         normalized = self._normalize_for_conversation_matching(text)
-        has_human = any(
-            marker in normalized
-            for marker in [
-                "живу людин",
-                "жива людина",
-                "людину",
-                "людина",
-                "оператор",
-                "адміністратор",
-                "администратор",
-                "менеджер",
-                "не хочу з ботом",
-                "не хочу з роботом",
-            ]
+        if re.search(r"\bзаявк\w*\b", normalized) and re.search(
+            r"\b(?:менеджер\w*|адм[іи]н[іи]стратор\w*)\b", normalized
+        ):
+            return False
+        has_human = bool(
+            re.search(r"\bжив\w*\s+людин\w*\b", normalized)
+            or re.search(r"\bлюдин\w*\b", normalized)
+            or re.search(r"\bоператор\w*\b", normalized)
+            or re.search(r"\bадм[іи]н[іи]стратор\w*\b", normalized)
+            or re.search(r"\bменеджер\w*\b", normalized)
+            or re.search(r"\bне\s+(?:з|із)\s+(?:ботом|роботом)\b", normalized)
+            or "не хочу з ботом" in normalized
+            or "не хочу з роботом" in normalized
         )
-        has_request = any(
-            marker in normalized
-            for marker in [
-                "дайте",
-                "дай",
-                "можна",
-                "хочу",
-                "передати",
-                "передайте",
-                "передат",
-                "поклич",
-                "підключ",
-                "перемк",
-                "говорити",
-                "спілкуват",
-            ]
+        has_request = bool(
+            re.search(
+                r"\b(?:дай\w*|можна|хочу|потріб\w*|переда\w*|поклич\w*|"
+                r"підключ\w*|перемк\w*|з[ʼ'’`ь]?[єе]днай\w*|поговор\w*|"
+                r"говорити|спілкуват\w*)\b",
+                normalized,
+            )
         )
         return has_human and has_request
+
+    def _looks_like_admin_callback_request(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        return bool(
+            re.search(r"\b(?:подзвон\w*|дзвон\w*|зателефон\w*|передзвон\w*)\b", normalized)
+        )
 
     def _get_human_handoff_request_reply(self) -> str:
         return (
@@ -3885,6 +3881,18 @@ class MessageProcessor:
                     intent_for_policy=IntentType.GENERAL_QUESTION,
                 )
 
+            if (
+                self._looks_like_human_handoff_request(message.user_message)
+                and not self._looks_like_admin_callback_request(message.user_message)
+            ):
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=self._get_human_handoff_request_reply(),
+                    intent_value="human_handoff_request",
+                    routing_category="safe_handoff",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
+
             non_booking_reply = self._get_active_booking_non_booking_reply(
                 message.sender_id,
                 message.user_message,
@@ -3993,15 +4001,6 @@ class MessageProcessor:
                         fallback_service_id=active_service_id,
                         fallback_service_name=active_service_name,
                     )
-
-            if self._looks_like_human_handoff_request(message.user_message):
-                return self._build_direct_reply_result(
-                    message=message,
-                    reply_text=self._get_human_handoff_request_reply(),
-                    intent_value="human_handoff_request",
-                    routing_category="safe_handoff",
-                    intent_for_policy=IntentType.GENERAL_QUESTION,
-                )
 
             if self._looks_like_capability_question(message.user_message):
                 return self._build_capability_question_result(message)
