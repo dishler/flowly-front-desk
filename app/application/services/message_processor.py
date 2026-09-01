@@ -172,7 +172,8 @@ class MessageProcessor:
         genuine two-clause message, when neither clause names a supported
         service on its own (the common single-clause booking message never
         reaches here at all), or when the non-service clause is just a
-        bare reaction word ("шкода. тоді хочу на огляд записатись")."""
+        bare reaction word ("шкода. тоді хочу на огляд записатись") or
+        a greeting-only clause ("добрий день, хочу на чистку")."""
         first_clause, rest = self._split_first_clause(text)
         if not rest:
             return None
@@ -182,7 +183,10 @@ class MessageProcessor:
             logistics_clause = first_clause
         else:
             return None
-        if self._looks_like_bare_reaction_clause(logistics_clause):
+        if self._looks_like_bare_reaction_clause(logistics_clause) or (
+            self._looks_like_greeting_text(logistics_clause)
+            and not self._has_substantive_after_greeting(logistics_clause)
+        ):
             return None
         return logistics_clause
 

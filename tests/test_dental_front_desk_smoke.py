@@ -571,6 +571,89 @@ async def test_dental_bounded_multi_intent_bare_reaction_clause_variants_unaffec
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "service_id"),
+    [
+        ("добрий день, хочу записатися на чистку", "dental_cleaning"),
+        ("привіт, можна записатися на консультацію?", "dental_consultation"),
+        ("вітаю, хочу записатися на відбілювання", "teeth_whitening"),
+    ],
+)
+async def test_dental_bounded_multi_intent_greeting_clause_does_not_add_admin_ack(
+    text, service_id
+):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+    context = processor.memory_service.get_context("patient-1")
+
+    assert result["intent"] == "booking_request"
+    assert result["booking_result"]["status"] in {"waiting_for_time", "waiting_for_datetime"}
+    assert "перевірити з адміністратором" not in result["reply_text"]
+    assert "адміністратор" not in result["reply_text"].lower()
+    assert context["current_service_id"] == service_id
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["привіт", "добрий день", "вітаю"])
+async def test_dental_bounded_multi_intent_greeting_only_controls_unchanged(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "general_question"
+    assert "Smile Dental Clinic" in result["reply_text"]
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_bounded_multi_intent_grounded_fact_plus_booking_still_answered():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("де ви знаходитесь, хочу на чистку"))
+
+    assert result["intent"] == "booking_request"
+    assert "Липська, 12" in result["reply_text"]
+    assert "який день і приблизний час" in result["reply_text"]
+    assert processor.memory_service.get_context("patient-1")["current_service_id"] == "dental_cleaning"
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_bounded_multi_intent_substantive_prefix_still_gets_ack():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(
+        _message("скажіть чи є знижки для пенсіонерів, хочу записатись на чистку")
+    )
+
+    assert result["intent"] == "booking_request"
+    assert "перевірити з адміністратором" in result["reply_text"]
+    assert "який день і приблизний час" in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_bounded_multi_intent_explicit_admin_request_still_handoff():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("привіт, дайте живу людину будь ласка"))
+
+    assert result["intent"] == "human_handoff_request"
+    assert "AI-асистент" in result["reply_text"]
+    assert "адміністратор" in result["reply_text"].lower()
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_bounded_multi_intent_real_ungrounded_faq_still_gets_ack_after_reaction_fix():
     """A genuine ungrounded FAQ clause (not a bare reaction word) must
     still get the safe acknowledgement -- the reaction-word filter must
