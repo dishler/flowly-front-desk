@@ -25,11 +25,17 @@ class MetaClient:
                 "text": text,
             }
 
-        if not self.settings.meta_page_access_token:
+        access_token = self._access_token_for_platform(platform)
+        if not access_token:
+            token_name = (
+                "META_FACEBOOK_PAGE_ACCESS_TOKEN"
+                if platform == "facebook"
+                else "META_PAGE_ACCESS_TOKEN"
+            )
             return {
                 "sent": False,
                 "stub": True,
-                "reason": "Missing META_PAGE_ACCESS_TOKEN",
+                "reason": f"Missing {token_name}",
                 "platform": platform,
                 "recipient_id": recipient_id,
                 "text": text,
@@ -57,7 +63,7 @@ class MetaClient:
         }
 
         headers = {
-            "Authorization": f"Bearer {self.settings.meta_page_access_token}",
+            "Authorization": f"Bearer {access_token}",
         }
 
         try:
@@ -102,3 +108,9 @@ class MetaClient:
                 "text": text,
                 "error": str(exc),
             }
+
+    def _access_token_for_platform(self, platform: str) -> str:
+        if platform == "facebook":
+            return self.settings.meta_facebook_page_access_token.strip()
+
+        return self.settings.meta_page_access_token.strip()
