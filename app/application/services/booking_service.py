@@ -6,6 +6,13 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
+from app.application.services.business_hours import (
+    business_hours_status_for_date,
+    format_time_window_time,
+    is_closed_working_hours_value,
+    parse_working_hours_window,
+    weekday_indexes_for_hours_key,
+)
 from app.application.services.calendar_service import CalendarService
 from app.application.services.language_service import LanguageService
 from app.core.config import settings
@@ -78,107 +85,21 @@ class BookingService:
         return normalized
 
     def _weekday_indexes_for_hours_key(self, raw_key: str) -> set[int]:
-        aliases = {
-            "mon": 0,
-            "monday": 0,
-            "пн": 0,
-            "понеділок": 0,
-            "tue": 1,
-            "tuesday": 1,
-            "вт": 1,
-            "вівторок": 1,
-            "wed": 2,
-            "wednesday": 2,
-            "ср": 2,
-            "середа": 2,
-            "thu": 3,
-            "thursday": 3,
-            "чт": 3,
-            "четвер": 3,
-            "fri": 4,
-            "friday": 4,
-            "пт": 4,
-            "п'ятниця": 4,
-            "п’ятниця": 4,
-            "sat": 5,
-            "saturday": 5,
-            "сб": 5,
-            "субота": 5,
-            "sun": 6,
-            "sunday": 6,
-            "нд": 6,
-            "неділя": 6,
-        }
-
-        parts = [part.strip().lower() for part in re.split(r"\s*[-–—]\s*", raw_key) if part.strip()]
-        if len(parts) == 1:
-            weekday = aliases.get(parts[0])
-            return {weekday} if weekday is not None else set()
-        if len(parts) == 2:
-            start = aliases.get(parts[0])
-            end = aliases.get(parts[1])
-            if start is None or end is None:
-                return set()
-            if start <= end:
-                return set(range(start, end + 1))
-            return set(range(start, 7)).union(range(0, end + 1))
-        return set()
+        return weekday_indexes_for_hours_key(raw_key)
 
     def _is_closed_working_hours_value(self, raw_value: Any) -> bool:
-        return isinstance(raw_value, str) and raw_value.strip().lower() in {
-            "closed",
-            "зачинено",
-            "вихідний",
-            "закрито",
-        }
+        return is_closed_working_hours_value(raw_value)
 
     def _parse_working_hours_window(self, raw_value: Any) -> tuple[time, time] | None:
-        if not isinstance(raw_value, str):
-            return None
-        value = raw_value.strip().lower()
-        if self._is_closed_working_hours_value(value):
-            return None
-
-        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})\s*", value)
-        if not match:
-            return None
-
-        start_hour, start_minute, end_hour, end_minute = [int(part) for part in match.groups()]
-        if not (
-            0 <= start_hour <= 23
-            and 0 <= end_hour <= 23
-            and 0 <= start_minute <= 59
-            and 0 <= end_minute <= 59
-        ):
-            return None
-
-        start = time(start_hour, start_minute)
-        end = time(end_hour, end_minute)
-        if start >= end:
-            return None
-        return start, end
+        return parse_working_hours_window(raw_value)
 
     def _business_hours_status_for_date(self, target_date: date) -> tuple[str, tuple[time, time] | None]:
         working_hours = self._business_working_hours()
-        if working_hours is None:
-            return ("legacy_open" if self.front_desk_config_service is None else "missing", None)
-
-        for raw_key, raw_value in working_hours.items():
-            weekdays = self._weekday_indexes_for_hours_key(str(raw_key))
-            if not weekdays:
-                logger.warning("Ignoring malformed working-hours day key: %r", raw_key)
-                continue
-            if target_date.weekday() not in weekdays:
-                continue
-            if self._is_closed_working_hours_value(raw_value):
-                return ("closed", None)
-            window = self._parse_working_hours_window(raw_value)
-            if window is None:
-                logger.warning("Ignoring malformed working-hours window for %r: %r", raw_key, raw_value)
-                return ("malformed", None)
-            return ("open", window)
-
-        return ("missing_day", None)
+        return business_hours_status_for_date(
+            working_hours,
+            target_date,
+            missing_status="legacy_open" if self.front_desk_config_service is None else "missing",
+        )
 
     def _is_within_business_hours(self, start_dt: datetime, duration_minutes: int) -> bool:
         local_start = start_dt.astimezone(self.timezone)
@@ -1317,7 +1238,7 @@ class BookingService:
         return None
 
     def _format_time_window_time(self, value: time) -> str:
-        return value.strftime("%H:%M")
+        return format_time_window_time(value)
 
     def _extract_time_window(self, text: str) -> dict[str, Any] | None:
         normalized = self._normalize_booking_text(text).replace("–", "-").replace("—", "-")

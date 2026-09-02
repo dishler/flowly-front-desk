@@ -7,6 +7,7 @@ import pytest
 
 from app.application.dto.normalized_message import NormalizedMessage
 from app.application.services import booking_service as booking_service_module
+from app.application.services import business_hours as business_hours_module
 from app.application.services.booking_service import BookingService
 from app.application.services.dedup_service import DedupService
 from app.application.services.front_desk_config_service import FrontDeskConfigService
@@ -11607,6 +11608,100 @@ async def test_dental_active_booking_admin_callback_request_with_date_not_treate
     assert calendar.created == []
 
 
+class MondayReplyDatetime(_REAL_DATETIME):
+    @classmethod
+    def now(cls, tz=None):
+        fixed = _REAL_DATETIME(2026, 8, 24, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+        return fixed if tz is None else fixed.astimezone(tz)
+
+
+class SaturdayReplyDatetime(_REAL_DATETIME):
+    @classmethod
+    def now(cls, tz=None):
+        fixed = _REAL_DATETIME(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+        return fixed if tz is None else fixed.astimezone(tz)
+
+
+class SundayReplyDatetime(_REAL_DATETIME):
+    @classmethod
+    def now(cls, tz=None):
+        fixed = _REAL_DATETIME(2026, 8, 23, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+        return fixed if tz is None else fixed.astimezone(tz)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "адміністратор сьогодні працює?",
+        "сьогодні є адміністратор?",
+        "можна зв'язатися з адміністратором сьогодні?",
+    ],
+)
+async def test_dental_administrator_today_hours_use_grounded_same_as_clinic_rule_weekday(
+    monkeypatch, text
+):
+    monkeypatch.setattr(business_hours_module, "datetime", MondayReplyDatetime)
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert "адміністратор сьогодні працює з 09:00 до 19:00" in result["reply_text"]
+    assert "Графік роботи:" not in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_administrator_today_hours_use_grounded_same_as_clinic_rule_saturday(
+    monkeypatch,
+):
+    monkeypatch.setattr(business_hours_module, "datetime", SaturdayReplyDatetime)
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("А адміністратор сьогодні працює?"))
+
+    assert "адміністратор сьогодні працює з 10:00 до 16:00" in result["reply_text"]
+    assert "Графік роботи:" not in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+async def test_dental_administrator_today_hours_use_grounded_same_as_clinic_rule_sunday(
+    monkeypatch,
+):
+    monkeypatch.setattr(business_hours_module, "datetime", SundayReplyDatetime)
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("адміністратор сьогодні працює?"))
+
+    assert "Сьогодні адміністратор не працює" in result["reply_text"]
+    assert "У неділю клініка вихідна" in result["reply_text"]
+    assert "Графік роботи:" not in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "а адміністратор завтра працює?",
+        "коли працює адміністратор?",
+        "який графік адміністратора?",
+    ],
+)
+async def test_dental_administrator_hours_natural_variants_are_direct_grounded_replies(
+    monkeypatch, text
+):
+    monkeypatch.setattr(business_hours_module, "datetime", SaturdayReplyDatetime)
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert "адміністратор" in result["reply_text"].lower()
+    assert "Графік роботи:" not in result["reply_text"]
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -11619,7 +11714,10 @@ async def test_dental_active_booking_admin_callback_request_with_date_not_treate
         "сьогодні є адміністратор?",
     ],
 )
-async def test_dental_active_booking_fact_question_with_today_preserves_waiting_for_time(text):
+async def test_dental_active_booking_fact_question_with_today_preserves_waiting_for_time(
+    monkeypatch, text
+):
+    monkeypatch.setattr(business_hours_module, "datetime", SaturdayReplyDatetime)
     processor, calendar = _build_dental_processor()
 
     await processor.process(_message("хочу на чистку"))
@@ -11635,7 +11733,10 @@ async def test_dental_active_booking_fact_question_with_today_preserves_waiting_
     assert after_pending == before_pending
     assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_TIME
     assert "Добре, на сьогодні" not in result["reply_text"]
-    if "відкрит" in text or "ви працюєте" in text:
+    if "адміністратор" in text:
+        assert "адміністратор сьогодні працює з 10:00 до 16:00" in result["reply_text"]
+        assert "Графік роботи:" not in result["reply_text"]
+    elif "відкрит" in text or "ви працюєте" in text:
         assert "Графік роботи" in result["reply_text"]
     assert len(calendar.checked) == checks_before
     assert calendar.created == []
@@ -11650,7 +11751,10 @@ async def test_dental_active_booking_fact_question_with_today_preserves_waiting_
         "можна сьогодні оплатити карткою?",
     ],
 )
-async def test_dental_active_booking_fact_question_with_today_preserves_waiting_for_contact_slot(text):
+async def test_dental_active_booking_fact_question_with_today_preserves_waiting_for_contact_slot(
+    monkeypatch, text
+):
+    monkeypatch.setattr(business_hours_module, "datetime", SaturdayReplyDatetime)
     processor, calendar = _build_dental_processor()
 
     await processor.process(_message("хочу на чистку"))
@@ -11666,7 +11770,10 @@ async def test_dental_active_booking_fact_question_with_today_preserves_waiting_
     assert before_pending.get("start_dt") == "2026-08-26T15:00:00+03:00"
     assert after_pending == before_pending
     assert processor.booking_service.get_booking_state("patient-1") == BookingState.WAITING_FOR_CONTACT
-    if "відкрит" in text:
+    if "адміністратор" in text:
+        assert "адміністратор сьогодні працює з 10:00 до 16:00" in result["reply_text"]
+        assert "Графік роботи:" not in result["reply_text"]
+    elif "відкрит" in text:
         assert "Графік роботи" in result["reply_text"]
     assert len(calendar.checked) == checks_before
     assert calendar.created == []

@@ -6,6 +6,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.application.dto.normalized_message import NormalizedMessage
 from app.application.services.ai_service import AIService
+from app.application.services.business_hours import (
+    business_hours_status_for_date,
+    format_time_window_time,
+    format_working_hours,
+    relative_date_from_text,
+    relative_day_label,
+    ukrainian_weekday_name,
+)
 from app.application.services.knowledge_service import KnowledgeService
 from app.application.services.memory_service import MemoryService
 from app.domain.enums import IntentType
@@ -706,11 +714,15 @@ class ReplyService:
         if self._looks_like_special_date_hours_question(normalized):
             return "Святковий або спеціальний графік потрібно уточнити в клініки. У базі є лише звичайний тижневий графік."
 
+        business = self.knowledge_service.get_business() or {}
+        administrator_hours_reply = self._get_administrator_hours_reply(normalized, business)
+        if administrator_hours_reply:
+            return administrator_hours_reply
+
         faq_answer = self.knowledge_service.find_faq_answer(normalized, language)
         if faq_answer:
             return faq_answer
 
-        business = self.knowledge_service.get_business() or {}
         if any(
             marker in normalized
             for marker in [
@@ -746,6 +758,58 @@ class ReplyService:
                     return "Контакти: " + ", ".join(parts) + "."
 
         return None
+
+    def _get_administrator_hours_reply(
+        self,
+        normalized: str,
+        business: dict[str, Any],
+    ) -> Optional[str]:
+        if "адміністратор" not in normalized and "администратор" not in normalized:
+            return None
+        if self._looks_like_administrator_handoff_phrase(normalized):
+            return None
+        staff_hours = business.get("staff_hours")
+        if not isinstance(staff_hours, dict) or staff_hours.get("administrator") != "same_as_clinic":
+            return None
+
+        working_hours = business.get("working_hours")
+        if not isinstance(working_hours, dict) or not working_hours:
+            return None
+
+        target_date = relative_date_from_text(normalized)
+        if target_date is None:
+            return f"Адміністратор працює за графіком клініки: {format_working_hours(working_hours)}."
+
+        day_name = ukrainian_weekday_name(target_date)
+        status, window = business_hours_status_for_date(working_hours, target_date)
+        if status in {"missing", "missing_day", "malformed"}:
+            return None
+        day_label = relative_day_label(target_date)
+        if status == "closed":
+            return f"{day_label.capitalize()} адміністратор не працює. У {day_name} клініка вихідна."
+        if status != "open" or window is None:
+            return None
+        return (
+            f"Так, адміністратор {day_label} працює з "
+            f"{format_time_window_time(window[0])} до {format_time_window_time(window[1])}."
+        )
+
+    def _looks_like_administrator_handoff_phrase(self, normalized: str) -> bool:
+        has_admin = "адміністратор" in normalized or "администратор" in normalized
+        has_handoff_action = any(
+            marker in normalized
+            for marker in [
+                "поговорити",
+                "з'єднай",
+                "зʼєднай",
+                "з’єднай",
+                "передайте",
+                "покличте",
+                "потрібен",
+                "потрібна",
+            ]
+        )
+        return has_admin and has_handoff_action
 
     def _looks_like_special_date_hours_question(self, normalized: str) -> bool:
         has_hours_context = any(

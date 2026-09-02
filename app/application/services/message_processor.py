@@ -1556,7 +1556,7 @@ class MessageProcessor:
         if self._message_has_valid_contact_data(text):
             return None
 
-        if self._looks_like_human_handoff_request(text):
+        if self._looks_like_human_handoff_request(text) and not self._looks_like_admin_hours_fact_question(text):
             return self._get_human_handoff_request_reply()
 
         installment_reply = self._get_installment_faq_reply(
@@ -1594,6 +1594,22 @@ class MessageProcessor:
             )
         )
         return has_booking_action and self._message_has_temporal_booking_signal(text)
+
+    def _looks_like_admin_hours_fact_question(self, text: str) -> bool:
+        normalized = self._normalize_for_conversation_matching(text)
+        if not re.search(r"\bадм[іи]н[іи]стратор\w*\b", normalized):
+            return False
+        if re.search(
+            r"\b(?:поговор\w*|з[ʼ'’`ь]?[єе]днай\w*|переда\w*|поклич\w*|потріб\w*)\b",
+            normalized,
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:сьогодні|завтра|післязавтра|зараз|є|працю\w*|графік|коли|зв'язат\w*|звʼязат\w*|зв’язат\w*)\b",
+                normalized,
+            )
+        )
 
     def _looks_like_explicit_front_desk_fact_question(self, text: str) -> bool:
         normalized = self._normalize_for_conversation_matching(text)
@@ -1633,7 +1649,7 @@ class MessageProcessor:
             "лікар",
             "доктор",
         ]
-        has_staff_availability_question = (
+        has_staff_availability_question = self._looks_like_admin_hours_fact_question(text) or (
             any(marker in normalized for marker in staff_availability_markers)
             and any(marker in normalized for marker in ["сьогодні", "зараз", "є", "працює", "працюють"])
             and not self._looks_like_human_handoff_request(text)
@@ -3930,6 +3946,7 @@ class MessageProcessor:
             if (
                 self._looks_like_human_handoff_request(message.user_message)
                 and not self._looks_like_admin_callback_request(message.user_message)
+                and not self._looks_like_admin_hours_fact_question(message.user_message)
             ):
                 return self._build_direct_reply_result(
                     message=message,
@@ -4716,7 +4733,10 @@ class MessageProcessor:
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
 
-        if self._looks_like_human_handoff_request(message.user_message):
+        if (
+            self._looks_like_human_handoff_request(message.user_message)
+            and not self._looks_like_admin_hours_fact_question(message.user_message)
+        ):
             return self._build_direct_reply_result(
                 message=message,
                 reply_text=self._get_human_handoff_request_reply(),
@@ -5013,6 +5033,20 @@ class MessageProcessor:
                 routing_category="answered_basic",
                 intent_for_policy=IntentType.GENERAL_QUESTION,
             )
+
+        if (
+            self._looks_like_admin_hours_fact_question(message.user_message)
+            and not self._looks_like_fact_question_with_booking_update(message.user_message)
+        ):
+            contextual_front_desk_reply = self.reply_service.get_contextual_front_desk_reply(message)
+            if contextual_front_desk_reply:
+                return self._build_direct_reply_result(
+                    message=message,
+                    reply_text=contextual_front_desk_reply,
+                    intent_value="front_desk_contextual_answer",
+                    routing_category="answered_basic",
+                    intent_for_policy=IntentType.GENERAL_QUESTION,
+                )
 
         if (
             self._is_configured_front_desk_mode()

@@ -8,6 +8,9 @@
       "Сб": "10:00-16:00",
       "Нд": "вихідний"
     },
+    "staff_hours": {
+      "administrator": "same_as_clinic"
+    },
     "contacts": {
       "phone": "+380 44 123 45 67",
       "instagram": "@smile.dental.demo",
