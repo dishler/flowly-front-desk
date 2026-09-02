@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     meta_verify_token: str = Field(default="change-me")
     meta_app_secret: str = Field(default="")
+    meta_facebook_app_secret: str = Field(default="")
     meta_page_access_token: str = Field(default="")
     meta_facebook_page_access_token: str = Field(default="")
     meta_graph_api_version: str = Field(default="v21.0")

@@ -41,10 +41,17 @@ def _verify_meta_signature(
     raw_body: bytes,
     signature_header: Optional[str],
 ) -> bool:
-    app_secret = settings.meta_app_secret.strip()
+    app_secrets = [
+        secret
+        for secret in [
+            settings.meta_app_secret.strip(),
+            settings.meta_facebook_app_secret.strip(),
+        ]
+        if secret
+    ]
     environment = settings.environment.strip().lower()
 
-    if not app_secret:
+    if not app_secrets:
         return environment != "production"
 
     if not signature_header:
@@ -58,16 +65,20 @@ def _verify_meta_signature(
     if not received_signature:
         return False
 
-    expected_signature = hmac.new(
-        app_secret.encode("utf-8"),
-        raw_body,
-        hashlib.sha256,
-    ).hexdigest()
+    for app_secret in app_secrets:
+        expected_signature = hmac.new(
+            app_secret.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
 
-    return hmac.compare_digest(
-        expected_signature,
-        received_signature,
-    )
+        if hmac.compare_digest(
+            expected_signature,
+            received_signature,
+        ):
+            return True
+
+    return False
 
 def _extract_text(payload: dict[str, Any]) -> str:
     """Extract text from common Messenger / Instagram webhook shapes."""

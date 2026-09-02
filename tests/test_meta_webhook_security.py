@@ -37,6 +37,34 @@ def test_valid_meta_signature(monkeypatch):
     )
 
 
+def test_facebook_meta_signature_is_accepted(monkeypatch):
+    body = b'{"object":"page"}'
+    facebook_secret = "test-facebook-secret"
+
+    monkeypatch.setattr(
+        meta_webhook.settings,
+        "meta_app_secret",
+        "test-instagram-secret",
+    )
+    monkeypatch.setattr(
+        meta_webhook.settings,
+        "meta_facebook_app_secret",
+        facebook_secret,
+    )
+    monkeypatch.setattr(
+        meta_webhook.settings,
+        "environment",
+        "production",
+    )
+
+    signature = _signature(facebook_secret, body)
+
+    assert meta_webhook._verify_meta_signature(
+        raw_body=body,
+        signature_header=signature,
+    )
+
+
 def test_wrong_meta_signature_is_rejected(monkeypatch):
     body = b'{"object":"page"}'
 
@@ -44,6 +72,11 @@ def test_wrong_meta_signature_is_rejected(monkeypatch):
         meta_webhook.settings,
         "meta_app_secret",
         "correct-secret",
+    )
+    monkeypatch.setattr(
+        meta_webhook.settings,
+        "meta_facebook_app_secret",
+        "correct-facebook-secret",
     )
     monkeypatch.setattr(
         meta_webhook.settings,
@@ -65,6 +98,11 @@ def test_missing_signature_is_rejected_in_production(monkeypatch):
     )
     monkeypatch.setattr(
         meta_webhook.settings,
+        "meta_facebook_app_secret",
+        "test-facebook-secret",
+    )
+    monkeypatch.setattr(
+        meta_webhook.settings,
         "environment",
         "production",
     )
@@ -79,6 +117,11 @@ def test_missing_app_secret_fails_closed_in_production(monkeypatch):
     monkeypatch.setattr(
         meta_webhook.settings,
         "meta_app_secret",
+        "",
+    )
+    monkeypatch.setattr(
+        meta_webhook.settings,
+        "meta_facebook_app_secret",
         "",
     )
     monkeypatch.setattr(
@@ -121,6 +164,11 @@ def test_dev_without_app_secret_allows_local_request(monkeypatch):
     monkeypatch.setattr(
         meta_webhook.settings,
         "meta_app_secret",
+        "",
+    )
+    monkeypatch.setattr(
+        meta_webhook.settings,
+        "meta_facebook_app_secret",
         "",
     )
     monkeypatch.setattr(
