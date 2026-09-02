@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     meta_graph_api_version: str = Field(default="v21.0")
     meta_send_enabled: bool = Field(default=False)
 
+    telegram_bot_token: str = Field(default="")
+    telegram_webhook_secret: str = Field(default="")
+    telegram_send_enabled: bool = Field(default=False)
+
     openai_api_key: str = Field(default="")
     openai_model: str = Field(default="gpt-5-mini")
     openai_enabled: bool = Field(default=False)
@@ -60,6 +64,11 @@ class Settings(BaseSettings):
 
         if not self.meta_page_access_token.strip():
             errors.append("META_PAGE_ACCESS_TOKEN must be configured")
+
+        if self.telegram_send_enabled and not self.telegram_bot_token.strip():
+            errors.append(
+                "TELEGRAM_BOT_TOKEN must be configured when TELEGRAM_SEND_ENABLED is true"
+            )
 
         if not self.openai_enabled:
             errors.append("OPENAI_ENABLED must be true")

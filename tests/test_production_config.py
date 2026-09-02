@@ -36,6 +36,26 @@ def test_valid_production_configuration_passes():
     valid_production_settings().validate_production_settings()
 
 
+def test_production_allows_missing_telegram_configuration_when_send_disabled():
+    settings = valid_production_settings(
+        telegram_send_enabled=False,
+        telegram_bot_token="",
+        telegram_webhook_secret="",
+    )
+
+    settings.validate_production_settings()
+
+
+def test_production_requires_telegram_bot_token_only_when_send_enabled():
+    settings = valid_production_settings(
+        telegram_send_enabled=True,
+        telegram_bot_token="",
+    )
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_BOT_TOKEN"):
+        settings.validate_production_settings()
+
+
 def test_production_requires_meta_configuration():
     settings = valid_production_settings(meta_app_secret="")
 

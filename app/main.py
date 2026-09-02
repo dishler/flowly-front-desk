@@ -7,6 +7,7 @@ from app.api.routes.debug_booking import router as debug_booking_router
 from app.api.routes.debug_reply import router as debug_reply_router
 from app.api.routes.health import router as health_router
 from app.api.routes.meta_webhook import router as meta_webhook_router
+from app.api.routes.telegram_webhook import router as telegram_webhook_router
 from app.application.services.ai_service import AIService
 from app.application.services.booking_service import BookingService
 from app.application.services.calendar_service import CalendarService
@@ -28,6 +29,7 @@ from app.infrastructure.google.calendar_client import GoogleCalendarClient
 from app.infrastructure.meta.client import MetaClient
 from app.infrastructure.openai.client import OpenAIClient
 from app.infrastructure.persistence.redis_client import RedisClientProvider
+from app.infrastructure.telegram.client import TelegramClient
 
 settings = get_settings()
 settings.validate_production_settings()
@@ -84,7 +86,11 @@ reply_service = ReplyService(
 )
 
 meta_client = MetaClient()
-outbound_service = OutboundService(meta_client=meta_client)
+telegram_client = TelegramClient()
+outbound_service = OutboundService(
+    meta_client=meta_client,
+    telegram_client=telegram_client,
+)
 
 message_processor = MessageProcessor(
     memory_service=memory_service,
@@ -112,6 +118,7 @@ app.state.speech_service = speech_service
 app.state.ai_service = ai_service
 app.state.reply_service = reply_service
 app.state.meta_client = meta_client
+app.state.telegram_client = telegram_client
 app.state.outbound_service = outbound_service
 app.state.message_processor = message_processor
 
@@ -146,6 +153,7 @@ async def root() -> dict:
 
 app.include_router(health_router)
 app.include_router(meta_webhook_router, prefix="/webhooks")
+app.include_router(telegram_webhook_router, prefix="/webhooks")
 if settings.environment.strip().lower() != "production":
     app.include_router(debug_booking_router)
     app.include_router(debug_reply_router)
