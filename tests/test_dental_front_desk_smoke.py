@@ -6721,6 +6721,116 @@ async def test_dental_active_changed_mind_no_need_stops_unconfirmed_booking():
     assert calendar.created == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ні, дякую, не треба",
+        "ні дякую не треба",
+        "ні, не треба",
+        "дякую, не треба",
+        "ні, дякую",
+        "не треба, дякую",
+    ],
+)
+async def test_dental_polite_decline_stops_unconfirmed_booking_waiting_for_time(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатися на чистку зубів"))
+    await processor.process(_message("В п'ятницю"))
+    checks_before = len(calendar.checked)
+    creates_before = len(calendar.created)
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "booking_flow_stopped"
+    assert "не записую" in result["reply_text"]
+    assert "котру годину" not in result["reply_text"]
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert len(calendar.checked) == checks_before
+    assert len(calendar.created) == creates_before
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ні, дякую, не треба",
+        "ні дякую не треба",
+        "ні, не треба",
+        "дякую, не треба",
+        "ні, дякую",
+        "не треба, дякую",
+    ],
+)
+async def test_dental_polite_decline_stops_unconfirmed_booking_waiting_for_contact(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатися на чистку зубів"))
+    await processor.process(_message("В середу о 15"))
+    checks_before = len(calendar.checked)
+    creates_before = len(calendar.created)
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "booking_flow_stopped"
+    assert "не записую" in result["reply_text"]
+    assert "залиште" not in result["reply_text"].lower()
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert len(calendar.checked) == checks_before
+    assert len(calendar.created) == creates_before
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ні, дякую, не треба",
+        "ні дякую не треба",
+        "ні, не треба",
+        "дякую, не треба",
+        "ні, дякую",
+        "не треба, дякую",
+    ],
+)
+async def test_dental_polite_decline_fresh_does_not_start_booking(text):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["intent"] == "booking_flow_stopped"
+    assert "не записую" in result["reply_text"]
+    assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "не на чистку, а на відбілювання",
+        "ні, краще на відбілювання",
+        "не в п'ятницю, а в суботу",
+        "ні, давайте краще завтра",
+        "не о 12, а о 14",
+        "ні, номер інший",
+        "не знаю, який час",
+        "ні, а скільки коштує?",
+        "ні, а дитину теж можна записати?",
+    ],
+)
+async def test_dental_polite_decline_does_not_hijack_corrections_or_questions(text):
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("Хочу записатися на чистку зубів"))
+    await processor.process(_message("В п'ятницю"))
+    result = await processor.process(_message(text))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert result["intent"] != "booking_flow_stopped"
+    assert pending is not None
+    assert processor.booking_service.get_booking_state("patient-1") != BookingState.NONE
+    assert calendar.created == []
+
+
 async def test_dental_negative_booking_stop_does_not_hijack_service_correction():
     processor, calendar = _build_dental_processor()
 

@@ -1394,6 +1394,8 @@ class MessageProcessor:
             return False
         if self._find_service_correction(text) is not None:
             return False
+        if self._looks_like_polite_booking_decline(text):
+            return True
 
         stop_patterns = [
             r"\bне\s+запис\w*",
@@ -1403,6 +1405,18 @@ class MessageProcessor:
             r"\bпередумав[аи]?\b.*\bне\s+треба\b",
         ]
         return any(re.search(pattern, normalized) for pattern in stop_patterns)
+
+    def _looks_like_polite_booking_decline(self, text: str) -> bool:
+        normalized = self._normalize_for_booking_keywords(text)
+        compact = re.sub(r"[^0-9a-zа-яіїєґ]+", " ", normalized).strip()
+        if compact == "не треба":
+            return False
+        return bool(
+            re.fullmatch(
+                r"(?:ні\s+)?(?:дякую\s+)?не\s+треба(?:\s+дякую)?|ні\s+дякую",
+                compact,
+            )
+        )
 
     def _get_unconfirmed_booking_stop_reply(self) -> str:
         return "Добре, не записую. Якщо захочете, напишіть — допоможу підібрати час."
