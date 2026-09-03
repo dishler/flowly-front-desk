@@ -9323,6 +9323,27 @@ async def test_dental_first_turn_greeting_location_question_prepends_matching_gr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "prefix"),
+    [
+        ("Добрий ранок, де ви знаходитесь?", "Добрий ранок!"),
+        ("Доброго ранку, де ви знаходитесь?", "Доброго ранку!"),
+    ],
+)
+async def test_dental_morning_greeting_location_question_prepends_matching_greeting(text, prefix):
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message(text))
+
+    assert result["reply_text"] == (
+        f"{prefix} Ми знаходимося в Києві: Печерськ, вул. Липська, 12, "
+        "2 поверх. Найближче метро: Арсенальна."
+    )
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_first_turn_greeting_booking_intent_prepends_matching_greeting():
     processor, calendar = _build_dental_processor()
 

@@ -3668,11 +3668,15 @@ class MessageProcessor:
             or normalized.startswith("Вітаю!")
             or normalized.startswith("Добрий день!")
             or normalized.startswith("Добрий вечір!")
+            or normalized.startswith("Добрий ранок!")
+            or normalized.startswith("Доброго ранку!")
         )
 
     def _extract_greeting_acknowledgement(self, user_text: str) -> str | None:
         normalized = " ".join(user_text.strip().lower().split())
         greeting_patterns = [
+            (r"\bдобрий ранок\b", "Добрий ранок!"),
+            (r"\bдоброго ранку\b", "Доброго ранку!"),
             (r"\b(?:добрий день|доброго дня)\b", "Добрий день!"),
             (r"\b(?:добрий вечір|доброго вечора)\b", "Добрий вечір!"),
             (r"\bпривіт\b", "Привіт!"),
