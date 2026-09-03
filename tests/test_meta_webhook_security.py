@@ -90,48 +90,6 @@ def test_wrong_meta_signature_is_rejected(monkeypatch):
     )
 
 
-def test_meta_signature_rejection_diagnostics_do_not_expose_sensitive_values(monkeypatch):
-    body = b'{"message":"private patient message"}'
-    primary_secret = "primary-secret-value"
-    facebook_secret = "facebook-secret-value"
-    signature = "sha256=abcdef1234567890"
-
-    monkeypatch.setattr(
-        meta_webhook.settings,
-        "meta_app_secret",
-        primary_secret,
-    )
-    monkeypatch.setattr(
-        meta_webhook.settings,
-        "meta_facebook_app_secret",
-        facebook_secret,
-    )
-
-    diagnostics = meta_webhook._meta_signature_diagnostics(
-        raw_body=body,
-        signature_header=signature,
-        legacy_signature_header="sha1=legacy",
-    )
-
-    assert diagnostics == {
-        "signature_header_present": True,
-        "signature_prefix_valid": True,
-        "legacy_signature_header_present": True,
-        "configured_secret_count": 2,
-        "meta_app_secret_configured": True,
-        "meta_facebook_app_secret_configured": True,
-        "body_length": len(body),
-        "primary_secret_matched": False,
-        "facebook_secret_matched": False,
-    }
-
-    rendered = str(diagnostics)
-    assert "private patient message" not in rendered
-    assert primary_secret not in rendered
-    assert facebook_secret not in rendered
-    assert "abcdef1234567890" not in rendered
-
-
 def test_missing_signature_is_rejected_in_production(monkeypatch):
     monkeypatch.setattr(
         meta_webhook.settings,

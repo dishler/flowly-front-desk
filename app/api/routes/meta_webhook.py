@@ -80,40 +80,6 @@ def _verify_meta_signature(
 
     return False
 
-
-def _meta_signature_diagnostics(
-    raw_body: bytes,
-    signature_header: Optional[str],
-    legacy_signature_header: Optional[str],
-) -> dict[str, Any]:
-    prefix = "sha256="
-    signature_prefix_valid = bool(signature_header and signature_header.startswith(prefix))
-    received_signature = signature_header[len(prefix):].strip() if signature_prefix_valid else ""
-    primary_secret = settings.meta_app_secret.strip()
-    facebook_secret = settings.meta_facebook_app_secret.strip()
-
-    def _secret_matches(app_secret: str) -> bool:
-        if not app_secret or not received_signature:
-            return False
-        expected_signature = hmac.new(
-            app_secret.encode("utf-8"),
-            raw_body,
-            hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(expected_signature, received_signature)
-
-    return {
-        "signature_header_present": bool(signature_header),
-        "signature_prefix_valid": signature_prefix_valid,
-        "legacy_signature_header_present": bool(legacy_signature_header),
-        "configured_secret_count": int(bool(primary_secret)) + int(bool(facebook_secret)),
-        "meta_app_secret_configured": bool(primary_secret),
-        "meta_facebook_app_secret_configured": bool(facebook_secret),
-        "body_length": len(raw_body),
-        "primary_secret_matched": _secret_matches(primary_secret),
-        "facebook_secret_matched": _secret_matches(facebook_secret),
-    }
-
 def _extract_text(payload: dict[str, Any]) -> str:
     """Extract text from common Messenger / Instagram webhook shapes."""
     candidates = [
@@ -359,24 +325,12 @@ async def receive_meta_webhook(request: Request) -> dict[str, Any]:
     raw_body = await request.body()
 
     signature_header = request.headers.get("X-Hub-Signature-256")
-    legacy_signature_header = request.headers.get("X-Hub-Signature")
 
     if not _verify_meta_signature(
         raw_body=raw_body,
         signature_header=signature_header,
     ):
-        try:
-            diagnostics = _meta_signature_diagnostics(
-                raw_body=raw_body,
-                signature_header=signature_header,
-                legacy_signature_header=legacy_signature_header,
-            )
-            logger.warning(
-                "Rejected Meta webhook with invalid signature diagnostics=%s",
-                diagnostics,
-            )
-        except Exception:
-            logger.warning("Rejected Meta webhook with invalid signature")
+        logger.warning("Rejected Meta webhook with invalid signature")
         raise HTTPException(
             status_code=403,
             detail="Invalid webhook signature",
