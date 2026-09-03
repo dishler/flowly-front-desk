@@ -9308,6 +9308,80 @@ async def test_dental_greeting_with_substantive_questions_does_not_consume_inten
 
 
 @pytest.mark.asyncio
+async def test_dental_first_turn_greeting_location_question_prepends_matching_greeting():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("Добрий вечір, де ви знаходитесь?"))
+
+    assert result["reply_text"].startswith("Добрий вечір! ")
+    assert result["reply_text"] == (
+        "Добрий вечір! Ми знаходимося в Києві: Печерськ, вул. Липська, 12, "
+        "2 поверх. Найближче метро: Арсенальна."
+    )
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_first_turn_greeting_booking_intent_prepends_matching_greeting():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("Доброго дня, хочу полікувати карієс"))
+
+    assert result["booking_result"]["status"] == "waiting_for_time"
+    assert result["reply_text"] == (
+        "Добрий день! Супер, тоді можемо підібрати візит. "
+        "Напишіть, будь ласка, який день і приблизний час вам зручний?"
+    )
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_first_turn_location_question_without_greeting_is_unchanged():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("де ви знаходитесь?"))
+
+    assert result["reply_text"] == (
+        "Ми знаходимося в Києві: Печерськ, вул. Липська, 12, 2 поверх. "
+        "Найближче метро: Арсенальна."
+    )
+    assert not result["reply_text"].startswith("Добрий")
+    assert not result["reply_text"].startswith("Привіт!")
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_second_turn_greeting_does_not_add_greeting_prefix():
+    processor, calendar = _build_dental_processor()
+
+    await processor.process(_message("де ви знаходитесь?"))
+    result = await processor.process(_message("Добрий вечір, скільки коштує чистка?"))
+
+    assert result["reply_text"] == (
+        "Професійна гігієна коштує від 1800 грн. "
+        "Точна вартість залежить від обсягу роботи після огляду."
+    )
+    assert not result["reply_text"].startswith("Добрий вечір!")
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_greeting_only_first_turn_keeps_existing_reply_without_duplication():
+    processor, calendar = _build_dental_processor()
+
+    result = await processor.process(_message("Привіт"))
+
+    assert result["reply_text"] == "Вітаю! Smile Dental Clinic. Чим можемо допомогти?"
+    assert not result["reply_text"].startswith("Привіт! Вітаю!")
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 async def test_dental_greeting_with_booking_request_enters_booking_service():
     processor, calendar = _build_dental_processor()
 

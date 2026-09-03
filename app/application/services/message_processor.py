@@ -2741,6 +2741,12 @@ class MessageProcessor:
             intent=IntentType.BOOKING_REQUEST,
         )
         reply_text = self._avoid_exact_repeat(message.sender_id, reply_text)
+        reply_text = self._finalize_general_reply_text(
+            sender_id=message.sender_id,
+            user_text=message.user_message,
+            reply_text=reply_text,
+            intent=IntentType.BOOKING_REQUEST,
+        )
         self.memory_service.add_assistant_message(message.sender_id, reply_text)
         outbound_result = self.outbound_service.send_reply(
             platform=message.platform,
@@ -2772,6 +2778,12 @@ class MessageProcessor:
         )
         reply_text = self._decycle_fallback_if_needed(message.sender_id, message.user_message, reply_text)
         reply_text = self._avoid_exact_repeat(message.sender_id, reply_text)
+        reply_text = self._finalize_general_reply_text(
+            sender_id=message.sender_id,
+            user_text=message.user_message,
+            reply_text=reply_text,
+            intent=intent_for_policy,
+        )
         self.memory_service.add_assistant_message(message.sender_id, reply_text)
         outbound_result = self.outbound_service.send_reply(
             platform=message.platform,
@@ -3651,7 +3663,25 @@ class MessageProcessor:
         normalized = reply_text.lstrip()
         if language == "en":
             return normalized.startswith("Hi!") or normalized.startswith("Hello!")
-        return normalized.startswith("Привіт!") or normalized.startswith("Вітаю!")
+        return (
+            normalized.startswith("Привіт!")
+            or normalized.startswith("Вітаю!")
+            or normalized.startswith("Добрий день!")
+            or normalized.startswith("Добрий вечір!")
+        )
+
+    def _extract_greeting_acknowledgement(self, user_text: str) -> str | None:
+        normalized = " ".join(user_text.strip().lower().split())
+        greeting_patterns = [
+            (r"\b(?:добрий день|доброго дня)\b", "Добрий день!"),
+            (r"\b(?:добрий вечір|доброго вечора)\b", "Добрий вечір!"),
+            (r"\bпривіт\b", "Привіт!"),
+            (r"\bвітаю\b", "Вітаю!"),
+        ]
+        for pattern, acknowledgement in greeting_patterns:
+            if re.search(pattern, normalized):
+                return acknowledgement
+        return None
 
     def _looks_like_greeting_text(self, user_text: str) -> bool:
         normalized = " ".join(user_text.strip().lower().split())
@@ -3709,15 +3739,15 @@ class MessageProcessor:
             return reply_text
         if not self._is_first_assistant_reply(sender_id):
             return reply_text
-        if intent != IntentType.SERVICE_DESCRIPTION and not self._looks_like_greeting_text(user_text):
+        greeting_acknowledgement = self._extract_greeting_acknowledgement(user_text)
+        if not greeting_acknowledgement:
             return reply_text
 
         language = self.reply_service.detect_user_language(user_text)
-        prefix = "Привіт! "
 
         if self._has_greeting_prefix(reply_text, language):
             return reply_text
-        return f"{prefix}{reply_text}"
+        return f"{greeting_acknowledgement} {reply_text}"
 
     def _finalize_general_reply_text(
         self,
