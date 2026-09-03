@@ -3737,8 +3737,6 @@ class MessageProcessor:
     ) -> str:
         if not reply_text.strip():
             return reply_text
-        if not self._is_first_assistant_reply(sender_id):
-            return reply_text
         greeting_acknowledgement = self._extract_greeting_acknowledgement(user_text)
         if not greeting_acknowledgement:
             return reply_text
