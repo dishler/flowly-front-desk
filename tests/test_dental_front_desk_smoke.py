@@ -3171,6 +3171,40 @@ async def test_dental_human_handoff_request_is_acknowledged_without_fake_transfe
 
 
 @pytest.mark.asyncio
+async def test_dental_handoff_status_followup_does_not_route_to_pricing(monkeypatch):
+    processor, calendar = _build_dental_processor()
+    for text in [
+        "хочу поговорити з адміністратором",
+        "з’єднайте з людиною",
+        "мені треба уточнити у лікаря",
+        "вчора чекала 40 хвилин, це жах, хочу поскаржитись",
+        "0501122334 хочу щоб адміністратор розібрався з моєю скаргою",
+    ]:
+        await processor.process(_message(text))
+
+    context_before = processor.memory_service.get_context("patient-1")
+
+    def unexpected_lookup(*args, **kwargs):
+        pytest.fail("Handoff status must bypass service and pricing lookup")
+
+    monkeypatch.setattr(processor.reply_service.knowledge_service, "find_service", unexpected_lookup)
+    monkeypatch.setattr(
+        processor.reply_service, "_get_contextual_pricing_followup_reply", unexpected_lookup
+    )
+
+    result = await processor.process(_message("ви вже передали?"))
+
+    assert result["intent"] == "human_handoff_status"
+    assert result["routing_category"] == "safe_handoff"
+    assert "Не можу підтвердити" in result["reply_text"]
+    assert "адміністратор" in result["reply_text"]
+    assert processor.memory_service.get_context("patient-1") == context_before
+    assert result["booking_result"] is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "text",
     [
@@ -7152,6 +7186,53 @@ async def test_dental_pending_reschedule_curly_apostrophe_weekday_then_time_comp
     assert calendar.deleted == []
 
 
+@pytest.mark.parametrize("target_date", ["у суботу", "давайте не в п’ятницю, а в суботу"])
+async def test_dental_reschedule_other_day_restatement_preserves_existing_booking(target_date):
+    calendar = RescheduleTrackingCalendarService()
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+
+    await processor.process(_message("Хочу записатись на чистку у п'ятницю о 15"))
+    booked = await processor.process(_message("Назар 0508889900"))
+    assert booked["booking_result"]["status"] == "confirmed"
+    original = dict(processor.booking_service._get_completed_booking("patient-1"))
+
+    prompt = await processor.process(_message("можна перенести?"))
+    assert prompt["booking_result"]["status"] == "reschedule_prompt"
+    restated = await processor.process(_message("я хочу на інший день"))
+
+    assert restated["intent"] == "booking_reschedule"
+    assert restated["booking_result"]["status"] == "reschedule_prompt"
+    assert processor.memory_service.get_context("patient-1")["pending_reschedule"] is True
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert processor.booking_service._get_completed_booking("patient-1") == original
+    assert len(calendar.created) == 1
+    assert calendar.rescheduled == []
+    assert calendar.deleted == []
+
+    date = await processor.process(_message(target_date))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+    assert date["intent"] == "booking_reschedule"
+    assert pending["reschedule_pending"] is True
+    assert pending["requested_date"] == "2026-08-29"
+    assert "номер телефону" not in date["reply_text"]
+    assert processor.booking_service._get_completed_booking("patient-1") == original
+    assert calendar.rescheduled == []
+
+    moved = await processor.process(_message("о 12"))
+    completed = processor.booking_service._get_completed_booking("patient-1")
+    assert moved["booking_result"]["status"] == "rescheduled"
+    assert "номер телефону" not in moved["reply_text"]
+    assert completed == {**original, "start_dt": "2026-08-29T12:00:00+03:00"}
+    assert calendar.rescheduled == [{
+        "event_id": original["calendar_event_id"],
+        "start_dt": _kyiv_dt(2026, 8, 29, 12),
+        "duration_minutes": 30,
+    }]
+    assert len(calendar.created) == 1
+    assert calendar.deleted == []
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+
+
 async def test_dental_pending_reschedule_curly_apostrophe_faq_does_not_reschedule():
     calendar = RescheduleTrackingCalendarService()
     processor, calendar = _build_dental_processor(calendar_service=calendar)
@@ -9144,6 +9225,73 @@ async def test_dental_waiting_for_contact_accepts_only_credible_name_inputs(
     assert (result["booking_result"].get("customer_name") or pending.get("customer_name")) == expected_name
     assert (result["booking_result"].get("contact_phone") or pending.get("contact_phone")) == expected_phone
     assert len(calendar.created) == (1 if expected_phone else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correction", ["ні, мене звати Олександр", "ой, ім'я Олександр"])
+async def test_dental_explicit_name_correction_replaces_pending_and_confirmed_name(correction):
+    processor, calendar = await _processor_waiting_for_contact()
+
+    await processor.process(_message("Андрій"))
+    before = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    assert before["customer_name"] == "Андрій"
+
+    corrected = await processor.process(_message(correction))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert pending == {**before, "customer_name": "Олександр"}
+    assert "Олександр" in corrected["reply_text"]
+    assert "Андрій" not in corrected["reply_text"]
+    assert calendar.created == []
+
+    confirmed = await processor.process(_message("0507778899"))
+    completed = processor.booking_service._get_completed_booking("patient-1")
+
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert confirmed["booking_result"]["customer_name"] == "Олександр"
+    assert "Олександр" in confirmed["reply_text"]
+    assert "Андрій" not in confirmed["reply_text"]
+    assert completed["customer_name"] == "Олександр"
+    assert completed["phone"] == "0507778899"
+    assert completed["start_dt"] == before["start_dt"]
+    assert completed["current_service_id"] == before["current_service_id"]
+    assert len(calendar.created) == 1
+    assert calendar.created[0]["start_dt"] == _kyiv_dt(2026, 8, 27, 15)
+    assert "Customer name: Олександр" in calendar.created[0]["description"]
+    assert "Андрій" not in calendar.created[0]["description"]
+
+
+@pytest.mark.asyncio
+async def test_dental_phone_correction_keeps_booking_pending_until_real_name():
+    processor, calendar = await _processor_waiting_for_contact()
+
+    await processor.process(_message("0501234567"))
+    before = dict(processor.booking_service._get_pending_confirmation("patient-1"))
+    assert before["contact_phone"] == "0501234567"
+    assert before["customer_name"] is None
+
+    corrected = await processor.process(_message("ой номер неправильний, 0671234567"))
+    pending = processor.booking_service._get_pending_confirmation("patient-1")
+
+    assert corrected["booking_result"]["status"] == "waiting_for_name"
+    assert "ім’я" in corrected["reply_text"]
+    assert pending == {**before, "contact_phone": "0671234567"}
+    assert processor.booking_service._get_completed_booking("patient-1") is None
+    assert calendar.created == []
+
+    confirmed = await processor.process(_message("Софія"))
+    completed = processor.booking_service._get_completed_booking("patient-1")
+
+    assert confirmed["booking_result"]["status"] == "confirmed"
+    assert confirmed["booking_result"]["customer_name"] == "Софія"
+    assert completed["customer_name"] == "Софія"
+    assert completed["phone"] == "0671234567"
+    assert completed["start_dt"] == before["start_dt"]
+    assert completed["current_service_id"] == before["current_service_id"]
+    assert len(calendar.created) == 1
+    assert "Customer name: Софія" in calendar.created[0]["description"]
+    assert "Phone: 0671234567" in calendar.created[0]["description"]
+    assert "ой неправильний" not in calendar.created[0]["description"]
 
 
 @pytest.mark.asyncio

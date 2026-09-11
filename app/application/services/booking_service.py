@@ -1797,7 +1797,10 @@ class BookingService:
             lowered,
         ):
             return False
-        if re.match(r"(?i)^(?:мене\s+звати|моє\s+ім'?я|ім'?я)\s+\S+", normalized):
+        if re.match(
+            r"(?i)^(?:(?:ні|ой)\s*,?\s+)?(?:мене\s+звати|моє\s+ім'?я|ім'?я)\s+\S+",
+            normalized,
+        ):
             return True
         if re.match(
             r"(?i)^я\s+[A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]{2,}"
@@ -2001,6 +2004,12 @@ class BookingService:
             ]
             if explicit_words:
                 return " ".join(explicit_words)
+
+        # Phone-correction prose must not become a name after contact labels are stripped.
+        if re.search(r"\b(?:номер|телефон)\w*\b", candidate, flags=re.IGNORECASE) and re.search(
+            r"\b(?:неправильн|правильн|помил|виправ)\w*\b", candidate, flags=re.IGNORECASE
+        ):
+            return None
 
         if "?" in candidate:
             return None

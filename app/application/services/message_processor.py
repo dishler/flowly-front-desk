@@ -3459,6 +3459,20 @@ class MessageProcessor:
             return False
         if self._looks_like_fresh_booking_request(text):
             return False
+        # A bounded weekday replacement answers the reschedule prompt; its
+        # "не" must not be mistaken for unrelated residual content.
+        weekdays = "|".join(re.escape(day) for day in self.booking_service._weekday_map())
+        if re.fullmatch(
+            rf"(?:давайте\s+)?не\s+(?:в|у|на)\s+(?:{weekdays})\s*,?\s+а\s+(?:в|у|на)\s+(?:{weekdays})[.!?]?",
+            self.booking_service._normalize_booking_text(text),
+        ):
+            return True
+        # A restatement can continue the open reschedule prompt without naming a date yet.
+        if re.fullmatch(
+            r"(?:я\s+)?(?:хочу\s+)?(?:на\s+)?інший\s+день[.!?]?",
+            self._normalize_for_booking_keywords(text),
+        ):
+            return True
         if not self.booking_service._reschedule_offer_still_engaged(text):
             return False
         return not self._has_reschedule_target_residual_content(text)
@@ -3855,6 +3869,24 @@ class MessageProcessor:
         message.user_message = resolved_text
 
         self.memory_service.add_user_message(message.sender_id, message.user_message)
+
+        # Resolve a recent handoff follow-up before generic service/pricing routing.
+        if re.fullmatch(
+            r"(?:ви\s+)?вже\s+передали[?!.]*",
+            self._normalize_for_conversation_matching(message.user_message),
+        ) and any(
+            entry == f"assistant: {self._get_human_handoff_request_reply()}"
+            for entry in self.memory_service.get_history(message.sender_id)
+        ):
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=(
+                    "Не можу підтвердити, що адміністратор уже отримав ваш запит. "
+                    "Щоб уточнити його статус, зв’яжіться, будь ласка, з клінікою напряму."
+                ),
+                intent_value="human_handoff_status",
+                routing_category="safe_handoff",
+            )
 
         booking_result = None
         reply_text = ""
