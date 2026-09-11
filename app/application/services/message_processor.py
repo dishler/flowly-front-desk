@@ -2035,8 +2035,8 @@ class MessageProcessor:
 
     def _get_human_handoff_request_reply(self) -> str:
         return (
-            "Розумію. Я AI-асистент, передам ваш запит адміністратору. Залишіть, будь ласка, "
-            "ваше питання і номер телефону — наш спеціаліст незабаром повернеться до вас."
+            "Розумію. Я AI-асистент. Залишіть, будь ласка, ваше питання і номер телефону — "
+            "збережу їх у цьому діалозі. Не можу підтвердити передачу звернення адміністратору."
         )
 
     def _get_bot_identity_reply(self) -> str:
@@ -2771,6 +2771,8 @@ class MessageProcessor:
         routing_category: str = "answered_basic",
         intent_for_policy: IntentType = IntentType.GENERAL_QUESTION,
     ) -> Dict[str, Any]:
+        if intent_value == "human_handoff_request":
+            self.memory_service.update_context(message.sender_id, handoff_collecting=True)
         reply_text = self.reply_service.enforce_response_policy(
             reply_text=reply_text,
             user_text=message.user_message,
@@ -3896,14 +3898,16 @@ class MessageProcessor:
             "Не можу підтвердити, що адміністратор уже отримав ваш запит. "
             "Щоб уточнити його статус, зв’яжіться, будь ласка, з клінікою напряму."
         )
-        awaiting_complaint = self.memory_service.get_context(message.sender_id).get(
+        handoff_context = self.memory_service.get_context(message.sender_id)
+        awaiting_complaint = handoff_context.get(
             "awaiting_complaint_description"
         )
         # Resolve a recent handoff follow-up before generic service/pricing routing.
         if re.fullmatch(
             r"(?:ви\s+)?вже\s+передали(?:\s+адміністратору)?[?!.]*",
             self._normalize_for_conversation_matching(message.user_message),
-        ) and (awaiting_complaint or any(
+        ) and (awaiting_complaint or handoff_context.get("handoff_collecting")
+               or handoff_context.get("handoff_complaint") or any(
             entry in (
                 f"assistant: {self._get_human_handoff_request_reply()}",
                 f"assistant: {handoff_status_reply}",
@@ -3916,6 +3920,32 @@ class MessageProcessor:
                 intent_value="human_handoff_status",
                 routing_category="safe_handoff",
             )
+
+        if handoff_context.get("handoff_collecting"):
+            if self._looks_like_fresh_booking_request(message.user_message):
+                self.memory_service.update_context(message.sender_id, handoff_collecting=None)
+            elif not self._looks_like_human_handoff_request(message.user_message):
+                phone_match = self.booking_service.PHONE_RE.search(message.user_message)
+                phone = phone_match.group(1) if phone_match else handoff_context.get("handoff_phone")
+                description = self.booking_service.PHONE_RE.sub("", message.user_message).strip(" ,.!?")
+                complaint = description or handoff_context.get("handoff_complaint")
+                complete = bool(phone and complaint)
+                self.memory_service.update_context(
+                    message.sender_id, handoff_phone=phone, handoff_complaint=complaint,
+                    handoff_collecting=None if complete else True,
+                )
+                reply = (
+                    "Дякую. Я зберіг ваш опис скарги та номер телефону в цьому діалозі. "
+                    + handoff_status_reply
+                    if complete else (
+                        "Дякую, номер телефону збережено в цьому діалозі. Напишіть, будь ласка, коротко, що сталося."
+                        if phone else "Дякую, опис збережено в цьому діалозі. Залишіть, будь ласка, номер телефону."
+                    )
+                )
+                return self._build_direct_reply_result(
+                    message=message, reply_text=reply, intent_value="human_handoff_complaint",
+                    routing_category="safe_handoff",
+                )
 
         if awaiting_complaint:
             self.memory_service.update_context(message.sender_id, awaiting_complaint_description=None)

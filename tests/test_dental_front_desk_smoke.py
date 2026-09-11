@@ -3162,7 +3162,7 @@ async def test_dental_human_handoff_request_is_acknowledged_without_fake_transfe
     assert result["routing_category"] == "safe_handoff"
     assert "AI-асистент" in result["reply_text"]
     assert "адміністратор" in result["reply_text"]
-    assert "повернеться" in result["reply_text"]
+    assert "цьому діалозі" in result["reply_text"]
     assert "передав" not in result["reply_text"].lower()
     assert result["booking_result"] is None
     assert calendar.checked == []
@@ -3202,6 +3202,32 @@ async def test_dental_handoff_status_followup_does_not_route_to_pricing(monkeypa
     assert result["booking_result"] is None
     assert calendar.checked == []
     assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_live_handoff_retains_phone_and_complaint_without_booking():
+    processor, calendar = _build_dental_processor()
+    complaint = "Лікар запізнився і мені довелося довго чекати"
+    for text in ["Хочу поговорити з адміністратором", "0987121328", complaint,
+                 "Ви вже передали адміністратору?"]:
+        sent = len(processor.outbound_service.sent)
+        result = await processor.process(_message(text))
+        assert result["routing_category"] == "safe_handoff"
+        assert len(processor.outbound_service.sent) == sent + 1
+        assert processor.booking_service._get_pending_confirmation("patient-1") is None
+        assert calendar.checked == [] and calendar.created == []
+        assert "день і" not in result["reply_text"]
+        assert "передам" not in result["reply_text"]
+        if text == "0987121328":
+            assert processor.memory_service.get_context("patient-1")["handoff_phone"] == text
+        if text == complaint:
+            assert "зберіг" in result["reply_text"]
+            assert "цьому діалозі" in result["reply_text"]
+    context = processor.memory_service.get_context("patient-1")
+    assert context["handoff_phone"] == "0987121328"
+    assert context["handoff_complaint"] == complaint
+    assert result["intent"] == "human_handoff_status"
+    assert "Не можу підтвердити" in result["reply_text"]
 
 
 @pytest.mark.asyncio
