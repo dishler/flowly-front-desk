@@ -3553,6 +3553,28 @@ class MessageProcessor:
     def _handle_confirmed_booking_message(self, message: NormalizedMessage) -> Dict[str, Any] | None:
         language = self.reply_service.detect_user_language(message.user_message)
 
+        # These are read-only questions about the current booking, not new changes.
+        normalized = self._normalize_for_conversation_matching(message.user_message)
+        if re.fullmatch(r"точно\s+(?:ви\s+)?перенесли[?!.]*", normalized):
+            return self._build_booking_reply_result(
+                message=message,
+                reply_text=self.booking_service.get_confirmed_booking_status_reply(
+                    message.sender_id, language
+                ),
+                intent_value="booking_status_confirmed",
+            )
+        if re.fullmatch(r"який\s+номер\s+телефону\s+(?:ви\s+)?записали[?!.]*", normalized):
+            completed = self.booking_service._get_completed_booking(message.sender_id) or {}
+            phone = completed.get("phone")
+            return self._build_booking_reply_result(
+                message=message,
+                reply_text=(
+                    f"Для вашого візиту записано номер телефону: {phone}."
+                    if phone else "У вашому підтвердженому записі номер телефону не збережено."
+                ),
+                intent_value="booking_contact_status",
+            )
+
         phone_correction = self._looks_like_own_contact_phone_correction(message.user_message)
         if phone_correction is not None:
             booking_result = self.booking_service.update_confirmed_booking_phone(

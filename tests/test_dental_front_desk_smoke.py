@@ -6540,6 +6540,67 @@ class ContactUpdateTrackingCalendarService(RecordingConfiguredCalendarService):
         self.deleted.append(event_id)
 
 
+@pytest.mark.parametrize("change", ["reschedule", "phone"])
+async def test_dental_confirmation_question_after_booking_change_is_read_only(change, monkeypatch):
+    from copy import deepcopy
+
+    calendar = (
+        RescheduleTrackingCalendarService()
+        if change == "reschedule"
+        else ContactUpdateTrackingCalendarService()
+    )
+    processor, calendar = _build_dental_processor(calendar_service=calendar)
+    booked = await processor.process(_message("Назар 0508889900 хочу на чистку у п'ятницю о 15"))
+    assert booked["booking_result"]["status"] == "confirmed"
+    original = deepcopy(processor.booking_service._get_completed_booking("patient-1"))
+
+    if change == "reschedule":
+        await processor.process(_message("можна перенести?"))
+        await processor.process(_message("я хочу на інший день"))
+        await processor.process(_message("давайте не в п’ятницю, а в суботу"))
+        changed = await processor.process(_message("о 12"))
+        assert changed["booking_result"]["status"] == "rescheduled"
+        assert len(calendar.rescheduled) == 1
+        assert calendar.rescheduled[0]["event_id"] == original["calendar_event_id"]
+        question = "Точно перенесли?"
+    else:
+        changed = await processor.process(_message("ой номер неправильний, 0671234567"))
+        assert changed["booking_result"]["status"] == "contact_updated"
+        assert len(calendar.contact_updates) == 1
+        assert calendar.contact_updates[0]["event_id"] == original["calendar_event_id"]
+        question = "Який номер телефону ви записали?"
+
+    before = deepcopy(processor.booking_service._get_completed_booking("patient-1"))
+    context = processor.memory_service.get_context("patient-1")
+    assert before == {**original, **(
+        {"start_dt": "2026-08-29T12:00:00+03:00"} if change == "reschedule"
+        else {"phone": "0671234567"}
+    )}
+
+    def unexpected_calendar_call(*args, **kwargs):
+        pytest.fail("A status question must not call Calendar")
+
+    for method in ("check_specific_time_availability", "create_booking_event", "reschedule_event",
+                   "delete_event", "update_booking_contact_details"):
+        monkeypatch.setattr(calendar, method, unexpected_calendar_call, raising=False)
+
+    result = await processor.process(_message(question))
+    if change == "reschedule":
+        assert result["intent"] == "booking_status_confirmed"
+        assert "29.08" in result["reply_text"] and "12:00" in result["reply_text"]
+        assert "28.08" not in result["reply_text"]
+    else:
+        assert "0671234567" in result["reply_text"]
+        assert "0508889900" not in result["reply_text"]
+    assert processor.booking_service._get_completed_booking("patient-1") == before
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert processor.memory_service.get_context("patient-1") == {
+        key: value for key, value in context.items() if key != "pending_reschedule"
+    }
+    assert len(calendar.created) == 1
+    assert calendar.deleted == []
+
+
 async def test_dental_confirmed_booking_own_phone_correction_updates_record_and_calendar():
     """Repro class: confirmed booking -> "ой, я помилився номером, правильний
     0509998877" must update the stored completed-booking phone AND patch the
