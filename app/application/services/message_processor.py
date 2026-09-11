@@ -3892,21 +3892,52 @@ class MessageProcessor:
 
         self.memory_service.add_user_message(message.sender_id, message.user_message)
 
+        handoff_status_reply = (
+            "Не можу підтвердити, що адміністратор уже отримав ваш запит. "
+            "Щоб уточнити його статус, зв’яжіться, будь ласка, з клінікою напряму."
+        )
+        awaiting_complaint = self.memory_service.get_context(message.sender_id).get(
+            "awaiting_complaint_description"
+        )
         # Resolve a recent handoff follow-up before generic service/pricing routing.
         if re.fullmatch(
-            r"(?:ви\s+)?вже\s+передали[?!.]*",
+            r"(?:ви\s+)?вже\s+передали(?:\s+адміністратору)?[?!.]*",
             self._normalize_for_conversation_matching(message.user_message),
-        ) and any(
-            entry == f"assistant: {self._get_human_handoff_request_reply()}"
+        ) and (awaiting_complaint or any(
+            entry in (
+                f"assistant: {self._get_human_handoff_request_reply()}",
+                f"assistant: {handoff_status_reply}",
+            )
             for entry in self.memory_service.get_history(message.sender_id)
-        ):
+        )):
             return self._build_direct_reply_result(
                 message=message,
-                reply_text=(
-                    "Не можу підтвердити, що адміністратор уже отримав ваш запит. "
-                    "Щоб уточнити його статус, зв’яжіться, будь ласка, з клінікою напряму."
-                ),
+                reply_text=handoff_status_reply,
                 intent_value="human_handoff_status",
+                routing_category="safe_handoff",
+            )
+
+        if awaiting_complaint:
+            self.memory_service.update_context(message.sender_id, awaiting_complaint_description=None)
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text=handoff_status_reply,
+                intent_value="human_handoff_complaint",
+                routing_category="safe_handoff",
+            )
+
+        if re.fullmatch(
+            r"(?:я\s+)?хочу\s+залишити\s+тут\s+короткий\s+опис[.!?]*",
+            self._normalize_for_conversation_matching(message.user_message),
+        ) and any(
+            entry.startswith("assistant:") and "залишити тут короткий опис скарги" in entry.lower()
+            for entry in self.memory_service.get_history(message.sender_id)
+        ):
+            self.memory_service.update_context(message.sender_id, awaiting_complaint_description=True)
+            return self._build_direct_reply_result(
+                message=message,
+                reply_text="Звісно. Напишіть, будь ласка, коротко, що сталося.",
+                intent_value="human_handoff_complaint_prompt",
                 routing_category="safe_handoff",
             )
 

@@ -3205,6 +3205,36 @@ async def test_dental_handoff_status_followup_does_not_route_to_pricing(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_dental_complaint_description_choice_preserves_handoff():
+    processor, calendar = _build_dental_processor()
+    # The live bot offer supplied in the reproduction is the conversation precondition.
+    processor.memory_service.add_assistant_message("patient-1", (
+        "Шкода це чути. Це питання має вирішувати адміністратор. "
+        "Бажаєте записатися на зустріч з адміністратором чи залишити тут короткий опис скарги?"
+    ))
+    choice = await processor.process(_message("Я хочу залишити тут короткий опис"))
+    assert choice["reply_text"] == "Звісно. Напишіть, будь ласка, коротко, що сталося."
+    assert choice["routing_category"] == "safe_handoff"
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert processor.memory_service.get_context("patient-1")["awaiting_complaint_description"]
+
+    complaint = "Вчора чекала 40 хвилин, хоча прийшла вчасно."
+    described = await processor.process(_message(complaint))
+    assert described["routing_category"] == "safe_handoff"
+    assert "Не можу підтвердити" in described["reply_text"]
+    assert f"user: {complaint}" in processor.memory_service.get_history("patient-1")
+    assert not processor.memory_service.get_context("patient-1").get("awaiting_complaint_description")
+
+    status = await processor.process(_message("Ви вже передали адміністратору?"))
+    assert status["intent"] == "human_handoff_status"
+    assert "Не можу підтвердити" in status["reply_text"]
+    assert processor.booking_service._get_pending_confirmation("patient-1") is None
+    assert processor.booking_service._get_completed_booking("patient-1") is None
+    assert calendar.checked == []
+    assert calendar.created == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "text",
     [
