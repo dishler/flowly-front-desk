@@ -2771,6 +2771,11 @@ class MessageProcessor:
         intent_for_policy: IntentType = IntentType.GENERAL_QUESTION,
     ) -> Dict[str, Any]:
         if intent_value == "human_handoff_request":
+            if not self.memory_service.get_context(message.sender_id).get("handoff_collecting"):
+                # A new request must not complete using a previous handoff's details.
+                self.memory_service.update_context(
+                    message.sender_id, handoff_phone=None, handoff_complaint=None,
+                )
             self.memory_service.update_context(message.sender_id, handoff_collecting=True)
         reply_text = self.reply_service.enforce_response_policy(
             reply_text=reply_text,

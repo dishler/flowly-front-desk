@@ -12399,3 +12399,46 @@ async def test_dental_missing_service_continuation_still_preserves_previous_date
     assert pending["current_service_id"] == "dental_cleaning"
     assert pending["requested_date"] == "2026-08-24"
     assert calendar.created == []
+
+
+@pytest.mark.asyncio
+async def test_dental_live_handoff_restarts_with_persisted_previous_complaint():
+    from app.application.services.redis_memory_service import RedisMemoryService
+    from test_redis_memory_service import FakeRedis
+
+    redis = FakeRedis()
+    previous, _ = _build_dental_processor()
+    previous.memory_service = RedisMemoryService(redis)
+    previous.reply_service.memory_service = previous.memory_service
+    for text in ["Хочу поговорити з адміністратором", "0501112233", "Вчора довго чекала."]:
+        await previous.process(_message(text))
+    assert previous.memory_service.get_context("patient-1")["handoff_complaint"]
+
+    # A returning live sender retains Redis context even across processor restarts.
+    processor, calendar = _build_dental_processor()
+    processor.memory_service = RedisMemoryService(redis)
+    processor.reply_service.memory_service = processor.memory_service
+    complaint = "У мене є скарга щодо останнього візиту. Лікар запізнився майже на годину."
+    for i, text in enumerate([
+        "Хочу поговорити з адміністратором", "0987121328", complaint,
+        "Ви вже передали адміністратору?",
+    ]):
+        result = await processor.process(_message(text))
+        context = processor.memory_service.get_context("patient-1")
+        assert result["routing_category"] == "safe_handoff"
+        assert len(processor.outbound_service.sent) == i + 1
+        assert processor.booking_service._get_pending_confirmation("patient-1") is None
+        assert processor.booking_service._get_completed_booking("patient-1") is None
+        assert calendar.checked == [] and calendar.created == []
+        if i == 1:
+            assert context["handoff_phone"] == "0987121328"
+            assert context.get("handoff_collecting") is True
+            assert not context.get("handoff_complaint")
+            assert result["reply_text"] == "Дякую, номер збережено. Напишіть, будь ласка, коротко, що сталося."
+        if i >= 2:
+            assert context["handoff_phone"] == "0987121328"
+            assert context["handoff_complaint"] == complaint.rstrip(".")
+            assert not context.get("handoff_collecting")
+            assert "звернення зафіксовано" in result["reply_text"]
+        if i == 3:
+            assert result["intent"] == "human_handoff_status"
