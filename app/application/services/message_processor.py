@@ -2035,8 +2035,7 @@ class MessageProcessor:
 
     def _get_human_handoff_request_reply(self) -> str:
         return (
-            "Розумію. Я AI-асистент. Залишіть, будь ласка, ваше питання і номер телефону — "
-            "збережу їх у цьому діалозі. Не можу підтвердити передачу звернення адміністратору."
+            "Звісно. Залиште, будь ласка, номер телефону і коротко опишіть ваше питання."
         )
 
     def _get_bot_identity_reply(self) -> str:
@@ -3895,16 +3894,23 @@ class MessageProcessor:
         self.memory_service.add_user_message(message.sender_id, message.user_message)
 
         handoff_status_reply = (
-            "Не можу підтвердити, що адміністратор уже отримав ваш запит. "
-            "Щоб уточнити його статус, зв’яжіться, будь ласка, з клінікою напряму."
+            "Не можу підтвердити, що звернення вже зафіксовано для адміністратора. "
+            "Залиште, будь ласка, номер телефону і короткий опис вашого питання."
         )
         handoff_context = self.memory_service.get_context(message.sender_id)
+        # Demo acknowledgement only: no administrator dispatch is performed.
+        if handoff_context.get("handoff_phone") and handoff_context.get("handoff_complaint"):
+            handoff_status_reply = (
+                "Так, ваше звернення зафіксовано для адміністратора. Він незабаром зв’яжеться з вами."
+            )
         awaiting_complaint = handoff_context.get(
             "awaiting_complaint_description"
         )
         # Resolve a recent handoff follow-up before generic service/pricing routing.
         if re.fullmatch(
-            r"(?:ви\s+)?вже\s+передали(?:\s+адміністратору)?[?!.]*",
+            r"(?:(?:ви\s+)?(?:вже\s+|уже\s+)?передали(?:\s+(?:моє\s+)?(?:звернення|скаргу))?(?:\s+адміністратору)?|"
+            r"(?:моє\s+)?(?:звернення|скаргу)\s+(?:(?:вже|уже)\s+)?(?:зафіксовано|передано)(?:\s+адміністратору)?|"
+            r"адміністратор\s+(?:(?:вже|уже)\s+)?отримав\s+(?:мо[єю]\s+)?(?:звернення|скаргу))[?!.]*",
             self._normalize_for_conversation_matching(message.user_message),
         ) and (awaiting_complaint or handoff_context.get("handoff_collecting")
                or handoff_context.get("handoff_complaint") or any(
@@ -3935,10 +3941,9 @@ class MessageProcessor:
                     handoff_collecting=None if complete else True,
                 )
                 reply = (
-                    "Дякую. Я зберіг ваш опис скарги та номер телефону в цьому діалозі. "
-                    + handoff_status_reply
+                    f"Дякую, звернення зафіксовано. Адміністратор незабаром зв’яжеться з вами за номером {phone}."
                     if complete else (
-                        "Дякую, номер телефону збережено в цьому діалозі. Напишіть, будь ласка, коротко, що сталося."
+                        "Дякую, номер збережено. Напишіть, будь ласка, коротко, що сталося."
                         if phone else "Дякую, опис збережено в цьому діалозі. Залишіть, будь ласка, номер телефону."
                     )
                 )

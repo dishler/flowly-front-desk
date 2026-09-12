@@ -647,8 +647,8 @@ async def test_dental_bounded_multi_intent_explicit_admin_request_still_handoff(
     result = await processor.process(_message("привіт, дайте живу людину будь ласка"))
 
     assert result["intent"] == "human_handoff_request"
-    assert "AI-асистент" in result["reply_text"]
-    assert "адміністратор" in result["reply_text"].lower()
+    assert "номер телефону" in result["reply_text"]
+    assert "опишіть ваше питання" in result["reply_text"]
     assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
     assert calendar.checked == []
     assert calendar.created == []
@@ -3160,9 +3160,8 @@ async def test_dental_human_handoff_request_is_acknowledged_without_fake_transfe
 
     assert result["intent"] == "human_handoff_request"
     assert result["routing_category"] == "safe_handoff"
-    assert "AI-асистент" in result["reply_text"]
-    assert "адміністратор" in result["reply_text"]
-    assert "цьому діалозі" in result["reply_text"]
+    assert "номер телефону" in result["reply_text"]
+    assert "опишіть ваше питання" in result["reply_text"]
     assert "передав" not in result["reply_text"].lower()
     assert result["booking_result"] is None
     assert calendar.checked == []
@@ -3205,6 +3204,39 @@ async def test_dental_handoff_status_followup_does_not_route_to_pricing(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_question", [
+    "Ви вже передали адміністратору?", "ви вже передали?",
+    "Передали моє звернення адміністратору?", "Моє звернення вже зафіксовано?",
+    "Адміністратор уже отримав мою скаргу?",
+])
+async def test_dental_demo_handoff_exact_sequence_and_status_variants(status_question):
+    processor, calendar = _build_dental_processor()
+    complaint = "Лікар запізнився і мені довелося довго чекати"
+    sequence = [
+        ("Хочу поговорити з адміністратором", "Звісно. Залиште, будь ласка, номер телефону і коротко опишіть ваше питання."),
+        ("0987121328", "Дякую, номер збережено. Напишіть, будь ласка, коротко, що сталося."),
+        (complaint, "Дякую, звернення зафіксовано. Адміністратор незабаром зв’яжеться з вами за номером 0987121328."),
+        (status_question, "Так, ваше звернення зафіксовано для адміністратора. Він незабаром зв’яжеться з вами."),
+    ]
+    for i, (text, expected) in enumerate(sequence):
+        result = await processor.process(_message(text))
+        assert result["reply_text"] == expected
+        assert len(processor.outbound_service.sent) == i + 1
+        assert processor.booking_service._get_pending_confirmation("patient-1") is None
+        assert processor.booking_service._get_completed_booking("patient-1") is None
+        assert calendar.checked == [] and calendar.created == []
+        context = processor.memory_service.get_context("patient-1")
+        if i >= 1:
+            assert context["handoff_phone"] == "0987121328"
+        if i == 1:
+            assert not context.get("handoff_complaint")
+            assert context["handoff_collecting"] is True
+        if i >= 2:
+            assert context["handoff_complaint"] == complaint
+            assert not context.get("handoff_collecting")
+
+
+@pytest.mark.asyncio
 async def test_dental_live_handoff_retains_phone_and_complaint_without_booking():
     processor, calendar = _build_dental_processor()
     complaint = "Лікар запізнився і мені довелося довго чекати"
@@ -3221,13 +3253,12 @@ async def test_dental_live_handoff_retains_phone_and_complaint_without_booking()
         if text == "0987121328":
             assert processor.memory_service.get_context("patient-1")["handoff_phone"] == text
         if text == complaint:
-            assert "зберіг" in result["reply_text"]
-            assert "цьому діалозі" in result["reply_text"]
+            assert "звернення зафіксовано" in result["reply_text"]
     context = processor.memory_service.get_context("patient-1")
     assert context["handoff_phone"] == "0987121328"
     assert context["handoff_complaint"] == complaint
     assert result["intent"] == "human_handoff_status"
-    assert "Не можу підтвердити" in result["reply_text"]
+    assert "зафіксовано для адміністратора" in result["reply_text"]
 
 
 @pytest.mark.asyncio
@@ -3278,8 +3309,8 @@ async def test_dental_human_handoff_natural_phrase_variants(text):
 
     assert result["intent"] == "human_handoff_request"
     assert result["routing_category"] == "safe_handoff"
-    assert "AI-асистент" in result["reply_text"]
-    assert "адміністратор" in result["reply_text"]
+    assert "номер телефону" in result["reply_text"]
+    assert "опишіть ваше питання" in result["reply_text"]
     assert result["booking_result"] is None
     assert processor.booking_service.get_booking_state("patient-1") == BookingState.NONE
     assert calendar.checked == []
@@ -3303,8 +3334,8 @@ async def test_dental_human_handoff_existing_phrase_variants_still_work(text):
 
     assert result["intent"] == "human_handoff_request"
     assert result["routing_category"] == "safe_handoff"
-    assert "AI-асистент" in result["reply_text"]
-    assert "адміністратор" in result["reply_text"]
+    assert "номер телефону" in result["reply_text"]
+    assert "опишіть ваше питання" in result["reply_text"]
     assert result["booking_result"] is None
     assert calendar.checked == []
     assert calendar.created == []
@@ -12086,7 +12117,7 @@ async def test_dental_active_booking_admin_callback_request_with_date_not_treate
 
     assert result["intent"] == "booking_grounded_question"
     assert result["booking_result"] is None
-    assert "AI-асистент" in result["reply_text"]
+    assert "номер телефону" in result["reply_text"]
     assert "завтра" not in result["reply_text"].lower()
     assert "можу запропонувати" not in result["reply_text"].lower()
     assert len(calendar.checked) == checks_before
